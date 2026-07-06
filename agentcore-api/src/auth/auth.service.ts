@@ -34,8 +34,8 @@ export class AuthService {
     return this.issueAuthResponse(user);
   }
 
-  getProfile(currentUser: AuthenticatedUser): SafeUser {
-    const user = this.usersService.findById(currentUser.sub);
+  async getProfile(currentUser: AuthenticatedUser): Promise<SafeUser> {
+    const user = await this.usersService.findById(currentUser.sub);
 
     if (!user) {
       throw new UnauthorizedException('User is inactive or no longer exists');
@@ -48,7 +48,7 @@ export class AuthService {
     email: string,
     password: string,
   ): Promise<SafeUser> {
-    const user = this.usersService.findByEmail(email);
+    const user = await this.usersService.findByEmail(email);
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException('Invalid email or password');

@@ -1,8 +1,9 @@
 import { ConflictException, Injectable } from '@nestjs/common';
+import { Prisma, User as DbUser, UserRole as DbUserRole } from '@prisma/client';
 import { hash } from 'bcryptjs';
-import { randomUUID } from 'crypto';
-import { User, SafeUser } from './user.entity';
 import { UserRole } from '../common/auth/authenticated-request';
+import { PrismaService } from '../prisma/prisma.service';
+import { SafeUser, User } from './user.entity';
 
 interface CreateUserInput {
   orgId: string;
@@ -14,10 +15,14 @@ interface CreateUserInput {
 
 @Injectable()
 export class UsersService {
-  private readonly users = new Map<string, User>();
+  constructor(private readonly prisma: PrismaService) {}
 
   async onModuleInit() {
-    if (this.users.size > 0) {
+    const existingAdmin = await this.prisma.user.findUnique({
+      where: { email: 'admin@agentcore.local' },
+    });
+
+    if (existingAdmin) {
       return;
     }
 
@@ -33,37 +38,42 @@ export class UsersService {
   async create(input: CreateUserInput): Promise<SafeUser> {
     const email = this.normalizeEmail(input.email);
 
-    if (this.users.has(email)) {
-      throw new ConflictException('A user with this email already exists');
+    try {
+      const user = await this.prisma.user.create({
+        data: {
+          orgId: input.orgId,
+          email,
+          name: input.name,
+          passwordHash: await hash(input.password, 12),
+          roles: this.toDbRoles(input.roles?.length ? input.roles : ['user']),
+        },
+      });
+
+      return this.toSafeUser(user);
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException('A user with this email already exists');
+      }
+
+      throw error;
     }
-
-    const now = new Date();
-    const user: User = {
-      id: randomUUID(),
-      orgId: input.orgId,
-      email,
-      name: input.name,
-      passwordHash: await hash(input.password, 12),
-      roles: input.roles?.length ? input.roles : ['user'],
-      isActive: true,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    this.users.set(email, user);
-    return this.toSafeUser(user);
   }
 
-  findByEmail(email: string): User | undefined {
-    return this.users.get(this.normalizeEmail(email));
+  async findByEmail(email: string): Promise<User | null> {
+    return this.prisma.user.findUnique({
+      where: { email: this.normalizeEmail(email) },
+    });
   }
 
-  findById(id: string): SafeUser | undefined {
-    const user = [...this.users.values()].find((item) => item.id === id);
-    return user ? this.toSafeUser(user) : undefined;
+  async findById(id: string): Promise<SafeUser | null> {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    return user ? this.toSafeUser(user) : null;
   }
 
-  toSafeUser(user: User): SafeUser {
+  toSafeUser(user: DbUser): SafeUser {
     return {
       id: user.id,
       orgId: user.orgId,
@@ -74,6 +84,10 @@ export class UsersService {
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };
+  }
+
+  private toDbRoles(roles: UserRole[]): DbUserRole[] {
+    return roles;
   }
 
   private normalizeEmail(email: string): string {
