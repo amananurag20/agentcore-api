@@ -1,7 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import {
+  INestApplication,
+  ValidationPipe,
+  VersioningType,
+} from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
+import { createOpenApiDocument } from './../src/docs/openapi';
 import { AppModule } from './../src/app.module';
 
 interface AuthResponseBody {
@@ -21,6 +26,17 @@ interface ProfileResponseBody {
   passwordHash?: string;
 }
 
+interface OpenApiResponseBody {
+  info: {
+    title: string;
+  };
+  paths: Record<string, unknown>;
+}
+
+interface ResponseLike {
+  json(body: unknown): void;
+}
+
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
@@ -30,6 +46,11 @@ describe('AppController (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
+    app.setGlobalPrefix('api');
+    app.enableVersioning({
+      type: VersioningType.URI,
+      defaultVersion: '1',
+    });
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -37,19 +58,50 @@ describe('AppController (e2e)', () => {
         transform: true,
       }),
     );
+    const document = createOpenApiDocument(app);
+    app
+      .getHttpAdapter()
+      .get('/openapi.json', (_request: unknown, response: ResponseLike) => {
+        response.json(document);
+      });
     await app.init();
   });
 
   it('/ (GET)', () => {
     return request(app.getHttpServer())
-      .get('/')
+      .get('/api/v1')
       .expect(200)
       .expect('Hello World!');
   });
 
+  it('/health (GET) returns API and database health', () => {
+    return request(app.getHttpServer())
+      .get('/api/v1/health')
+      .expect(200)
+      .expect((response) => {
+        expect(response.body).toMatchObject({
+          status: 'ok',
+          database: 'ok',
+        });
+      });
+  });
+
+  it('/openapi.json (GET) returns the generated API schema', () => {
+    return request(app.getHttpServer())
+      .get('/openapi.json')
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as OpenApiResponseBody;
+
+        expect(body.info.title).toBe('AgentCore API');
+        expect(body.paths).toHaveProperty('/api/v1/auth/login');
+        expect(body.paths).toHaveProperty('/api/v1/health');
+      });
+  });
+
   it('/auth/login (POST) returns an access token for the seeded admin', async () => {
     const response = await request(app.getHttpServer())
-      .post('/auth/login')
+      .post('/api/v1/auth/login')
       .send({
         email: 'admin@agentcore.local',
         password: 'Admin@12345',
@@ -72,14 +124,16 @@ describe('AppController (e2e)', () => {
   });
 
   it('/auth/me (GET) returns the current user when authenticated', async () => {
-    const login = await request(app.getHttpServer()).post('/auth/login').send({
-      email: 'admin@agentcore.local',
-      password: 'Admin@12345',
-    });
+    const login = await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({
+        email: 'admin@agentcore.local',
+        password: 'Admin@12345',
+      });
     const loginBody = login.body as AuthResponseBody;
 
     return request(app.getHttpServer())
-      .get('/auth/me')
+      .get('/api/v1/auth/me')
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .expect(200)
       .expect((response) => {
@@ -91,7 +145,7 @@ describe('AppController (e2e)', () => {
   });
 
   it('/auth/me (GET) rejects anonymous requests', () => {
-    return request(app.getHttpServer()).get('/auth/me').expect(401);
+    return request(app.getHttpServer()).get('/api/v1/auth/me').expect(401);
   });
 
   afterEach(async () => {
