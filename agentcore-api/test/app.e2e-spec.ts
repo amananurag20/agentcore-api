@@ -26,6 +26,15 @@ interface ProfileResponseBody {
   passwordHash?: string;
 }
 
+interface OrganizationResponseBody {
+  id: string;
+  name: string;
+  slug: string;
+  status: string;
+  plan: string;
+  deploymentMode: string;
+}
+
 interface OpenApiResponseBody {
   info: {
     title: string;
@@ -40,7 +49,21 @@ interface ResponseLike {
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
-  beforeEach(async () => {
+  jest.setTimeout(30000);
+
+  async function loginAsAdmin(): Promise<AuthResponseBody> {
+    const login = await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({
+        email: 'admin@agentcore.local',
+        password: 'Admin@12345',
+      })
+      .expect(201);
+
+    return login.body as AuthResponseBody;
+  }
+
+  beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -96,6 +119,7 @@ describe('AppController (e2e)', () => {
         expect(body.info.title).toBe('AgentCore API');
         expect(body.paths).toHaveProperty('/api/v1/auth/login');
         expect(body.paths).toHaveProperty('/api/v1/health');
+        expect(body.paths).toHaveProperty('/api/v1/organizations/me');
       });
   });
 
@@ -124,13 +148,7 @@ describe('AppController (e2e)', () => {
   });
 
   it('/auth/me (GET) returns the current user when authenticated', async () => {
-    const login = await request(app.getHttpServer())
-      .post('/api/v1/auth/login')
-      .send({
-        email: 'admin@agentcore.local',
-        password: 'Admin@12345',
-      });
-    const loginBody = login.body as AuthResponseBody;
+    const loginBody = await loginAsAdmin();
 
     return request(app.getHttpServer())
       .get('/api/v1/auth/me')
@@ -148,7 +166,74 @@ describe('AppController (e2e)', () => {
     return request(app.getHttpServer()).get('/api/v1/auth/me').expect(401);
   });
 
-  afterEach(async () => {
+  it('/organizations/me (GET) returns the current organization', async () => {
+    const loginBody = await loginAsAdmin();
+
+    return request(app.getHttpServer())
+      .get('/api/v1/organizations/me')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as OrganizationResponseBody;
+
+        expect(body.id).toBe('org_demo');
+        expect(body.slug).toBe('demo-organization');
+        expect(body.status).toBe('active');
+      });
+  });
+
+  it('/organizations/me (PATCH) updates the current organization', async () => {
+    const loginBody = await loginAsAdmin();
+
+    return request(app.getHttpServer())
+      .patch('/api/v1/organizations/me')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: 'Demo Organization',
+        plan: 'free',
+        deploymentMode: 'saas',
+      })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as OrganizationResponseBody;
+
+        expect(body.id).toBe('org_demo');
+        expect(body.name).toBe('Demo Organization');
+        expect(body.plan).toBe('free');
+      });
+  });
+
+  it('/organizations (POST) creates and reads an organization as super admin', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/organizations')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: `E2E Organization ${suffix}`,
+        slug: `e2e-organization-${suffix}`,
+        plan: 'starter',
+        deploymentMode: 'saas',
+      })
+      .expect(201);
+
+    const createdBody = created.body as OrganizationResponseBody;
+
+    return request(app.getHttpServer())
+      .get(`/api/v1/organizations/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as OrganizationResponseBody;
+
+        expect(body.id).toBe(createdBody.id);
+        expect(body.slug).toBe(`e2e-organization-${suffix}`);
+        expect(body.plan).toBe('starter');
+      });
+  });
+
+  afterAll(async () => {
     await app.close();
   });
 });

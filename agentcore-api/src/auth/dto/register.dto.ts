@@ -20,4 +20,13 @@ export class RegisterDto {
   @IsString()
   @IsOptional()
   orgId?: string;
+
+  @ApiPropertyOptional({
+    example: 'Acme Inc',
+    description: 'Organization name to create when orgId is not provided.',
+  })
+  @IsString()
+  @MinLength(2)
+  @IsOptional()
+  orgName?: string;
 }

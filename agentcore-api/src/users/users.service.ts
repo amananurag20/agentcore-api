@@ -17,24 +17,6 @@ interface CreateUserInput {
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async onModuleInit() {
-    const existingAdmin = await this.prisma.user.findUnique({
-      where: { email: 'admin@agentcore.local' },
-    });
-
-    if (existingAdmin) {
-      return;
-    }
-
-    await this.create({
-      orgId: 'org_demo',
-      email: 'admin@agentcore.local',
-      name: 'AgentCore Admin',
-      password: 'Admin@12345',
-      roles: ['super_admin', 'org_admin'],
-    });
-  }
-
   async create(input: CreateUserInput): Promise<SafeUser> {
     const email = this.normalizeEmail(input.email);
 

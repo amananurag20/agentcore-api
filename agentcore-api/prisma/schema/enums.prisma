@@ -1,0 +1,24 @@
+enum UserRole {
+  super_admin
+  org_admin
+  agent
+  user
+}
+
+enum OrganizationStatus {
+  active
+  inactive
+  suspended
+}
+
+enum OrganizationPlan {
+  free
+  starter
+  pro
+  enterprise
+}
+
+enum DeploymentMode {
+  local
+  saas
+}

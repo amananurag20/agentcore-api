@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { compare } from 'bcryptjs';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
+import { OrganizationsService } from '../organizations/organizations.service';
 import { SafeUser } from '../users/user.entity';
 import { UsersService } from '../users/users.service';
 import { LoginDto } from './dto/login.dto';
@@ -14,6 +15,7 @@ export class AuthService {
   constructor(
     private readonly configService: ConfigService,
     private readonly jwtService: JwtService,
+    private readonly organizationsService: OrganizationsService,
     private readonly usersService: UsersService,
   ) {}
 
@@ -23,8 +25,16 @@ export class AuthService {
   }
 
   async register(input: RegisterDto): Promise<AuthResponse> {
+    const organization = input.orgId
+      ? await this.organizationsService.findById(input.orgId)
+      : await this.organizationsService.create({
+          name: input.orgName ?? `${input.name}'s Organization`,
+          plan: 'free',
+          deploymentMode: 'saas',
+        });
+
     const user = await this.usersService.create({
-      orgId: input.orgId ?? 'org_demo',
+      orgId: organization.id,
       email: input.email,
       name: input.name,
       password: input.password,

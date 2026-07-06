@@ -1,0 +1,14 @@
+model Organization {
+  id             String             @id @default(uuid())
+  name           String
+  slug           String             @unique
+  status         OrganizationStatus @default(active)
+  plan           OrganizationPlan   @default(free)
+  deploymentMode DeploymentMode     @default(saas) @map("deployment_mode")
+  users          User[]
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("organizations")
+}
