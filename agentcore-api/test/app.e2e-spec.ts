@@ -46,6 +46,22 @@ interface UserResponseBody {
   passwordHash?: string;
 }
 
+interface ProductResponseBody {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  status: string;
+}
+
+interface OrganizationProductResponseBody {
+  id: string;
+  organizationId: string;
+  status: string;
+  config: Record<string, unknown>;
+  product: ProductResponseBody;
+}
+
 interface OpenApiResponseBody {
   info: {
     title: string;
@@ -132,6 +148,8 @@ describe('AppController (e2e)', () => {
         expect(body.paths).toHaveProperty('/api/v1/health');
         expect(body.paths).toHaveProperty('/api/v1/organizations/me');
         expect(body.paths).toHaveProperty('/api/v1/users');
+        expect(body.paths).toHaveProperty('/api/v1/products');
+        expect(body.paths).toHaveProperty('/api/v1/organizations/me/products');
       });
   });
 
@@ -364,6 +382,58 @@ describe('AppController (e2e)', () => {
         roles: ['super_admin'],
       })
       .expect(403);
+  });
+
+  it('/products (GET) lists the product catalog', () => {
+    return request(app.getHttpServer())
+      .get('/api/v1/products')
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as ProductResponseBody[];
+        const keys = body.map((product) => product.key);
+
+        expect(keys).toEqual(
+          expect.arrayContaining([
+            'customer_chat',
+            'appointment_booking',
+            'whatsapp_assistant',
+            'voice_receptionist',
+          ]),
+        );
+      });
+  });
+
+  it('/organizations/me/products lists and updates current org entitlements', async () => {
+    const loginBody = await loginAsAdmin();
+
+    await request(app.getHttpServer())
+      .get('/api/v1/organizations/me/products')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as OrganizationProductResponseBody[];
+        const customerChat = body.find(
+          (item) => item.product.key === 'customer_chat',
+        );
+
+        expect(customerChat?.status).toBe('enabled');
+      });
+
+    await request(app.getHttpServer())
+      .patch('/api/v1/organizations/me/products/appointment_booking')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        status: 'enabled',
+        config: { defaultDurationMinutes: 30 },
+      })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as OrganizationProductResponseBody;
+
+        expect(body.status).toBe('enabled');
+        expect(body.product.key).toBe('appointment_booking');
+        expect(body.config).toMatchObject({ defaultDurationMinutes: 30 });
+      });
   });
 
   afterAll(async () => {

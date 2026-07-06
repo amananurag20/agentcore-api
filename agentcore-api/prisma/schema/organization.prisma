@@ -6,6 +6,7 @@ model Organization {
   plan           OrganizationPlan   @default(free)
   deploymentMode DeploymentMode     @default(saas) @map("deployment_mode")
   users          User[]
+  products       OrganizationProduct[]
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
 

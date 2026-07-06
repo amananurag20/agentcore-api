@@ -1,0 +1,30 @@
+model Product {
+  id            String                @id @default(uuid())
+  key           ProductKey            @unique
+  name          String
+  description   String
+  status        ProductStatus         @default(active)
+  organizations OrganizationProduct[]
+  createdAt     DateTime              @default(now()) @map("created_at")
+  updatedAt     DateTime              @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("products")
+}
+
+model OrganizationProduct {
+  id             String                    @id @default(uuid())
+  organizationId String                    @map("organization_id")
+  productId      String                    @map("product_id")
+  status         OrganizationProductStatus @default(disabled)
+  config         Json                      @default("{}")
+  organization   Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  product        Product                   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt      DateTime                  @default(now()) @map("created_at")
+  updatedAt      DateTime                  @updatedAt @map("updated_at")
+
+  @@unique([organizationId, productId])
+  @@index([organizationId, status])
+  @@index([productId])
+  @@map("organization_products")
+}

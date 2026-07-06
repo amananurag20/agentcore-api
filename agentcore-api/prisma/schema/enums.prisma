@@ -22,3 +22,20 @@ enum DeploymentMode {
   local
   saas
 }
+
+enum ProductKey {
+  customer_chat
+  appointment_booking
+  whatsapp_assistant
+  voice_receptionist
+}
+
+enum ProductStatus {
+  active
+  inactive
+}
+
+enum OrganizationProductStatus {
+  enabled
+  disabled
+}
