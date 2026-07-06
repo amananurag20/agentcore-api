@@ -14,6 +14,7 @@ interface AuthResponseBody {
   tokenType: 'Bearer';
   expiresIn: string;
   user: {
+    id: string;
     email: string;
     orgId: string;
     roles: string[];
@@ -33,6 +34,16 @@ interface OrganizationResponseBody {
   status: string;
   plan: string;
   deploymentMode: string;
+}
+
+interface UserResponseBody {
+  id: string;
+  orgId: string;
+  email: string;
+  name: string;
+  roles: string[];
+  isActive: boolean;
+  passwordHash?: string;
 }
 
 interface OpenApiResponseBody {
@@ -120,6 +131,7 @@ describe('AppController (e2e)', () => {
         expect(body.paths).toHaveProperty('/api/v1/auth/login');
         expect(body.paths).toHaveProperty('/api/v1/health');
         expect(body.paths).toHaveProperty('/api/v1/organizations/me');
+        expect(body.paths).toHaveProperty('/api/v1/users');
       });
   });
 
@@ -231,6 +243,127 @@ describe('AppController (e2e)', () => {
         expect(body.slug).toBe(`e2e-organization-${suffix}`);
         expect(body.plan).toBe('starter');
       });
+  });
+
+  it('/users manages organization users as super admin', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+    const email = `managed-${suffix}@agentcore.local`;
+
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/users')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: 'Managed User',
+        email,
+        password: 'StrongPassword@123',
+        orgId: 'org_demo',
+        roles: ['agent'],
+      })
+      .expect(201);
+
+    const createdBody = created.body as UserResponseBody;
+
+    expect(createdBody.email).toBe(email);
+    expect(createdBody.orgId).toBe('org_demo');
+    expect(createdBody.roles).toEqual(['agent']);
+    expect(createdBody.passwordHash).toBeUndefined();
+
+    await request(app.getHttpServer())
+      .get('/api/v1/users')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as UserResponseBody[];
+        expect(body.some((user) => user.id === createdBody.id)).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/users/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as UserResponseBody;
+        expect(body.email).toBe(email);
+      });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/users/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ name: 'Managed User Updated' })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as UserResponseBody;
+        expect(body.name).toBe('Managed User Updated');
+      });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/users/${createdBody.id}/status`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ status: 'inactive' })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as UserResponseBody;
+        expect(body.isActive).toBe(false);
+      });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/users/${createdBody.id}/roles`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ roles: ['user'] })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as UserResponseBody;
+        expect(body.roles).toEqual(['user']);
+      });
+  });
+
+  it('/users prevents self-deactivation', async () => {
+    const loginBody = await loginAsAdmin();
+
+    return request(app.getHttpServer())
+      .patch(`/api/v1/users/${loginBody.user.id}/status`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ status: 'inactive' })
+      .expect(400);
+  });
+
+  it('/users prevents org admins from assigning super_admin', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+
+    const orgAdmin = await request(app.getHttpServer())
+      .post('/api/v1/users')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: 'Org Admin',
+        email: `org-admin-${suffix}@agentcore.local`,
+        password: 'StrongPassword@123',
+        orgId: 'org_demo',
+        roles: ['org_admin'],
+      })
+      .expect(201);
+    const orgAdminBody = orgAdmin.body as UserResponseBody;
+
+    const orgAdminLogin = await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({
+        email: orgAdminBody.email,
+        password: 'StrongPassword@123',
+      })
+      .expect(201);
+    const orgAdminLoginBody = orgAdminLogin.body as AuthResponseBody;
+
+    return request(app.getHttpServer())
+      .post('/api/v1/users')
+      .set('Authorization', `Bearer ${orgAdminLoginBody.accessToken}`)
+      .send({
+        name: 'Blocked Super Admin',
+        email: `blocked-super-admin-${suffix}@agentcore.local`,
+        password: 'StrongPassword@123',
+        roles: ['super_admin'],
+      })
+      .expect(403);
   });
 
   afterAll(async () => {

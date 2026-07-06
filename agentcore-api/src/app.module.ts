@@ -9,6 +9,7 @@ import { RolesGuard } from './common/guards/roles.guard';
 import { validateEnv } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { OrganizationsModule } from './organizations/organizations.module';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { OrganizationsModule } from './organizations/organizations.module';
     AuthModule,
     HealthModule,
     OrganizationsModule,
+    UsersModule,
   ],
   controllers: [AppController],
   providers: [
