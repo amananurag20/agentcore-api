@@ -2,8 +2,10 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { CustomerChatWidgetConfig, Prisma } from '@prisma/client';
+import { createHash, randomBytes } from 'crypto';
 import { ChatService } from '../ai/chat.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import {
@@ -12,7 +14,12 @@ import {
 } from '../knowledge/knowledge.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCustomerChatConversationDto } from './dto/create-conversation.dto';
+import {
+  CreatePublicCustomerChatConversationDto,
+  SendPublicCustomerChatMessageDto,
+} from './dto/public-widget.dto';
 import { SendCustomerChatMessageDto } from './dto/send-message.dto';
+import { UpdateCustomerChatWidgetConfigDto } from './dto/update-widget-config.dto';
 
 type ConversationWithMessages = Prisma.CustomerChatConversationGetPayload<{
   include: {
@@ -157,6 +164,96 @@ export class CustomerChatService {
     return this.toConversationResponse(updatedConversation);
   }
 
+  async getWidgetConfig(currentUser: AuthenticatedUser) {
+    const config = await this.ensureWidgetConfig(currentUser.orgId);
+    return this.toWidgetConfigResponse(config);
+  }
+
+  async updateWidgetConfig(
+    currentUser: AuthenticatedUser,
+    input: UpdateCustomerChatWidgetConfigDto,
+  ) {
+    const config = await this.prisma.customerChatWidgetConfig.upsert({
+      where: { organizationId: currentUser.orgId },
+      create: {
+        organizationId: currentUser.orgId,
+        enabled: input.enabled ?? true,
+        greetingText: input.greetingText,
+        allowedDomains: input.allowedDomains,
+        settings: this.toJsonObject(input.settings),
+      },
+      update: {
+        enabled: input.enabled,
+        greetingText: input.greetingText,
+        allowedDomains: input.allowedDomains,
+        settings: input.settings
+          ? this.toJsonObject(input.settings)
+          : undefined,
+      },
+    });
+
+    return this.toWidgetConfigResponse(config);
+  }
+
+  async getPublicWidgetConfig(widgetKey: string, origin?: string) {
+    const config = await this.findEnabledWidgetConfig(widgetKey);
+    this.assertOriginAllowed(config.allowedDomains, origin);
+    await this.assertCustomerChatEnabled(config.organizationId);
+
+    return this.toPublicWidgetConfigResponse(config);
+  }
+
+  async createPublicConversation(
+    widgetKey: string,
+    input: CreatePublicCustomerChatConversationDto,
+    origin?: string,
+  ) {
+    const config = await this.findEnabledWidgetConfig(widgetKey);
+    this.assertOriginAllowed(config.allowedDomains, origin);
+    await this.assertCustomerChatEnabled(config.organizationId);
+
+    const visitorToken = this.createVisitorToken();
+    const conversation = await this.prisma.customerChatConversation.create({
+      data: {
+        organizationId: config.organizationId,
+        visitorId: input.visitorId,
+        visitorName: input.visitorName,
+        visitorEmail: input.visitorEmail,
+        visitorTokenHash: this.hashVisitorToken(visitorToken),
+        metadata: this.toJsonObject(input.metadata),
+      },
+      include: this.conversationInclude(),
+    });
+
+    return {
+      conversation: this.toConversationResponse(conversation),
+      visitorToken,
+    };
+  }
+
+  async getPublicConversation(conversationId: string, visitorToken?: string) {
+    const conversation = await this.findConversationForVisitor(
+      conversationId,
+      visitorToken,
+    );
+
+    return this.toConversationResponse(conversation);
+  }
+
+  async sendPublicMessage(
+    conversationId: string,
+    input: SendPublicCustomerChatMessageDto,
+    visitorToken?: string,
+  ) {
+    const conversation = await this.findConversationForVisitor(
+      conversationId,
+      visitorToken,
+    );
+    const publicUser = this.createSystemUser(conversation.organizationId);
+
+    return this.sendMessage(publicUser, conversation.id, input);
+  }
+
   private async findConversationForActor(
     currentUser: AuthenticatedUser,
     id: string,
@@ -178,6 +275,52 @@ export class CustomerChatService {
     }
 
     return conversation;
+  }
+
+  private async findConversationForVisitor(
+    id: string,
+    visitorToken?: string,
+  ): Promise<ConversationWithMessages> {
+    if (!visitorToken) {
+      throw new UnauthorizedException('Visitor token is required');
+    }
+
+    const conversation = await this.prisma.customerChatConversation.findUnique({
+      where: { id },
+      include: this.conversationInclude(),
+    });
+
+    if (!conversation?.visitorTokenHash) {
+      throw new NotFoundException('Customer chat conversation not found');
+    }
+
+    if (conversation.visitorTokenHash !== this.hashVisitorToken(visitorToken)) {
+      throw new UnauthorizedException('Invalid visitor token');
+    }
+
+    return conversation;
+  }
+
+  private async ensureWidgetConfig(organizationId: string) {
+    await this.assertCustomerChatEnabled(organizationId);
+
+    return this.prisma.customerChatWidgetConfig.upsert({
+      where: { organizationId },
+      create: { organizationId },
+      update: {},
+    });
+  }
+
+  private async findEnabledWidgetConfig(widgetKey: string) {
+    const config = await this.prisma.customerChatWidgetConfig.findUnique({
+      where: { widgetKey },
+    });
+
+    if (!config?.enabled) {
+      throw new NotFoundException('Customer chat widget not found');
+    }
+
+    return config;
   }
 
   private async assertCustomerChatEnabled(organizationId: string) {
@@ -227,6 +370,26 @@ export class CustomerChatService {
     };
   }
 
+  private toWidgetConfigResponse(config: CustomerChatWidgetConfig) {
+    return {
+      organizationId: config.organizationId,
+      widgetKey: config.widgetKey,
+      enabled: config.enabled,
+      greetingText: config.greetingText,
+      allowedDomains: config.allowedDomains,
+      settings: this.toRecord(config.settings),
+    };
+  }
+
+  private toPublicWidgetConfigResponse(config: CustomerChatWidgetConfig) {
+    return {
+      widgetKey: config.widgetKey,
+      enabled: config.enabled,
+      greetingText: config.greetingText,
+      settings: this.toRecord(config.settings),
+    };
+  }
+
   private toConversationResponse(conversation: ConversationWithMessages) {
     return {
       ...conversation,
@@ -272,6 +435,42 @@ export class CustomerChatService {
     }
 
     return value;
+  }
+
+  private assertOriginAllowed(allowedDomains: string[], origin?: string) {
+    if (!allowedDomains.length) {
+      return;
+    }
+
+    if (!origin) {
+      throw new ForbiddenException('Request origin is not allowed');
+    }
+
+    const normalizedOrigin = origin.replace(/\/+$/, '').toLowerCase();
+    const isAllowed = allowedDomains.some(
+      (domain) => domain.replace(/\/+$/, '').toLowerCase() === normalizedOrigin,
+    );
+
+    if (!isAllowed) {
+      throw new ForbiddenException('Request origin is not allowed');
+    }
+  }
+
+  private createVisitorToken(): string {
+    return randomBytes(32).toString('base64url');
+  }
+
+  private hashVisitorToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  private createSystemUser(organizationId: string): AuthenticatedUser {
+    return {
+      sub: 'public-widget',
+      email: 'public-widget@agentcore.local',
+      orgId: organizationId,
+      roles: ['user'],
+    };
   }
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {

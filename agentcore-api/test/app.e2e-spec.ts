@@ -153,6 +153,20 @@ interface CustomerChatSendMessageResponseBody {
   assistantMessage: CustomerChatMessageResponseBody;
 }
 
+interface CustomerChatWidgetConfigResponseBody {
+  organizationId?: string;
+  widgetKey: string;
+  enabled: boolean;
+  greetingText: string;
+  allowedDomains?: string[];
+  settings: Record<string, unknown>;
+}
+
+interface PublicCustomerChatConversationCreatedBody {
+  conversation: CustomerChatConversationResponseBody;
+  visitorToken: string;
+}
+
 interface OpenApiResponseBody {
   info: {
     title: string;
@@ -261,6 +275,21 @@ describe('AppController (e2e)', () => {
         );
         expect(body.paths).toHaveProperty(
           '/api/v1/customer-chat/conversations/{id}/handoff',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/widget-config',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/widget/{widgetKey}/config',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/widget/{widgetKey}/conversations',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/widget/conversations/{id}',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/widget/conversations/{id}/messages',
         );
       });
   });
@@ -848,6 +877,113 @@ describe('AppController (e2e)', () => {
 
         expect(body.status).toBe('waiting_for_agent');
       });
+  });
+
+  it('/customer-chat/widget supports public visitor conversations', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+    const allowedOrigin = `https://widget-${suffix}.example.com`;
+    const rawText = `E2E widget support ${suffix}: widget visitors can get help from 8am to 4pm.`;
+
+    const source = await request(app.getHttpServer())
+      .post('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        type: 'text',
+        name: `E2E Widget Knowledge ${suffix}`,
+        rawText,
+      })
+      .expect(201);
+    const sourceBody = source.body as KnowledgeSourceResponseBody;
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/knowledge/sources/${sourceBody.id}/ingest`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(201);
+
+    const config = await request(app.getHttpServer())
+      .patch('/api/v1/customer-chat/widget-config')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        enabled: true,
+        greetingText: `Hello widget ${suffix}`,
+        allowedDomains: [allowedOrigin],
+        settings: { primaryColor: '#111827' },
+      })
+      .expect(200);
+    const configBody = config.body as CustomerChatWidgetConfigResponseBody;
+
+    expect(configBody.widgetKey).toEqual(expect.any(String));
+    expect(configBody.allowedDomains).toContain(allowedOrigin);
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/customer-chat/widget/${configBody.widgetKey}/config`)
+      .set('Origin', allowedOrigin)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as CustomerChatWidgetConfigResponseBody;
+
+        expect(body.greetingText).toBe(`Hello widget ${suffix}`);
+        expect(body.allowedDomains).toBeUndefined();
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/customer-chat/widget/${configBody.widgetKey}/config`)
+      .set('Origin', 'https://blocked.example.com')
+      .expect(403);
+
+    const created = await request(app.getHttpServer())
+      .post(
+        `/api/v1/customer-chat/widget/${configBody.widgetKey}/conversations`,
+      )
+      .set('Origin', allowedOrigin)
+      .send({
+        visitorId: `public-${suffix}`,
+        visitorName: 'Public Visitor',
+      })
+      .expect(201);
+    const createdBody =
+      created.body as PublicCustomerChatConversationCreatedBody;
+
+    expect(createdBody.visitorToken).toEqual(expect.any(String));
+    expect(createdBody.conversation.messages).toHaveLength(0);
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}/messages`,
+      )
+      .set('x-visitor-token', createdBody.visitorToken)
+      .send({ content: 'When can widget visitors get help?' })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as CustomerChatSendMessageResponseBody;
+
+        expect(body.assistantMessage.content).toContain(
+          'widget visitors can get help',
+        );
+        expect(body.assistantMessage.citations.length).toBeGreaterThanOrEqual(
+          1,
+        );
+      });
+
+    await request(app.getHttpServer())
+      .get(
+        `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}`,
+      )
+      .set('x-visitor-token', createdBody.visitorToken)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as CustomerChatConversationResponseBody;
+
+        expect(body.messages).toHaveLength(2);
+      });
+
+    await request(app.getHttpServer())
+      .get(
+        `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}`,
+      )
+      .set('x-visitor-token', 'wrong-token')
+      .expect(401);
   });
 
   afterAll(async () => {

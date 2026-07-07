@@ -73,3 +73,31 @@ export class CustomerChatSendMessageResponseDto {
   @ApiProperty({ type: CustomerChatMessageDto })
   assistantMessage: CustomerChatMessageDto;
 }
+
+export class CustomerChatWidgetConfigDto {
+  @ApiProperty({ example: 'org_demo' })
+  organizationId: string;
+
+  @ApiProperty({ example: 'a6f7961d-cf93-47c4-a0fe-9238a0b2f729' })
+  widgetKey: string;
+
+  @ApiProperty({ example: true })
+  enabled: boolean;
+
+  @ApiProperty({ example: 'Hi! How can I help you today?' })
+  greetingText: string;
+
+  @ApiProperty({ example: ['https://example.com'], isArray: true })
+  allowedDomains: string[];
+
+  @ApiProperty({ example: {} })
+  settings: Record<string, unknown>;
+}
+
+export class PublicCustomerChatConversationCreatedDto {
+  @ApiProperty({ type: CustomerChatConversationDto })
+  conversation: CustomerChatConversationDto;
+
+  @ApiProperty({ example: 'visitor-session-token' })
+  visitorToken: string;
+}

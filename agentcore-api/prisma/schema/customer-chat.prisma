@@ -6,6 +6,7 @@ model CustomerChatConversation {
   visitorId      String?                        @map("visitor_id")
   visitorName    String?                        @map("visitor_name")
   visitorEmail   String?                        @map("visitor_email")
+  visitorTokenHash String?                      @map("visitor_token_hash")
   metadata       Json                           @default("{}")
   messages       CustomerChatMessage[]
   createdAt      DateTime                       @default(now()) @map("created_at")
@@ -13,7 +14,24 @@ model CustomerChatConversation {
 
   @@index([organizationId, status])
   @@index([visitorId])
+  @@index([visitorTokenHash])
   @@map("customer_chat_conversations")
+}
+
+model CustomerChatWidgetConfig {
+  id             String       @id @default(uuid())
+  organizationId String       @unique @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  widgetKey      String       @unique @default(uuid()) @map("widget_key")
+  enabled        Boolean      @default(true)
+  greetingText   String       @default("Hi! How can I help you today?") @map("greeting_text")
+  allowedDomains String[]     @default([]) @map("allowed_domains")
+  settings       Json         @default("{}")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  @@index([enabled])
+  @@map("customer_chat_widget_configs")
 }
 
 model CustomerChatMessage {
