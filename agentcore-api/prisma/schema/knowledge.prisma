@@ -63,6 +63,7 @@ model KnowledgeChunk {
   embeddingProvider AIProviderType? @map("embedding_provider")
   embeddedAt     DateTime?          @map("embedded_at")
   metadata       Json               @default("{}")
+  customerChatCitations CustomerChatCitation[]
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
 

@@ -1,0 +1,48 @@
+model CustomerChatConversation {
+  id             String                         @id @default(uuid())
+  organizationId String                         @map("organization_id")
+  organization   Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  status         CustomerChatConversationStatus @default(open)
+  visitorId      String?                        @map("visitor_id")
+  visitorName    String?                        @map("visitor_name")
+  visitorEmail   String?                        @map("visitor_email")
+  metadata       Json                           @default("{}")
+  messages       CustomerChatMessage[]
+  createdAt      DateTime                       @default(now()) @map("created_at")
+  updatedAt      DateTime                       @updatedAt @map("updated_at")
+
+  @@index([organizationId, status])
+  @@index([visitorId])
+  @@map("customer_chat_conversations")
+}
+
+model CustomerChatMessage {
+  id             String                    @id @default(uuid())
+  organizationId String                    @map("organization_id")
+  organization   Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversationId String                    @map("conversation_id")
+  conversation   CustomerChatConversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           CustomerChatMessageRole
+  content        String
+  metadata       Json                      @default("{}")
+  citations      CustomerChatCitation[]
+  createdAt      DateTime                  @default(now()) @map("created_at")
+
+  @@index([organizationId])
+  @@index([conversationId, createdAt])
+  @@map("customer_chat_messages")
+}
+
+model CustomerChatCitation {
+  id        String              @id @default(uuid())
+  messageId String              @map("message_id")
+  message   CustomerChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  chunkId   String              @map("chunk_id")
+  chunk     KnowledgeChunk      @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+  score     Float
+  createdAt DateTime            @default(now()) @map("created_at")
+
+  @@index([messageId])
+  @@index([chunkId])
+  @@map("customer_chat_citations")
+}

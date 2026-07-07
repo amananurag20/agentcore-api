@@ -10,5 +10,6 @@ import { KnowledgeService } from './knowledge.service';
   imports: [AIModule, KnowledgeIngestionModule, PrismaModule, StorageModule],
   controllers: [KnowledgeController],
   providers: [KnowledgeService],
+  exports: [KnowledgeService],
 })
 export class KnowledgeModule {}

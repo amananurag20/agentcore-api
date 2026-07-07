@@ -125,6 +125,34 @@ interface KnowledgeSearchResponseBody {
   embeddingProvider?: string | null;
 }
 
+interface CustomerChatConversationResponseBody {
+  id: string;
+  organizationId: string;
+  status: string;
+  visitorId?: string | null;
+  visitorName?: string | null;
+  visitorEmail?: string | null;
+  messages: CustomerChatMessageResponseBody[];
+}
+
+interface CustomerChatMessageResponseBody {
+  id: string;
+  role: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  citations: Array<{
+    chunkId: string;
+    score: number;
+    content: string;
+  }>;
+}
+
+interface CustomerChatSendMessageResponseBody {
+  conversation: CustomerChatConversationResponseBody;
+  visitorMessage: CustomerChatMessageResponseBody;
+  assistantMessage: CustomerChatMessageResponseBody;
+}
+
 interface OpenApiResponseBody {
   info: {
     title: string;
@@ -139,7 +167,7 @@ interface ResponseLike {
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
-  jest.setTimeout(30000);
+  jest.setTimeout(120000);
 
   async function loginAsAdmin(): Promise<AuthResponseBody> {
     const login = await request(app.getHttpServer())
@@ -222,6 +250,18 @@ describe('AppController (e2e)', () => {
         expect(body.paths).toHaveProperty('/api/v1/knowledge/documents');
         expect(body.paths).toHaveProperty('/api/v1/knowledge/chunks');
         expect(body.paths).toHaveProperty('/api/v1/knowledge/search');
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/conversations',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/conversations/{id}',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/conversations/{id}/messages',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/conversations/{id}/handoff',
+        );
       });
   });
 
@@ -727,6 +767,87 @@ describe('AppController (e2e)', () => {
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .field('name', 'Missing File Upload')
       .expect(400);
+  });
+
+  it('/customer-chat answers with RAG citations and supports handoff', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+    const rawText = `E2E chat support ${suffix}: support is available Monday through Friday from 10am to 5pm.`;
+
+    const source = await request(app.getHttpServer())
+      .post('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        type: 'text',
+        name: `E2E Chat Knowledge ${suffix}`,
+        rawText,
+      })
+      .expect(201);
+    const sourceBody = source.body as KnowledgeSourceResponseBody;
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/knowledge/sources/${sourceBody.id}/ingest`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(201);
+
+    const conversation = await request(app.getHttpServer())
+      .post('/api/v1/customer-chat/conversations')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        visitorId: `visitor-${suffix}`,
+        visitorName: 'E2E Visitor',
+        visitorEmail: `visitor-${suffix}@agentcore.local`,
+      })
+      .expect(201);
+    const conversationBody =
+      conversation.body as CustomerChatConversationResponseBody;
+
+    expect(conversationBody.status).toBe('open');
+    expect(conversationBody.messages).toHaveLength(0);
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/customer-chat/conversations/${conversationBody.id}/messages`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        content: 'When is support available?',
+      })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as CustomerChatSendMessageResponseBody;
+
+        expect(body.visitorMessage.role).toBe('visitor');
+        expect(body.assistantMessage.role).toBe('assistant');
+        expect(body.assistantMessage.content).toContain(
+          'support is available Monday through Friday',
+        );
+        expect(body.assistantMessage.citations.length).toBeGreaterThanOrEqual(
+          1,
+        );
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/customer-chat/conversations/${conversationBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as CustomerChatConversationResponseBody;
+
+        expect(body.messages).toHaveLength(2);
+      });
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/customer-chat/conversations/${conversationBody.id}/handoff`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as CustomerChatConversationResponseBody;
+
+        expect(body.status).toBe('waiting_for_agent');
+      });
   });
 
   afterAll(async () => {

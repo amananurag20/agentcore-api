@@ -8,6 +8,7 @@ import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { validateEnv } from './config/env.validation';
+import { CustomerChatModule } from './customer-chat/customer-chat.module';
 import { HealthModule } from './health/health.module';
 import { KnowledgeModule } from './knowledge/knowledge.module';
 import { OrganizationsModule } from './organizations/organizations.module';
@@ -23,6 +24,7 @@ import { UsersModule } from './users/users.module';
     }),
     AIProvidersModule,
     AuthModule,
+    CustomerChatModule,
     HealthModule,
     KnowledgeModule,
     OrganizationsModule,

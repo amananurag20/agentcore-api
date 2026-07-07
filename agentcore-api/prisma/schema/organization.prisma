@@ -11,6 +11,8 @@ model Organization {
   knowledgeSources KnowledgeSource[]
   knowledgeDocuments KnowledgeDocument[]
   knowledgeChunks KnowledgeChunk[]
+  customerChatConversations CustomerChatConversation[]
+  customerChatMessages CustomerChatMessage[]
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
 

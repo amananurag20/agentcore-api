@@ -98,6 +98,10 @@ class EnvironmentVariables {
   @Max(4096)
   @IsOptional()
   DEFAULT_EMBEDDING_DIMENSIONS = 1536;
+
+  @IsString()
+  @IsOptional()
+  DEFAULT_CHAT_MODEL?: string;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

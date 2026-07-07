@@ -71,3 +71,16 @@ enum StorageProvider {
   r2
   minio
 }
+
+enum CustomerChatConversationStatus {
+  open
+  waiting_for_agent
+  closed
+}
+
+enum CustomerChatMessageRole {
+  visitor
+  assistant
+  agent
+  system
+}
