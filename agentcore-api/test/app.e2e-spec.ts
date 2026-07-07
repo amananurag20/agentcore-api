@@ -83,6 +83,11 @@ interface KnowledgeSourceResponseBody {
   type: string;
   status: string;
   name: string;
+  storageProvider?: string | null;
+  storageBucket?: string | null;
+  storageKey?: string | null;
+  fileSizeBytes?: number | null;
+  checksumSha256?: string | null;
   rawText?: string | null;
   metadata: Record<string, unknown>;
 }
@@ -186,6 +191,7 @@ describe('AppController (e2e)', () => {
         expect(body.paths).toHaveProperty('/api/v1/organizations/me/products');
         expect(body.paths).toHaveProperty('/api/v1/ai/providers');
         expect(body.paths).toHaveProperty('/api/v1/knowledge/sources');
+        expect(body.paths).toHaveProperty('/api/v1/knowledge/sources/upload');
         expect(body.paths).toHaveProperty('/api/v1/knowledge/documents');
       });
   });
@@ -631,6 +637,16 @@ describe('AppController (e2e)', () => {
       .get(`/api/v1/knowledge/sources/${createdBody.id}`)
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .expect(404);
+  });
+
+  it('/knowledge/sources/upload requires a file', async () => {
+    const loginBody = await loginAsAdmin();
+
+    return request(app.getHttpServer())
+      .post('/api/v1/knowledge/sources/upload')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .field('name', 'Missing File Upload')
+      .expect(400);
   });
 
   afterAll(async () => {

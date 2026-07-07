@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -6,11 +7,17 @@ import {
 import { KnowledgeDocument, KnowledgeSource, Prisma } from '@prisma/client';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { PrismaService } from '../prisma/prisma.service';
+import { S3StorageService } from '../storage/s3-storage.service';
 import { CreateKnowledgeSourceDto } from './dto/create-knowledge-source.dto';
 import { UpdateKnowledgeSourceDto } from './dto/update-knowledge-source.dto';
+import { UploadKnowledgeFileDto } from './dto/upload-knowledge-file.dto';
 
-type SafeKnowledgeSource = Omit<KnowledgeSource, 'metadata'> & {
+type SafeKnowledgeSource = Omit<
+  KnowledgeSource,
+  'metadata' | 'fileSizeBytes'
+> & {
   metadata: Record<string, unknown>;
+  fileSizeBytes: number | null;
 };
 
 type SafeKnowledgeDocument = Omit<KnowledgeDocument, 'metadata'> & {
@@ -19,7 +26,10 @@ type SafeKnowledgeDocument = Omit<KnowledgeDocument, 'metadata'> & {
 
 @Injectable()
 export class KnowledgeService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storageService: S3StorageService,
+  ) {}
 
   async listSources(
     currentUser: AuthenticatedUser,
@@ -72,6 +82,45 @@ export class KnowledgeService {
       }
 
       return createdSource;
+    });
+
+    return this.toSafeSource(source);
+  }
+
+  async uploadFileSource(
+    currentUser: AuthenticatedUser,
+    input: UploadKnowledgeFileDto,
+    file?: Express.Multer.File,
+  ): Promise<SafeKnowledgeSource> {
+    if (!file) {
+      throw new BadRequestException('File is required');
+    }
+
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    const metadata = this.parseMetadata(input.metadata);
+    const storedObject = await this.storageService.uploadKnowledgeFile({
+      organizationId,
+      file,
+    });
+
+    const source = await this.prisma.knowledgeSource.create({
+      data: {
+        organizationId,
+        type: 'uploaded_file',
+        status: 'pending',
+        name: input.name,
+        fileName: file.originalname,
+        mimeType: file.mimetype,
+        storageProvider: storedObject.provider,
+        storageBucket: storedObject.bucket,
+        storageKey: storedObject.key,
+        fileSizeBytes: storedObject.sizeBytes,
+        checksumSha256: storedObject.checksumSha256,
+        metadata: this.toJsonObject(metadata),
+      },
     });
 
     return this.toSafeSource(source);
@@ -191,6 +240,7 @@ export class KnowledgeService {
   private toSafeSource(source: KnowledgeSource): SafeKnowledgeSource {
     return {
       ...source,
+      fileSizeBytes: source.fileSizeBytes ? Number(source.fileSizeBytes) : null,
       metadata: this.toRecord(source.metadata),
     };
   }
@@ -214,6 +264,24 @@ export class KnowledgeService {
     }
 
     return value;
+  }
+
+  private parseMetadata(value?: string): Record<string, unknown> {
+    if (!value) {
+      return {};
+    }
+
+    try {
+      const parsed = JSON.parse(value) as unknown;
+
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+        throw new Error('Metadata must be a JSON object');
+      }
+
+      return parsed as Record<string, unknown>;
+    } catch {
+      throw new BadRequestException('metadata must be a valid JSON object');
+    }
   }
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {

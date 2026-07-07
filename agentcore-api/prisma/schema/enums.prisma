@@ -65,3 +65,9 @@ enum KnowledgeSourceStatus {
   ready
   failed
 }
+
+enum StorageProvider {
+  s3
+  r2
+  minio
+}

@@ -31,6 +31,25 @@ export class KnowledgeSourceResponseDto {
   @ApiPropertyOptional({ example: 'application/pdf' })
   mimeType?: string | null;
 
+  @ApiPropertyOptional({ enum: ['s3', 'r2', 'minio'], example: 's3' })
+  storageProvider?: 's3' | 'r2' | 'minio' | null;
+
+  @ApiPropertyOptional({ example: 'agentcore-knowledge' })
+  storageBucket?: string | null;
+
+  @ApiPropertyOptional({
+    example: 'knowledge/org_demo/abc123-menu.pdf',
+  })
+  storageKey?: string | null;
+
+  @ApiPropertyOptional({ example: 248192 })
+  fileSizeBytes?: number | null;
+
+  @ApiPropertyOptional({
+    example: '94f6f6b6f0e5ed7f958b94f4a9d8d508f003c41d',
+  })
+  checksumSha256?: string | null;
+
   @ApiPropertyOptional({ example: 'Business hours are 9am to 6pm.' })
   rawText?: string | null;
 

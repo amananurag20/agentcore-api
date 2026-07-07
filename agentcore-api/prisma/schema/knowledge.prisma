@@ -8,6 +8,11 @@ model KnowledgeSource {
   url            String?
   fileName       String?               @map("file_name")
   mimeType       String?               @map("mime_type")
+  storageProvider StorageProvider?     @map("storage_provider")
+  storageBucket  String?               @map("storage_bucket")
+  storageKey     String?               @map("storage_key")
+  fileSizeBytes  BigInt?               @map("file_size_bytes")
+  checksumSha256 String?               @map("checksum_sha256")
   rawText        String?               @map("raw_text")
   metadata       Json                  @default("{}")
   errorMessage   String?               @map("error_message")

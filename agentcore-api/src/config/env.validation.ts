@@ -1,6 +1,8 @@
 import { plainToInstance, Transform } from 'class-transformer';
 import {
+  IsBoolean,
   IsInt,
+  IsOptional,
   IsString,
   Max,
   Min,
@@ -30,6 +32,46 @@ class EnvironmentVariables {
   @IsString()
   @MinLength(32)
   AI_CONFIG_ENCRYPTION_KEY: string;
+
+  @IsString()
+  @IsOptional()
+  S3_STORAGE_PROVIDER?: 's3' | 'r2' | 'minio';
+
+  @IsString()
+  @IsOptional()
+  S3_REGION?: string;
+
+  @IsString()
+  @IsOptional()
+  S3_BUCKET?: string;
+
+  @IsString()
+  @IsOptional()
+  S3_ENDPOINT?: string;
+
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  @IsOptional()
+  S3_FORCE_PATH_STYLE?: boolean;
+
+  @IsString()
+  @IsOptional()
+  S3_ACCESS_KEY_ID?: string;
+
+  @IsString()
+  @IsOptional()
+  S3_SECRET_ACCESS_KEY?: string;
+
+  @IsString()
+  @IsOptional()
+  S3_UPLOAD_PREFIX?: string;
+
+  @Transform(({ value }) => Number(value ?? 25))
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  MAX_UPLOAD_FILE_SIZE_MB = 25;
 }
 
 export function validateEnv(config: Record<string, unknown>) {
