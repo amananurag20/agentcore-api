@@ -72,6 +72,21 @@ class EnvironmentVariables {
   @Max(100)
   @IsOptional()
   MAX_UPLOAD_FILE_SIZE_MB = 25;
+
+  @IsString()
+  @IsOptional()
+  REDIS_URL?: string;
+
+  @IsString()
+  @IsOptional()
+  QUEUE_PREFIX?: string;
+
+  @Transform(({ value }) => Number(value ?? 2))
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  @IsOptional()
+  KNOWLEDGE_INGESTION_QUEUE_CONCURRENCY = 2;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

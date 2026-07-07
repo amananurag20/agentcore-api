@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { KnowledgeDocument, KnowledgeSource, Prisma } from '@prisma/client';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
+import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { S3StorageService } from '../storage/s3-storage.service';
 import { CreateKnowledgeSourceDto } from './dto/create-knowledge-source.dto';
@@ -27,6 +28,7 @@ type SafeKnowledgeDocument = Omit<KnowledgeDocument, 'metadata'> & {
 @Injectable()
 export class KnowledgeService {
   constructor(
+    private readonly ingestionQueueService: KnowledgeIngestionQueueService,
     private readonly prisma: PrismaService,
     private readonly storageService: S3StorageService,
   ) {}
@@ -84,6 +86,8 @@ export class KnowledgeService {
       return createdSource;
     });
 
+    await this.enqueueIngestion(source, 'source_created');
+
     return this.toSafeSource(source);
   }
 
@@ -122,6 +126,8 @@ export class KnowledgeService {
         metadata: this.toJsonObject(metadata),
       },
     });
+
+    await this.enqueueIngestion(source, 'file_uploaded');
 
     return this.toSafeSource(source);
   }
@@ -264,6 +270,17 @@ export class KnowledgeService {
     }
 
     return value;
+  }
+
+  private async enqueueIngestion(
+    source: KnowledgeSource,
+    reason: 'source_created' | 'file_uploaded',
+  ) {
+    await this.ingestionQueueService.enqueue({
+      organizationId: source.organizationId,
+      sourceId: source.id,
+      reason,
+    });
   }
 
   private parseMetadata(value?: string): Record<string, unknown> {
