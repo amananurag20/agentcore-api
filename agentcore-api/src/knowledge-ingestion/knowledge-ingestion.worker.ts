@@ -6,12 +6,12 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConnectionOptions, Job, Worker } from 'bullmq';
-import { PrismaService } from '../prisma/prisma.service';
 import {
   KNOWLEDGE_INGESTION_JOB,
   KNOWLEDGE_INGESTION_QUEUE,
 } from '../queue/queue.constants';
 import { parseRedisConnection } from '../queue/redis-connection';
+import { KnowledgeIngestionService } from './knowledge-ingestion.service';
 import { KnowledgeIngestionJobData } from './knowledge-ingestion.types';
 
 @Injectable()
@@ -22,7 +22,7 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly configService: ConfigService,
-    private readonly prisma: PrismaService,
+    private readonly ingestionService: KnowledgeIngestionService,
   ) {}
 
   onModuleInit() {
@@ -63,19 +63,8 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    await this.prisma.knowledgeSource.update({
-      where: { id: job.data.sourceId },
-      data: {
-        status: 'processing',
-        metadata: {
-          ingestionQueuedAt: new Date().toISOString(),
-          ingestionReason: job.data.reason,
-        },
-      },
-    });
+    await this.ingestionService.ingestSource(job.data);
 
-    this.logger.log(
-      `Prepared knowledge source ${job.data.sourceId} for ingestion`,
-    );
+    this.logger.log(`Ingested knowledge source ${job.data.sourceId}`);
   }
 }

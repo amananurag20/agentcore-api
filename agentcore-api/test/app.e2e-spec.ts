@@ -101,6 +101,18 @@ interface KnowledgeDocumentResponseBody {
   metadata: Record<string, unknown>;
 }
 
+interface KnowledgeChunkResponseBody {
+  id: string;
+  organizationId: string;
+  sourceId?: string | null;
+  documentId: string;
+  chunkIndex: number;
+  content: string;
+  charCount: number;
+  tokenEstimate: number;
+  metadata: Record<string, unknown>;
+}
+
 interface OpenApiResponseBody {
   info: {
     title: string;
@@ -192,7 +204,11 @@ describe('AppController (e2e)', () => {
         expect(body.paths).toHaveProperty('/api/v1/ai/providers');
         expect(body.paths).toHaveProperty('/api/v1/knowledge/sources');
         expect(body.paths).toHaveProperty('/api/v1/knowledge/sources/upload');
+        expect(body.paths).toHaveProperty(
+          '/api/v1/knowledge/sources/{id}/ingest',
+        );
         expect(body.paths).toHaveProperty('/api/v1/knowledge/documents');
+        expect(body.paths).toHaveProperty('/api/v1/knowledge/chunks');
       });
   });
 
@@ -576,9 +592,19 @@ describe('AppController (e2e)', () => {
 
     expect(createdBody.organizationId).toBe('org_demo');
     expect(createdBody.type).toBe('text');
-    expect(createdBody.status).toBe('ready');
+    expect(['pending', 'ready']).toContain(createdBody.status);
     expect(createdBody.rawText).toBe(rawText);
     expect(createdBody.metadata).toMatchObject({ locale: 'en' });
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/knowledge/sources/${createdBody.id}/ingest`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as KnowledgeSourceResponseBody;
+
+        expect(body.status).toBe('ready');
+      });
 
     await request(app.getHttpServer())
       .get('/api/v1/knowledge/sources')
@@ -610,6 +636,29 @@ describe('AppController (e2e)', () => {
         expect(body).toHaveLength(1);
         expect(body[0].sourceId).toBe(createdBody.id);
         expect(body[0].contentText).toBe(rawText);
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/knowledge/chunks?sourceId=${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as KnowledgeChunkResponseBody[];
+
+        expect(body.length).toBeGreaterThanOrEqual(1);
+        expect(body[0].sourceId).toBe(createdBody.id);
+        expect(body[0].content).toContain(`E2E business hours ${suffix}`);
+        expect(body[0].chunkIndex).toBe(0);
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/knowledge/chunks?sourceId=${createdBody.id}&q=business`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as KnowledgeChunkResponseBody[];
+
+        expect(body.length).toBeGreaterThanOrEqual(1);
       });
 
     await request(app.getHttpServer())

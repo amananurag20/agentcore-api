@@ -4,9 +4,15 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { KnowledgeDocument, KnowledgeSource, Prisma } from '@prisma/client';
+import {
+  KnowledgeChunk,
+  KnowledgeDocument,
+  KnowledgeSource,
+  Prisma,
+} from '@prisma/client';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
+import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-ingestion.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { S3StorageService } from '../storage/s3-storage.service';
 import { CreateKnowledgeSourceDto } from './dto/create-knowledge-source.dto';
@@ -25,9 +31,14 @@ type SafeKnowledgeDocument = Omit<KnowledgeDocument, 'metadata'> & {
   metadata: Record<string, unknown>;
 };
 
+type SafeKnowledgeChunk = Omit<KnowledgeChunk, 'metadata'> & {
+  metadata: Record<string, unknown>;
+};
+
 @Injectable()
 export class KnowledgeService {
   constructor(
+    private readonly ingestionService: KnowledgeIngestionService,
     private readonly ingestionQueueService: KnowledgeIngestionQueueService,
     private readonly prisma: PrismaService,
     private readonly storageService: S3StorageService,
@@ -60,7 +71,7 @@ export class KnowledgeService {
         data: {
           organizationId,
           type: input.type,
-          status: input.status ?? this.resolveInitialStatus(input),
+          status: input.status ?? this.resolveInitialStatus(),
           name: input.name,
           url: input.url,
           fileName: input.fileName,
@@ -140,6 +151,21 @@ export class KnowledgeService {
     return this.toSafeSource(source);
   }
 
+  async ingestSource(
+    currentUser: AuthenticatedUser,
+    id: string,
+  ): Promise<SafeKnowledgeSource> {
+    const source = await this.findSourceForActor(currentUser, id);
+
+    await this.ingestionService.ingestSource({
+      organizationId: source.organizationId,
+      sourceId: source.id,
+      reason: 'manual_retry',
+    });
+
+    return this.getSourceById(currentUser, id);
+  }
+
   async updateSource(
     currentUser: AuthenticatedUser,
     id: string,
@@ -197,6 +223,35 @@ export class KnowledgeService {
     return documents.map((document) => this.toSafeDocument(document));
   }
 
+  async listChunks(
+    currentUser: AuthenticatedUser,
+    filters: {
+      sourceId?: string;
+      documentId?: string;
+      q?: string;
+    },
+  ): Promise<SafeKnowledgeChunk[]> {
+    if (filters.sourceId) {
+      await this.findSourceForActor(currentUser, filters.sourceId);
+    }
+
+    const chunks = await this.prisma.knowledgeChunk.findMany({
+      where: {
+        ...(this.isSuperAdmin(currentUser)
+          ? {}
+          : { organizationId: currentUser.orgId }),
+        ...(filters.sourceId ? { sourceId: filters.sourceId } : {}),
+        ...(filters.documentId ? { documentId: filters.documentId } : {}),
+        ...(filters.q
+          ? { content: { contains: filters.q, mode: 'insensitive' } }
+          : {}),
+      },
+      orderBy: [{ documentId: 'asc' }, { chunkIndex: 'asc' }],
+    });
+
+    return chunks.map((chunk) => this.toSafeChunk(chunk));
+  }
+
   private async findSourceForActor(
     currentUser: AuthenticatedUser,
     id: string,
@@ -237,10 +292,8 @@ export class KnowledgeService {
     return organizationId;
   }
 
-  private resolveInitialStatus(
-    input: CreateKnowledgeSourceDto,
-  ): 'pending' | 'ready' {
-    return input.rawText ? 'ready' : 'pending';
+  private resolveInitialStatus(): 'pending' {
+    return 'pending';
   }
 
   private toSafeSource(source: KnowledgeSource): SafeKnowledgeSource {
@@ -255,6 +308,13 @@ export class KnowledgeService {
     return {
       ...document,
       metadata: this.toRecord(document.metadata),
+    };
+  }
+
+  private toSafeChunk(chunk: KnowledgeChunk): SafeKnowledgeChunk {
+    return {
+      ...chunk,
+      metadata: this.toRecord(chunk.metadata),
     };
   }
 
@@ -276,6 +336,15 @@ export class KnowledgeService {
     source: KnowledgeSource,
     reason: 'source_created' | 'file_uploaded',
   ) {
+    if (!this.ingestionQueueService.isEnabled() && source.rawText) {
+      await this.ingestionService.ingestSource({
+        organizationId: source.organizationId,
+        sourceId: source.id,
+        reason,
+      });
+      return;
+    }
+
     await this.ingestionQueueService.enqueue({
       organizationId: source.organizationId,
       sourceId: source.id,

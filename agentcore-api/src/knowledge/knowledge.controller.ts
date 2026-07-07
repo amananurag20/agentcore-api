@@ -25,6 +25,7 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CurrentUser } from '../common/auth/current-user.decorator';
 import { Roles } from '../common/auth/roles.decorator';
 import { CreateKnowledgeSourceDto } from './dto/create-knowledge-source.dto';
+import { KnowledgeChunkResponseDto } from './dto/knowledge-chunk-response.dto';
 import { KnowledgeDocumentResponseDto } from './dto/knowledge-document-response.dto';
 import { KnowledgeSourceResponseDto } from './dto/knowledge-source-response.dto';
 import { UpdateKnowledgeSourceDto } from './dto/update-knowledge-source.dto';
@@ -104,6 +105,16 @@ export class KnowledgeController {
     return this.knowledgeService.getSourceById(user, id);
   }
 
+  @Post('sources/:id/ingest')
+  @ApiOperation({ summary: 'Run or retry ingestion for a knowledge source' })
+  @ApiOkResponse({ type: KnowledgeSourceResponseDto })
+  ingestSource(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.knowledgeService.ingestSource(user, id);
+  }
+
   @Patch('sources/:id')
   @ApiOperation({ summary: 'Update a knowledge source' })
   @ApiOkResponse({ type: KnowledgeSourceResponseDto })
@@ -142,5 +153,32 @@ export class KnowledgeController {
     @Query('sourceId') sourceId?: string,
   ) {
     return this.knowledgeService.listDocuments(user, sourceId);
+  }
+
+  @Get('chunks')
+  @ApiOperation({ summary: 'List knowledge chunks' })
+  @ApiQuery({
+    name: 'sourceId',
+    required: false,
+    description: 'Filter chunks by source id.',
+  })
+  @ApiQuery({
+    name: 'documentId',
+    required: false,
+    description: 'Filter chunks by document id.',
+  })
+  @ApiQuery({
+    name: 'q',
+    required: false,
+    description: 'Simple keyword search against chunk content.',
+  })
+  @ApiOkResponse({ type: KnowledgeChunkResponseDto, isArray: true })
+  listChunks(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('sourceId') sourceId?: string,
+    @Query('documentId') documentId?: string,
+    @Query('q') q?: string,
+  ) {
+    return this.knowledgeService.listChunks(user, { sourceId, documentId, q });
   }
 }

@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { PrismaModule } from '../prisma/prisma.module';
 import { validateEnv } from '../config/env.validation';
+import { KnowledgeIngestionModule } from './knowledge-ingestion.module';
 import { KnowledgeIngestionWorker } from './knowledge-ingestion.worker';
 
 @Module({
@@ -11,7 +11,7 @@ import { KnowledgeIngestionWorker } from './knowledge-ingestion.worker';
       envFilePath: ['.env.local', '.env'],
       validate: validateEnv,
     }),
-    PrismaModule,
+    KnowledgeIngestionModule,
   ],
   providers: [KnowledgeIngestionWorker],
 })
