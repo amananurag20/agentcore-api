@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -22,9 +23,17 @@ import { CurrentUser } from '../common/auth/current-user.decorator';
 import { Public } from '../common/auth/public.decorator';
 import { Roles } from '../common/auth/roles.decorator';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
+import {
+  AssignCustomerChatConversationDto,
+  ListCustomerChatConversationsDto,
+  SendAgentCustomerChatMessageDto,
+  UpdateCustomerChatConversationStatusDto,
+} from './dto/agent-inbox.dto';
 import { CreateCustomerChatConversationDto } from './dto/create-conversation.dto';
 import {
+  CustomerChatAgentMessageResponseDto,
   CustomerChatConversationDto,
+  CustomerChatConversationListDto,
   CustomerChatSendMessageResponseDto,
   CustomerChatWidgetConfigDto,
   PublicCustomerChatConversationCreatedDto,
@@ -52,6 +61,16 @@ export class CustomerChatController {
     @Body() body: CreateCustomerChatConversationDto,
   ) {
     return this.customerChatService.createConversation(user, body);
+  }
+
+  @Get('conversations')
+  @ApiOperation({ summary: 'List customer chat conversations for agent inbox' })
+  @ApiOkResponse({ type: CustomerChatConversationListDto })
+  listConversations(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListCustomerChatConversationsDto,
+  ) {
+    return this.customerChatService.listConversations(user, query);
   }
 
   @Get('widget-config')
@@ -90,6 +109,39 @@ export class CustomerChatController {
     @Body() body: SendCustomerChatMessageDto,
   ) {
     return this.customerChatService.sendMessage(user, id, body);
+  }
+
+  @Post('conversations/:id/agent-messages')
+  @ApiOperation({ summary: 'Send a human agent reply' })
+  @ApiCreatedResponse({ type: CustomerChatAgentMessageResponseDto })
+  sendAgentMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: SendAgentCustomerChatMessageDto,
+  ) {
+    return this.customerChatService.sendAgentMessage(user, id, body);
+  }
+
+  @Patch('conversations/:id/assignment')
+  @ApiOperation({ summary: 'Assign or unassign a customer chat conversation' })
+  @ApiOkResponse({ type: CustomerChatConversationDto })
+  assignConversation(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: AssignCustomerChatConversationDto,
+  ) {
+    return this.customerChatService.assignConversation(user, id, body);
+  }
+
+  @Patch('conversations/:id/status')
+  @ApiOperation({ summary: 'Update customer chat conversation status' })
+  @ApiOkResponse({ type: CustomerChatConversationDto })
+  updateConversationStatus(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: UpdateCustomerChatConversationStatusDto,
+  ) {
+    return this.customerChatService.updateConversationStatus(user, id, body);
   }
 
   @Patch('conversations/:id/handoff')

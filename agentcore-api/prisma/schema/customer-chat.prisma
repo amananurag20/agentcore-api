@@ -6,13 +6,16 @@ model CustomerChatConversation {
   visitorId      String?                        @map("visitor_id")
   visitorName    String?                        @map("visitor_name")
   visitorEmail   String?                        @map("visitor_email")
-  visitorTokenHash String?                      @map("visitor_token_hash")
+  visitorTokenHash String?                        @map("visitor_token_hash")
+  assignedAgentId String?                         @map("assigned_agent_id")
+  assignedAgent   User?                           @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
   metadata       Json                           @default("{}")
   messages       CustomerChatMessage[]
   createdAt      DateTime                       @default(now()) @map("created_at")
   updatedAt      DateTime                       @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
+  @@index([assignedAgentId])
   @@index([visitorId])
   @@index([visitorTokenHash])
   @@map("customer_chat_conversations")

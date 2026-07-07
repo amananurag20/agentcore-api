@@ -129,6 +129,7 @@ interface CustomerChatConversationResponseBody {
   id: string;
   organizationId: string;
   status: string;
+  assignedAgentId?: string | null;
   visitorId?: string | null;
   visitorName?: string | null;
   visitorEmail?: string | null;
@@ -151,6 +152,18 @@ interface CustomerChatSendMessageResponseBody {
   conversation: CustomerChatConversationResponseBody;
   visitorMessage: CustomerChatMessageResponseBody;
   assistantMessage: CustomerChatMessageResponseBody;
+}
+
+interface CustomerChatAgentMessageResponseBody {
+  conversation: CustomerChatConversationResponseBody;
+  agentMessage: CustomerChatMessageResponseBody;
+}
+
+interface CustomerChatConversationListResponseBody {
+  data: CustomerChatConversationResponseBody[];
+  total: number;
+  page: number;
+  limit: number;
 }
 
 interface CustomerChatWidgetConfigResponseBody {
@@ -272,6 +285,15 @@ describe('AppController (e2e)', () => {
         );
         expect(body.paths).toHaveProperty(
           '/api/v1/customer-chat/conversations/{id}/messages',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/conversations/{id}/agent-messages',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/conversations/{id}/assignment',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/conversations/{id}/status',
         );
         expect(body.paths).toHaveProperty(
           '/api/v1/customer-chat/conversations/{id}/handoff',
@@ -803,6 +825,19 @@ describe('AppController (e2e)', () => {
     const suffix = Date.now();
     const rawText = `E2E chat support ${suffix}: support is available Monday through Friday from 10am to 5pm.`;
 
+    const agent = await request(app.getHttpServer())
+      .post('/api/v1/users')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: 'E2E Chat Agent',
+        email: `chat-agent-${suffix}@agentcore.local`,
+        password: 'StrongPassword@123',
+        orgId: 'org_demo',
+        roles: ['agent'],
+      })
+      .expect(201);
+    const agentBody = agent.body as UserResponseBody;
+
     const source = await request(app.getHttpServer())
       .post('/api/v1/knowledge/sources')
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
@@ -876,6 +911,70 @@ describe('AppController (e2e)', () => {
         const body = response.body as CustomerChatConversationResponseBody;
 
         expect(body.status).toBe('waiting_for_agent');
+      });
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/customer-chat/conversations/${conversationBody.id}/assignment`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ assignedAgentId: agentBody.id })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as CustomerChatConversationResponseBody;
+
+        expect(body.assignedAgentId).toBe(agentBody.id);
+      });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/customer-chat/conversations')
+      .query({
+        status: 'waiting_for_agent',
+        assignedAgentId: agentBody.id,
+        search: `visitor-${suffix}`,
+      })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as CustomerChatConversationListResponseBody;
+
+        expect(body.total).toBeGreaterThanOrEqual(1);
+        expect(body.data.some((item) => item.id === conversationBody.id)).toBe(
+          true,
+        );
+      });
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/customer-chat/conversations/${conversationBody.id}/agent-messages`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ content: 'A human agent is now helping you.' })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as CustomerChatAgentMessageResponseBody;
+
+        expect(body.agentMessage.role).toBe('agent');
+        expect(body.agentMessage.content).toContain('human agent');
+        expect(body.conversation.assignedAgentId).toBe(agentBody.id);
+        expect(
+          body.conversation.messages.some(
+            (message) => message.role === 'agent',
+          ),
+        ).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/customer-chat/conversations/${conversationBody.id}/status`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ status: 'closed' })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as CustomerChatConversationResponseBody;
+
+        expect(body.status).toBe('closed');
       });
   });
 

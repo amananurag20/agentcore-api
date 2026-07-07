@@ -50,6 +50,11 @@ export class CustomerChatConversationDto {
   @ApiPropertyOptional({ example: 'ada@example.com' })
   visitorEmail?: string | null;
 
+  @ApiPropertyOptional({
+    example: 'ecfdf154-2b72-477e-b286-43120fe69ead',
+  })
+  assignedAgentId?: string | null;
+
   @ApiProperty({ example: {} })
   metadata: Record<string, unknown>;
 
@@ -72,6 +77,28 @@ export class CustomerChatSendMessageResponseDto {
 
   @ApiProperty({ type: CustomerChatMessageDto })
   assistantMessage: CustomerChatMessageDto;
+}
+
+export class CustomerChatConversationListDto {
+  @ApiProperty({ type: CustomerChatConversationDto, isArray: true })
+  data: CustomerChatConversationDto[];
+
+  @ApiProperty({ example: 42 })
+  total: number;
+
+  @ApiProperty({ example: 1 })
+  page: number;
+
+  @ApiProperty({ example: 20 })
+  limit: number;
+}
+
+export class CustomerChatAgentMessageResponseDto {
+  @ApiProperty({ type: CustomerChatConversationDto })
+  conversation: CustomerChatConversationDto;
+
+  @ApiProperty({ type: CustomerChatMessageDto })
+  agentMessage: CustomerChatMessageDto;
 }
 
 export class CustomerChatWidgetConfigDto {

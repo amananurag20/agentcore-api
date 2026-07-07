@@ -16,6 +16,12 @@ import {
 } from '../knowledge/knowledge.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
+import {
+  AssignCustomerChatConversationDto,
+  ListCustomerChatConversationsDto,
+  SendAgentCustomerChatMessageDto,
+  UpdateCustomerChatConversationStatusDto,
+} from './dto/agent-inbox.dto';
 import { CreateCustomerChatConversationDto } from './dto/create-conversation.dto';
 import {
   CreatePublicCustomerChatConversationDto,
@@ -75,6 +81,53 @@ export class CustomerChatService {
   async getConversation(currentUser: AuthenticatedUser, id: string) {
     const conversation = await this.findConversationForActor(currentUser, id);
     return this.toConversationResponse(conversation);
+  }
+
+  async listConversations(
+    currentUser: AuthenticatedUser,
+    input: ListCustomerChatConversationsDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    await this.assertCustomerChatEnabled(organizationId);
+
+    const where: Prisma.CustomerChatConversationWhereInput = {
+      organizationId,
+      status: input.status,
+      assignedAgentId: input.assignedAgentId,
+    };
+
+    if (input.search) {
+      where.OR = [
+        { visitorId: { contains: input.search, mode: 'insensitive' } },
+        { visitorName: { contains: input.search, mode: 'insensitive' } },
+        { visitorEmail: { contains: input.search, mode: 'insensitive' } },
+      ];
+    }
+
+    const page = input.page ?? 1;
+    const limit = input.limit ?? 20;
+    const [total, conversations] = await this.prisma.$transaction([
+      this.prisma.customerChatConversation.count({ where }),
+      this.prisma.customerChatConversation.findMany({
+        where,
+        include: this.conversationInclude(),
+        orderBy: { updatedAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+
+    return {
+      data: conversations.map((conversation) =>
+        this.toConversationResponse(conversation),
+      ),
+      total,
+      page,
+      limit,
+    };
   }
 
   async sendMessage(
@@ -163,6 +216,93 @@ export class CustomerChatService {
       await this.prisma.customerChatConversation.update({
         where: { id: conversation.id },
         data: { status: 'waiting_for_agent' },
+        include: this.conversationInclude(),
+      });
+
+    return this.toConversationResponse(updatedConversation);
+  }
+
+  async sendAgentMessage(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: SendAgentCustomerChatMessageDto,
+  ) {
+    const conversation = await this.findConversationForActor(currentUser, id);
+    await this.assertCustomerChatEnabled(conversation.organizationId);
+
+    const agentMessage = await this.prisma.customerChatMessage.create({
+      data: {
+        organizationId: conversation.organizationId,
+        conversationId: conversation.id,
+        role: 'agent',
+        content: input.content,
+        metadata: this.toJsonObject({
+          agentId: currentUser.sub,
+          agentEmail: currentUser.email,
+        }),
+      },
+      include: {
+        citations: {
+          include: {
+            chunk: true,
+          },
+        },
+      },
+    });
+
+    const updatedConversation =
+      await this.prisma.customerChatConversation.update({
+        where: { id: conversation.id },
+        data: {
+          status:
+            conversation.status === 'closed' ? 'open' : conversation.status,
+          assignedAgentId: conversation.assignedAgentId ?? currentUser.sub,
+        },
+        include: this.conversationInclude(),
+      });
+
+    return {
+      conversation: this.toConversationResponse(updatedConversation),
+      agentMessage: this.toMessageResponse(agentMessage),
+    };
+  }
+
+  async assignConversation(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: AssignCustomerChatConversationDto,
+  ) {
+    const conversation = await this.findConversationForActor(currentUser, id);
+    const assignedAgentId = input.assignedAgentId ?? null;
+
+    if (assignedAgentId) {
+      await this.assertAssignableAgent(
+        conversation.organizationId,
+        assignedAgentId,
+      );
+    }
+
+    const updatedConversation =
+      await this.prisma.customerChatConversation.update({
+        where: { id: conversation.id },
+        data: { assignedAgentId },
+        include: this.conversationInclude(),
+      });
+
+    return this.toConversationResponse(updatedConversation);
+  }
+
+  async updateConversationStatus(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: UpdateCustomerChatConversationStatusDto,
+  ) {
+    const conversation = await this.findConversationForActor(currentUser, id);
+
+    const updatedConversation =
+      await this.prisma.customerChatConversation.update({
+        where: { id: conversation.id },
+        data: { status: input.status },
         include: this.conversationInclude(),
       });
 
@@ -373,6 +513,31 @@ export class CustomerChatService {
 
     if (!entitlement) {
       throw new ForbiddenException('Customer Chat is not enabled');
+    }
+  }
+
+  private async assertAssignableAgent(
+    organizationId: string,
+    assignedAgentId: string,
+  ) {
+    const agent = await this.prisma.user.findUnique({
+      where: { id: assignedAgentId },
+      select: {
+        orgId: true,
+        roles: true,
+        isActive: true,
+      },
+    });
+
+    const canHandleConversation =
+      agent?.isActive &&
+      agent.orgId === organizationId &&
+      (agent.roles.includes('agent') || agent.roles.includes('org_admin'));
+
+    if (!canHandleConversation) {
+      throw new ForbiddenException(
+        'Assigned agent cannot handle this conversation',
+      );
     }
   }
 
