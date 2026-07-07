@@ -1,5 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { EmbeddingsService } from '../ai/embeddings.service';
+import { toPgVector } from '../ai/vector-sql';
 import { PrismaService } from '../prisma/prisma.service';
 import { KnowledgeIngestionJobData } from './knowledge-ingestion.types';
 import { TextChunkerService } from './text-chunker.service';
@@ -8,6 +10,7 @@ import { TextChunkerService } from './text-chunker.service';
 export class KnowledgeIngestionService {
   constructor(
     private readonly chunker: TextChunkerService,
+    private readonly embeddingsService: EmbeddingsService,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -56,40 +59,54 @@ export class KnowledgeIngestionService {
         document.contentText ?? source.rawText ?? '',
       );
 
-      await this.prisma.$transaction([
-        this.prisma.knowledgeChunk.deleteMany({
-          where: { documentId: document.id },
-        }),
-        ...chunks.map((chunk, index) =>
-          this.prisma.knowledgeChunk.create({
-            data: {
-              organizationId: source.organizationId,
-              sourceId: source.id,
-              documentId: document.id,
-              chunkIndex: index,
-              content: chunk.content,
-              charCount: chunk.charCount,
-              tokenEstimate: chunk.tokenEstimate,
-              metadata: this.toJsonObject({
-                sourceType: source.type,
-              }),
-            },
-          }),
-        ),
-        this.prisma.knowledgeSource.update({
-          where: { id: source.id },
+      await this.prisma.knowledgeChunk.deleteMany({
+        where: { documentId: document.id },
+      });
+
+      for (const [index, chunk] of chunks.entries()) {
+        const embedding = await this.embeddingsService.embedText({
+          organizationId: source.organizationId,
+          text: chunk.content,
+        });
+        const createdChunk = await this.prisma.knowledgeChunk.create({
           data: {
-            status: 'ready',
-            errorMessage: null,
-            lastIngestedAt: new Date(),
-            metadata: this.mergeMetadata(source.metadata, {
-              chunkCount: chunks.length,
-              ingestionCompletedAt: new Date().toISOString(),
-              ingestionReason: data.reason,
+            organizationId: source.organizationId,
+            sourceId: source.id,
+            documentId: document.id,
+            chunkIndex: index,
+            content: chunk.content,
+            charCount: chunk.charCount,
+            tokenEstimate: chunk.tokenEstimate,
+            metadata: this.toJsonObject({
+              sourceType: source.type,
             }),
+            embeddingModel: embedding.model,
+            embeddingProvider:
+              embedding.provider === 'local' ? undefined : embedding.provider,
+            embeddedAt: new Date(),
           },
-        }),
-      ]);
+        });
+
+        await this.prisma.$executeRaw`
+          UPDATE "knowledge_chunks"
+          SET "embedding" = ${toPgVector(embedding.vector)}::vector
+          WHERE "id" = ${createdChunk.id}
+        `;
+      }
+
+      await this.prisma.knowledgeSource.update({
+        where: { id: source.id },
+        data: {
+          status: 'ready',
+          errorMessage: null,
+          lastIngestedAt: new Date(),
+          metadata: this.mergeMetadata(source.metadata, {
+            chunkCount: chunks.length,
+            ingestionCompletedAt: new Date().toISOString(),
+            ingestionReason: data.reason,
+          }),
+        },
+      });
     } catch (error) {
       await this.prisma.knowledgeSource.update({
         where: { id: data.sourceId },

@@ -58,6 +58,10 @@ model KnowledgeChunk {
   content        String
   charCount      Int                @map("char_count")
   tokenEstimate  Int                @map("token_estimate")
+  embedding      Unsupported("vector")?
+  embeddingModel String?            @map("embedding_model")
+  embeddingProvider AIProviderType? @map("embedding_provider")
+  embeddedAt     DateTime?          @map("embedded_at")
   metadata       Json               @default("{}")
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
@@ -66,5 +70,6 @@ model KnowledgeChunk {
   @@index([organizationId])
   @@index([sourceId])
   @@index([documentId])
+  @@index([embeddingProvider])
   @@map("knowledge_chunks")
 }

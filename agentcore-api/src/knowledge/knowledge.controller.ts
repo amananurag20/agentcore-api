@@ -27,7 +27,9 @@ import { Roles } from '../common/auth/roles.decorator';
 import { CreateKnowledgeSourceDto } from './dto/create-knowledge-source.dto';
 import { KnowledgeChunkResponseDto } from './dto/knowledge-chunk-response.dto';
 import { KnowledgeDocumentResponseDto } from './dto/knowledge-document-response.dto';
+import { KnowledgeSearchResultDto } from './dto/knowledge-search-result.dto';
 import { KnowledgeSourceResponseDto } from './dto/knowledge-source-response.dto';
+import { SearchKnowledgeDto } from './dto/search-knowledge.dto';
 import { UpdateKnowledgeSourceDto } from './dto/update-knowledge-source.dto';
 import { UploadKnowledgeFileDto } from './dto/upload-knowledge-file.dto';
 import { KnowledgeService } from './knowledge.service';
@@ -56,6 +58,16 @@ export class KnowledgeController {
     @Body() body: CreateKnowledgeSourceDto,
   ) {
     return this.knowledgeService.createSource(user, body);
+  }
+
+  @Post('search')
+  @ApiOperation({ summary: 'Semantic search over organization knowledge' })
+  @ApiOkResponse({ type: KnowledgeSearchResultDto, isArray: true })
+  search(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: SearchKnowledgeDto,
+  ) {
+    return this.knowledgeService.search(user, body);
   }
 
   @Post('sources/upload')

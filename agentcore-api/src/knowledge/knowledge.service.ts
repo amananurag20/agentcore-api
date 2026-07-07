@@ -10,12 +10,15 @@ import {
   KnowledgeSource,
   Prisma,
 } from '@prisma/client';
+import { EmbeddingsService } from '../ai/embeddings.service';
+import { toPgVector } from '../ai/vector-sql';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
 import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-ingestion.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { S3StorageService } from '../storage/s3-storage.service';
 import { CreateKnowledgeSourceDto } from './dto/create-knowledge-source.dto';
+import { SearchKnowledgeDto } from './dto/search-knowledge.dto';
 import { UpdateKnowledgeSourceDto } from './dto/update-knowledge-source.dto';
 import { UploadKnowledgeFileDto } from './dto/upload-knowledge-file.dto';
 
@@ -35,9 +38,22 @@ type SafeKnowledgeChunk = Omit<KnowledgeChunk, 'metadata'> & {
   metadata: Record<string, unknown>;
 };
 
+export interface KnowledgeSearchRow {
+  id: string;
+  organizationId: string;
+  sourceId: string | null;
+  documentId: string;
+  chunkIndex: number;
+  content: string;
+  score: number;
+  embeddingModel: string | null;
+  embeddingProvider: string | null;
+}
+
 @Injectable()
 export class KnowledgeService {
   constructor(
+    private readonly embeddingsService: EmbeddingsService,
     private readonly ingestionService: KnowledgeIngestionService,
     private readonly ingestionQueueService: KnowledgeIngestionQueueService,
     private readonly prisma: PrismaService,
@@ -250,6 +266,43 @@ export class KnowledgeService {
     });
 
     return chunks.map((chunk) => this.toSafeChunk(chunk));
+  }
+
+  async search(
+    currentUser: AuthenticatedUser,
+    input: SearchKnowledgeDto,
+  ): Promise<KnowledgeSearchRow[]> {
+    if (input.sourceId) {
+      await this.findSourceForActor(currentUser, input.sourceId);
+    }
+
+    const embedding = await this.embeddingsService.embedText({
+      organizationId: currentUser.orgId,
+      text: input.query,
+    });
+    const limit = input.limit ?? 5;
+    const sourceFilter = input.sourceId
+      ? Prisma.sql`AND "source_id" = ${input.sourceId}`
+      : Prisma.empty;
+
+    return this.prisma.$queryRaw<KnowledgeSearchRow[]>`
+      SELECT
+        "id",
+        "organization_id" AS "organizationId",
+        "source_id" AS "sourceId",
+        "document_id" AS "documentId",
+        "chunk_index" AS "chunkIndex",
+        "content",
+        (1 - ("embedding" <=> ${toPgVector(embedding.vector)}::vector))::float AS "score",
+        "embedding_model" AS "embeddingModel",
+        "embedding_provider"::text AS "embeddingProvider"
+      FROM "knowledge_chunks"
+      WHERE "organization_id" = ${currentUser.orgId}
+        AND "embedding" IS NOT NULL
+        ${sourceFilter}
+      ORDER BY "embedding" <=> ${toPgVector(embedding.vector)}::vector
+      LIMIT ${limit}
+    `;
   }
 
   private async findSourceForActor(

@@ -113,6 +113,18 @@ interface KnowledgeChunkResponseBody {
   metadata: Record<string, unknown>;
 }
 
+interface KnowledgeSearchResponseBody {
+  id: string;
+  organizationId: string;
+  sourceId?: string | null;
+  documentId: string;
+  chunkIndex: number;
+  content: string;
+  score: number;
+  embeddingModel?: string | null;
+  embeddingProvider?: string | null;
+}
+
 interface OpenApiResponseBody {
   info: {
     title: string;
@@ -209,6 +221,7 @@ describe('AppController (e2e)', () => {
         );
         expect(body.paths).toHaveProperty('/api/v1/knowledge/documents');
         expect(body.paths).toHaveProperty('/api/v1/knowledge/chunks');
+        expect(body.paths).toHaveProperty('/api/v1/knowledge/search');
       });
   });
 
@@ -659,6 +672,24 @@ describe('AppController (e2e)', () => {
         const body = response.body as KnowledgeChunkResponseBody[];
 
         expect(body.length).toBeGreaterThanOrEqual(1);
+      });
+
+    await request(app.getHttpServer())
+      .post('/api/v1/knowledge/search')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        query: 'When is the business open?',
+        sourceId: createdBody.id,
+        limit: 3,
+      })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as KnowledgeSearchResponseBody[];
+
+        expect(body.length).toBeGreaterThanOrEqual(1);
+        expect(body[0].sourceId).toBe(createdBody.id);
+        expect(body[0].content).toContain(`E2E business hours ${suffix}`);
+        expect(body[0].score).toEqual(expect.any(Number));
       });
 
     await request(app.getHttpServer())

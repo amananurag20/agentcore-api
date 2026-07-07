@@ -87,6 +87,17 @@ class EnvironmentVariables {
   @Max(20)
   @IsOptional()
   KNOWLEDGE_INGESTION_QUEUE_CONCURRENCY = 2;
+
+  @IsString()
+  @IsOptional()
+  DEFAULT_EMBEDDING_MODEL?: string;
+
+  @Transform(({ value }) => Number(value ?? 1536))
+  @IsInt()
+  @Min(1)
+  @Max(4096)
+  @IsOptional()
+  DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 }
 
 export function validateEnv(config: Record<string, unknown>) {
