@@ -102,6 +102,48 @@ class EnvironmentVariables {
   @IsString()
   @IsOptional()
   DEFAULT_CHAT_MODEL?: string;
+
+  @Transform(({ value }) => Number(value ?? 60))
+  @IsInt()
+  @Min(1)
+  @Max(3600)
+  @IsOptional()
+  PUBLIC_CHAT_RATE_LIMIT_WINDOW_SECONDS = 60;
+
+  @Transform(({ value }) => Number(value ?? 120))
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  @IsOptional()
+  PUBLIC_CHAT_MAX_CONFIG_FETCHES_PER_WINDOW = 120;
+
+  @Transform(({ value }) => Number(value ?? 10))
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  @IsOptional()
+  PUBLIC_CHAT_MAX_CONVERSATIONS_PER_WINDOW = 10;
+
+  @Transform(({ value }) => Number(value ?? 20))
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  @IsOptional()
+  PUBLIC_CHAT_MAX_MESSAGES_PER_WINDOW = 20;
+
+  @Transform(({ value }) => Number(value ?? 10))
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  @IsOptional()
+  PUBLIC_CHAT_MAX_MESSAGES_PER_CONVERSATION_PER_WINDOW = 10;
+
+  @Transform(({ value }) => Number(value ?? 2000))
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  @IsOptional()
+  PUBLIC_CHAT_MAX_MESSAGE_LENGTH = 2000;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

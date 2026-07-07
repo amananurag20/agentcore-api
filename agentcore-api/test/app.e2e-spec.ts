@@ -984,6 +984,14 @@ describe('AppController (e2e)', () => {
       )
       .set('x-visitor-token', 'wrong-token')
       .expect(401);
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}/messages`,
+      )
+      .set('x-visitor-token', createdBody.visitorToken)
+      .send({ content: 'x'.repeat(2001) })
+      .expect(400);
   });
 
   afterAll(async () => {

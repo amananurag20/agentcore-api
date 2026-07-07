@@ -1,9 +1,11 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { CustomerChatWidgetConfig, Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 import { ChatService } from '../ai/chat.service';
@@ -13,6 +15,7 @@ import {
   KnowledgeService,
 } from '../knowledge/knowledge.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { CreateCustomerChatConversationDto } from './dto/create-conversation.dto';
 import {
   CreatePublicCustomerChatConversationDto,
@@ -39,8 +42,10 @@ type ConversationWithMessages = Prisma.CustomerChatConversationGetPayload<{
 export class CustomerChatService {
   constructor(
     private readonly chatService: ChatService,
+    private readonly configService: ConfigService,
     private readonly knowledgeService: KnowledgeService,
     private readonly prisma: PrismaService,
+    private readonly rateLimitService: RateLimitService,
   ) {}
 
   async createConversation(
@@ -245,13 +250,47 @@ export class CustomerChatService {
     input: SendPublicCustomerChatMessageDto,
     visitorToken?: string,
   ) {
+    this.assertPublicMessageLength(input.content);
+
     const conversation = await this.findConversationForVisitor(
       conversationId,
       visitorToken,
     );
+    await this.limitPublicConversationMessages(conversation.id);
+
     const publicUser = this.createSystemUser(conversation.organizationId);
 
     return this.sendMessage(publicUser, conversation.id, input);
+  }
+
+  private assertPublicMessageLength(content: string) {
+    const maxLength = this.configService.get<number>(
+      'PUBLIC_CHAT_MAX_MESSAGE_LENGTH',
+      2000,
+    );
+
+    if (content.length > maxLength) {
+      throw new BadRequestException(
+        `Message content must be at most ${maxLength} characters`,
+      );
+    }
+  }
+
+  private async limitPublicConversationMessages(conversationId: string) {
+    const windowSeconds = this.configService.get<number>(
+      'PUBLIC_CHAT_RATE_LIMIT_WINDOW_SECONDS',
+      60,
+    );
+    const limit = this.configService.get<number>(
+      'PUBLIC_CHAT_MAX_MESSAGES_PER_CONVERSATION_PER_WINDOW',
+      10,
+    );
+
+    await this.rateLimitService.consume(
+      `public-chat:message:conversation:${conversationId}`,
+      limit,
+      windowSeconds,
+    );
   }
 
   private async findConversationForActor(

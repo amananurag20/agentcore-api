@@ -6,7 +6,9 @@ import {
   Param,
   Patch,
   Post,
+  Req,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
@@ -14,10 +16,12 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import type { Request } from 'express';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CurrentUser } from '../common/auth/current-user.decorator';
 import { Public } from '../common/auth/public.decorator';
 import { Roles } from '../common/auth/roles.decorator';
+import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { CreateCustomerChatConversationDto } from './dto/create-conversation.dto';
 import {
   CustomerChatConversationDto,
@@ -102,17 +106,30 @@ export class CustomerChatController {
 @ApiTags('Customer Chat Widget')
 @Controller('customer-chat/widget')
 export class CustomerChatWidgetController {
-  constructor(private readonly customerChatService: CustomerChatService) {}
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly customerChatService: CustomerChatService,
+    private readonly rateLimitService: RateLimitService,
+  ) {}
 
   @Public()
   @Get(':widgetKey/config')
   @ApiOperation({ summary: 'Get public customer chat widget config' })
   @ApiOkResponse({ type: CustomerChatWidgetConfigDto })
-  getPublicWidgetConfig(
+  async getPublicWidgetConfig(
     @Param('widgetKey') widgetKey: string,
+    @Req() request: Request,
     @Headers('origin') origin?: string,
     @Headers('referer') referer?: string,
   ) {
+    await this.limitPublicRequest({
+      action: 'config',
+      clientIp: this.getClientIp(request),
+      widgetKey,
+      maxEnvKey: 'PUBLIC_CHAT_MAX_CONFIG_FETCHES_PER_WINDOW',
+      defaultMax: 120,
+    });
+
     return this.customerChatService.getPublicWidgetConfig(
       widgetKey,
       origin ?? referer,
@@ -123,12 +140,21 @@ export class CustomerChatWidgetController {
   @Post(':widgetKey/conversations')
   @ApiOperation({ summary: 'Create a public widget conversation' })
   @ApiCreatedResponse({ type: PublicCustomerChatConversationCreatedDto })
-  createPublicConversation(
+  async createPublicConversation(
     @Param('widgetKey') widgetKey: string,
     @Body() body: CreatePublicCustomerChatConversationDto,
+    @Req() request: Request,
     @Headers('origin') origin?: string,
     @Headers('referer') referer?: string,
   ) {
+    await this.limitPublicRequest({
+      action: 'conversation',
+      clientIp: this.getClientIp(request),
+      widgetKey,
+      maxEnvKey: 'PUBLIC_CHAT_MAX_CONVERSATIONS_PER_WINDOW',
+      defaultMax: 10,
+    });
+
     return this.customerChatService.createPublicConversation(
       widgetKey,
       body,
@@ -151,11 +177,64 @@ export class CustomerChatWidgetController {
   @Post('conversations/:id/messages')
   @ApiOperation({ summary: 'Send a public widget visitor message' })
   @ApiCreatedResponse({ type: CustomerChatSendMessageResponseDto })
-  sendPublicMessage(
+  async sendPublicMessage(
     @Param('id') id: string,
     @Body() body: SendPublicCustomerChatMessageDto,
+    @Req() request: Request,
     @Headers('x-visitor-token') visitorToken?: string,
   ) {
+    await this.limitPublicRequest({
+      action: 'message',
+      clientIp: this.getClientIp(request),
+      maxEnvKey: 'PUBLIC_CHAT_MAX_MESSAGES_PER_WINDOW',
+      defaultMax: 20,
+    });
+
     return this.customerChatService.sendPublicMessage(id, body, visitorToken);
+  }
+
+  private async limitPublicRequest(input: {
+    action: string;
+    clientIp: string;
+    maxEnvKey: string;
+    defaultMax: number;
+    widgetKey?: string;
+  }) {
+    const windowSeconds = this.configService.get<number>(
+      'PUBLIC_CHAT_RATE_LIMIT_WINDOW_SECONDS',
+      60,
+    );
+    const limit = this.configService.get<number>(
+      input.maxEnvKey,
+      input.defaultMax,
+    );
+
+    await this.rateLimitService.consume(
+      `public-chat:${input.action}:ip:${input.clientIp}`,
+      limit,
+      windowSeconds,
+    );
+
+    if (input.widgetKey) {
+      await this.rateLimitService.consume(
+        `public-chat:${input.action}:widget:${input.widgetKey}`,
+        limit,
+        windowSeconds,
+      );
+    }
+  }
+
+  private getClientIp(request: Request): string {
+    const forwardedFor = request.headers['x-forwarded-for'];
+
+    if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
+      return forwardedFor.split(',')[0].trim();
+    }
+
+    if (Array.isArray(forwardedFor) && forwardedFor[0]) {
+      return forwardedFor[0].split(',')[0].trim();
+    }
+
+    return request.ip ?? request.socket.remoteAddress ?? 'unknown';
   }
 }
