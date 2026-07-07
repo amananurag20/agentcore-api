@@ -1,0 +1,22 @@
+model AIProviderConfig {
+  id              String           @id @default(uuid())
+  organizationId  String           @map("organization_id")
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  provider        AIProviderType
+  status          AIProviderStatus @default(active)
+  name            String
+  baseUrl         String?          @map("base_url")
+  apiKeyEncrypted String?          @map("api_key_encrypted")
+  chatModel       String?          @map("chat_model")
+  embeddingModel  String?          @map("embedding_model")
+  rerankModel     String?          @map("rerank_model")
+  sttModel        String?          @map("stt_model")
+  ttsModel        String?          @map("tts_model")
+  settings        Json             @default("{}")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  @@index([organizationId, status])
+  @@index([provider])
+  @@map("ai_provider_configs")
+}

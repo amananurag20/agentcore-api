@@ -39,3 +39,29 @@ enum OrganizationProductStatus {
   enabled
   disabled
 }
+
+enum AIProviderType {
+  openai
+  anthropic
+  local
+  custom
+}
+
+enum AIProviderStatus {
+  active
+  inactive
+}
+
+enum KnowledgeSourceType {
+  website_url
+  uploaded_file
+  text
+  faq
+}
+
+enum KnowledgeSourceStatus {
+  pending
+  processing
+  ready
+  failed
+}

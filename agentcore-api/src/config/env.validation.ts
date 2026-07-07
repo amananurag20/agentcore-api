@@ -26,6 +26,10 @@ class EnvironmentVariables {
   @IsString()
   @MinLength(2)
   JWT_ACCESS_EXPIRES_IN: string;
+
+  @IsString()
+  @MinLength(32)
+  AI_CONFIG_ENCRYPTION_KEY: string;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

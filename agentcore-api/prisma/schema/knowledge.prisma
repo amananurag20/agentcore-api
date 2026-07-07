@@ -1,0 +1,40 @@
+model KnowledgeSource {
+  id             String                @id @default(uuid())
+  organizationId String                @map("organization_id")
+  organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  type           KnowledgeSourceType
+  status         KnowledgeSourceStatus @default(pending)
+  name           String
+  url            String?
+  fileName       String?               @map("file_name")
+  mimeType       String?               @map("mime_type")
+  rawText        String?               @map("raw_text")
+  metadata       Json                  @default("{}")
+  errorMessage   String?               @map("error_message")
+  lastIngestedAt DateTime?             @map("last_ingested_at")
+  documents      KnowledgeDocument[]
+  createdAt      DateTime              @default(now()) @map("created_at")
+  updatedAt      DateTime              @updatedAt @map("updated_at")
+
+  @@index([organizationId, status])
+  @@index([type])
+  @@map("knowledge_sources")
+}
+
+model KnowledgeDocument {
+  id             String           @id @default(uuid())
+  organizationId String           @map("organization_id")
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceId       String?          @map("source_id")
+  source         KnowledgeSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  title          String
+  uri            String?
+  contentText    String?          @map("content_text")
+  metadata       Json             @default("{}")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  @@index([organizationId])
+  @@index([sourceId])
+  @@map("knowledge_documents")
+}

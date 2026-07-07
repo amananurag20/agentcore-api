@@ -62,6 +62,40 @@ interface OrganizationProductResponseBody {
   product: ProductResponseBody;
 }
 
+interface AIProviderResponseBody {
+  id: string;
+  organizationId: string;
+  provider: string;
+  status: string;
+  name: string;
+  baseUrl?: string | null;
+  hasApiKey: boolean;
+  chatModel?: string | null;
+  embeddingModel?: string | null;
+  settings: Record<string, unknown>;
+  apiKey?: string;
+  apiKeyEncrypted?: string;
+}
+
+interface KnowledgeSourceResponseBody {
+  id: string;
+  organizationId: string;
+  type: string;
+  status: string;
+  name: string;
+  rawText?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+interface KnowledgeDocumentResponseBody {
+  id: string;
+  organizationId: string;
+  sourceId?: string | null;
+  title: string;
+  contentText?: string | null;
+  metadata: Record<string, unknown>;
+}
+
 interface OpenApiResponseBody {
   info: {
     title: string;
@@ -150,6 +184,9 @@ describe('AppController (e2e)', () => {
         expect(body.paths).toHaveProperty('/api/v1/users');
         expect(body.paths).toHaveProperty('/api/v1/products');
         expect(body.paths).toHaveProperty('/api/v1/organizations/me/products');
+        expect(body.paths).toHaveProperty('/api/v1/ai/providers');
+        expect(body.paths).toHaveProperty('/api/v1/knowledge/sources');
+        expect(body.paths).toHaveProperty('/api/v1/knowledge/documents');
       });
   });
 
@@ -434,6 +471,166 @@ describe('AppController (e2e)', () => {
         expect(body.product.key).toBe('appointment_booking');
         expect(body.config).toMatchObject({ defaultDurationMinutes: 30 });
       });
+  });
+
+  it('/ai/providers manages encrypted provider configs', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/ai/providers')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        provider: 'openai',
+        name: `E2E OpenAI ${suffix}`,
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: 'sk-test-secret',
+        chatModel: 'gpt-4.1-mini',
+        embeddingModel: 'text-embedding-3-small',
+        settings: { temperature: 0.2 },
+      })
+      .expect(201);
+
+    const createdBody = created.body as AIProviderResponseBody;
+
+    expect(createdBody.provider).toBe('openai');
+    expect(createdBody.organizationId).toBe('org_demo');
+    expect(createdBody.hasApiKey).toBe(true);
+    expect(createdBody.apiKey).toBeUndefined();
+    expect(createdBody.apiKeyEncrypted).toBeUndefined();
+    expect(createdBody.settings).toMatchObject({ temperature: 0.2 });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/ai/providers')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AIProviderResponseBody[];
+        expect(body.some((provider) => provider.id === createdBody.id)).toBe(
+          true,
+        );
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/ai/providers/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AIProviderResponseBody;
+
+        expect(body.name).toBe(`E2E OpenAI ${suffix}`);
+        expect(body.provider).toBe('openai');
+      });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/ai/providers/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        status: 'inactive',
+        chatModel: 'gpt-4.1',
+      })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AIProviderResponseBody;
+
+        expect(body.status).toBe('inactive');
+        expect(body.chatModel).toBe('gpt-4.1');
+        expect(body.hasApiKey).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .delete(`/api/v1/ai/providers/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect({ deleted: true });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/ai/providers/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(404);
+  });
+
+  it('/knowledge/sources manages knowledge base sources and documents', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+    const rawText = `E2E business hours ${suffix}: 9am to 6pm.`;
+
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        type: 'text',
+        name: `E2E Knowledge ${suffix}`,
+        rawText,
+        metadata: { locale: 'en' },
+      })
+      .expect(201);
+
+    const createdBody = created.body as KnowledgeSourceResponseBody;
+
+    expect(createdBody.organizationId).toBe('org_demo');
+    expect(createdBody.type).toBe('text');
+    expect(createdBody.status).toBe('ready');
+    expect(createdBody.rawText).toBe(rawText);
+    expect(createdBody.metadata).toMatchObject({ locale: 'en' });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as KnowledgeSourceResponseBody[];
+        expect(body.some((source) => source.id === createdBody.id)).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/knowledge/sources/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as KnowledgeSourceResponseBody;
+
+        expect(body.name).toBe(`E2E Knowledge ${suffix}`);
+        expect(body.status).toBe('ready');
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/knowledge/documents?sourceId=${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as KnowledgeDocumentResponseBody[];
+
+        expect(body).toHaveLength(1);
+        expect(body[0].sourceId).toBe(createdBody.id);
+        expect(body[0].contentText).toBe(rawText);
+      });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/knowledge/sources/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        status: 'processing',
+        metadata: { locale: 'en', refresh: true },
+      })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as KnowledgeSourceResponseBody;
+
+        expect(body.status).toBe('processing');
+        expect(body.metadata).toMatchObject({ refresh: true });
+      });
+
+    await request(app.getHttpServer())
+      .delete(`/api/v1/knowledge/sources/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect({ deleted: true });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/knowledge/sources/${createdBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(404);
   });
 
   afterAll(async () => {
