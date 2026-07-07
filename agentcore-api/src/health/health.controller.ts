@@ -17,6 +17,13 @@ export class HealthController {
       example: {
         status: 'ok',
         database: 'ok',
+        redis: { status: 'ok' },
+        queue: { status: 'enabled', prefix: 'agentcore' },
+        storage: {
+          status: 'disabled',
+          provider: 's3',
+          bucketConfigured: false,
+        },
         uptime: 12.34,
         timestamp: '2026-07-06T06:00:00.000Z',
       },

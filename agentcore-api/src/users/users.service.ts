@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Prisma, User as DbUser, UserRole as DbUserRole } from '@prisma/client';
 import { hash } from 'bcryptjs';
+import { AuditService } from '../audit/audit.service';
 import {
   AuthenticatedUser,
   UserRole,
@@ -26,7 +27,10 @@ interface CreateUserInput {
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   async listManagedUsers(currentUser: AuthenticatedUser): Promise<SafeUser[]> {
     const users = await this.prisma.user.findMany({
@@ -73,7 +77,7 @@ export class UsersService {
     const roles: UserRole[] = input.roles?.length ? input.roles : ['user'];
     this.assertAllowedRoles(currentUser, roles);
 
-    return this.create({
+    const user = await this.create({
       orgId: this.isSuperAdmin(currentUser)
         ? (input.orgId ?? currentUser.orgId)
         : currentUser.orgId,
@@ -82,6 +86,20 @@ export class UsersService {
       password: input.password,
       roles,
     });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: user.orgId,
+      action: 'user.created',
+      entityType: 'user',
+      entityId: user.id,
+      metadata: {
+        email: user.email,
+        roles: user.roles,
+      },
+    });
+
+    return user;
   }
 
   async getManagedUser(
@@ -109,6 +127,19 @@ export class UsersService {
         },
       });
 
+      await this.auditService.record({
+        actor: currentUser,
+        organizationId: user.orgId,
+        action: 'user.updated',
+        entityType: 'user',
+        entityId: user.id,
+        metadata: this.removeUndefined({
+          email: input.email,
+          name: input.name,
+          orgId: input.orgId,
+        }),
+      });
+
       return this.toSafeUser(user);
     } catch (error) {
       this.handleKnownError(error);
@@ -132,6 +163,15 @@ export class UsersService {
       data: { isActive: status === 'active' },
     });
 
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: user.orgId,
+      action: 'user.status_updated',
+      entityType: 'user',
+      entityId: user.id,
+      metadata: { status },
+    });
+
     return this.toSafeUser(user);
   }
 
@@ -146,6 +186,15 @@ export class UsersService {
     const user = await this.prisma.user.update({
       where: { id },
       data: { roles: this.toDbRoles(roles) },
+    });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: user.orgId,
+      action: 'user.roles_updated',
+      entityType: 'user',
+      entityId: user.id,
+      metadata: { roles: user.roles },
     });
 
     return this.toSafeUser(user);
@@ -223,6 +272,14 @@ export class UsersService {
     if (error.code === 'P2003') {
       throw new NotFoundException('Organization not found');
     }
+  }
+
+  private removeUndefined(
+    value: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      Object.entries(value).filter(([, entry]) => entry !== undefined),
+    );
   }
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {

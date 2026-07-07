@@ -187,6 +187,35 @@ interface OpenApiResponseBody {
   paths: Record<string, unknown>;
 }
 
+interface AuditLogListResponseBody {
+  data: Array<{
+    id: string;
+    organizationId?: string | null;
+    actorUserId?: string | null;
+    action: string;
+    entityType: string;
+    entityId?: string | null;
+    metadata: Record<string, unknown>;
+  }>;
+  total: number;
+  page: number;
+  limit: number;
+}
+
+interface HealthResponseBody {
+  status: string;
+  database: string;
+  redis: {
+    status: string;
+  };
+  queue: {
+    status: string;
+  };
+  storage: {
+    status: string;
+  };
+}
+
 interface ResponseLike {
   json(body: unknown): void;
 }
@@ -247,10 +276,13 @@ describe('AppController (e2e)', () => {
       .get('/api/v1/health')
       .expect(200)
       .expect((response) => {
-        expect(response.body).toMatchObject({
-          status: 'ok',
-          database: 'ok',
-        });
+        const body = response.body as HealthResponseBody;
+
+        expect(['ok', 'degraded']).toContain(body.status);
+        expect(body.database).toBe('ok');
+        expect(body.redis.status).toEqual(expect.any(String));
+        expect(body.queue.status).toEqual(expect.any(String));
+        expect(body.storage.status).toEqual(expect.any(String));
       });
   });
 
@@ -263,6 +295,7 @@ describe('AppController (e2e)', () => {
 
         expect(body.info.title).toBe('AgentCore API');
         expect(body.paths).toHaveProperty('/api/v1/auth/login');
+        expect(body.paths).toHaveProperty('/api/v1/audit-logs');
         expect(body.paths).toHaveProperty('/api/v1/health');
         expect(body.paths).toHaveProperty('/api/v1/organizations/me');
         expect(body.paths).toHaveProperty('/api/v1/users');
@@ -338,6 +371,24 @@ describe('AppController (e2e)', () => {
     });
     expect(body.accessToken).toEqual(expect.any(String));
     expect(body.user.passwordHash).toBeUndefined();
+  });
+
+  it('/audit-logs lists business audit events', async () => {
+    const loginBody = await loginAsAdmin();
+
+    return request(app.getHttpServer())
+      .get('/api/v1/audit-logs')
+      .query({ action: 'auth.login', limit: 10 })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AuditLogListResponseBody;
+
+        expect(body.total).toBeGreaterThanOrEqual(1);
+        expect(body.data.some((item) => item.action === 'auth.login')).toBe(
+          true,
+        );
+      });
   });
 
   it('/auth/me (GET) returns the current user when authenticated', async () => {

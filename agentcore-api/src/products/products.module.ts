@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AuditModule } from '../audit/audit.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import {
   OrganizationProductsController,
@@ -7,7 +8,7 @@ import {
 import { ProductsService } from './products.service';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [AuditModule, PrismaModule],
   controllers: [ProductsController, OrganizationProductsController],
   providers: [ProductsService],
   exports: [ProductsService],

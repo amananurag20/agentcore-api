@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { CustomerChatWidgetConfig, Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 import { ChatService } from '../ai/chat.service';
+import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import {
   KnowledgeSearchRow,
@@ -47,6 +48,7 @@ type ConversationWithMessages = Prisma.CustomerChatConversationGetPayload<{
 @Injectable()
 export class CustomerChatService {
   constructor(
+    private readonly auditService: AuditService,
     private readonly chatService: ChatService,
     private readonly configService: ConfigService,
     private readonly knowledgeService: KnowledgeService,
@@ -219,6 +221,14 @@ export class CustomerChatService {
         include: this.conversationInclude(),
       });
 
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: conversation.organizationId,
+      action: 'customer_chat.handoff_requested',
+      entityType: 'customer_chat_conversation',
+      entityId: conversation.id,
+    });
+
     return this.toConversationResponse(updatedConversation);
   }
 
@@ -261,6 +271,17 @@ export class CustomerChatService {
         include: this.conversationInclude(),
       });
 
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: conversation.organizationId,
+      action: 'customer_chat.agent_replied',
+      entityType: 'customer_chat_conversation',
+      entityId: conversation.id,
+      metadata: {
+        messageId: agentMessage.id,
+      },
+    });
+
     return {
       conversation: this.toConversationResponse(updatedConversation),
       agentMessage: this.toMessageResponse(agentMessage),
@@ -289,6 +310,17 @@ export class CustomerChatService {
         include: this.conversationInclude(),
       });
 
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: conversation.organizationId,
+      action: 'customer_chat.conversation_assigned',
+      entityType: 'customer_chat_conversation',
+      entityId: conversation.id,
+      metadata: {
+        assignedAgentId,
+      },
+    });
+
     return this.toConversationResponse(updatedConversation);
   }
 
@@ -305,6 +337,17 @@ export class CustomerChatService {
         data: { status: input.status },
         include: this.conversationInclude(),
       });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: conversation.organizationId,
+      action: 'customer_chat.status_updated',
+      entityType: 'customer_chat_conversation',
+      entityId: conversation.id,
+      metadata: {
+        status: input.status,
+      },
+    });
 
     return this.toConversationResponse(updatedConversation);
   }
@@ -335,6 +378,19 @@ export class CustomerChatService {
           ? this.toJsonObject(input.settings)
           : undefined,
       },
+    });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'customer_chat.widget_config_updated',
+      entityType: 'customer_chat_widget_config',
+      entityId: config.id,
+      metadata: this.removeUndefined({
+        enabled: input.enabled,
+        greetingText: input.greetingText,
+        allowedDomains: input.allowedDomains,
+      }),
     });
 
     return this.toWidgetConfigResponse(config);
@@ -675,6 +731,14 @@ export class CustomerChatService {
       orgId: organizationId,
       roles: ['user'],
     };
+  }
+
+  private removeUndefined(
+    value: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      Object.entries(value).filter(([, entry]) => entry !== undefined),
+    );
   }
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {

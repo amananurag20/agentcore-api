@@ -4,17 +4,25 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Organization, Prisma } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
+import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 
 @Injectable()
 export class OrganizationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly prisma: PrismaService,
+  ) {}
 
-  async create(input: CreateOrganizationDto): Promise<Organization> {
+  async create(
+    input: CreateOrganizationDto,
+    actor?: AuthenticatedUser,
+  ): Promise<Organization> {
     try {
-      return await this.prisma.organization.create({
+      const organization = await this.prisma.organization.create({
         data: {
           name: input.name,
           slug: input.slug ?? this.slugify(input.name),
@@ -22,6 +30,20 @@ export class OrganizationsService {
           deploymentMode: input.deploymentMode ?? 'saas',
         },
       });
+
+      await this.auditService.record({
+        actor,
+        organizationId: organization.id,
+        action: 'organization.created',
+        entityType: 'organization',
+        entityId: organization.id,
+        metadata: {
+          name: organization.name,
+          plan: organization.plan,
+        },
+      });
+
+      return organization;
     } catch (error) {
       this.handleKnownError(error);
       throw error;
@@ -47,9 +69,10 @@ export class OrganizationsService {
   async update(
     id: string,
     input: UpdateOrganizationDto,
+    actor?: AuthenticatedUser,
   ): Promise<Organization> {
     try {
-      return await this.prisma.organization.update({
+      const organization = await this.prisma.organization.update({
         where: { id },
         data: {
           name: input.name,
@@ -59,6 +82,23 @@ export class OrganizationsService {
           deploymentMode: input.deploymentMode,
         },
       });
+
+      await this.auditService.record({
+        actor,
+        organizationId: organization.id,
+        action: 'organization.updated',
+        entityType: 'organization',
+        entityId: organization.id,
+        metadata: this.removeUndefined({
+          name: input.name,
+          slug: input.slug,
+          status: input.status,
+          plan: input.plan,
+          deploymentMode: input.deploymentMode,
+        }),
+      });
+
+      return organization;
     } catch (error) {
       this.handleKnownError(error);
       throw error;
@@ -73,6 +113,14 @@ export class OrganizationsService {
       .replace(/^-+|-+$/g, '');
 
     return slug || `org-${Date.now()}`;
+  }
+
+  private removeUndefined(
+    value: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      Object.entries(value).filter(([, entry]) => entry !== undefined),
+    );
   }
 
   private handleKnownError(error: unknown) {

@@ -24,8 +24,11 @@ export class OrganizationsController {
   @Roles('super_admin')
   @ApiOperation({ summary: 'Create an organization' })
   @ApiCreatedResponse({ type: OrganizationResponseDto })
-  create(@Body() body: CreateOrganizationDto) {
-    return this.organizationsService.create(body);
+  create(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateOrganizationDto,
+  ) {
+    return this.organizationsService.create(body, user);
   }
 
   @Get('me')
@@ -43,7 +46,7 @@ export class OrganizationsController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: UpdateOrganizationDto,
   ) {
-    return this.organizationsService.update(user.orgId, body);
+    return this.organizationsService.update(user.orgId, body, user);
   }
 
   @Get(':id')

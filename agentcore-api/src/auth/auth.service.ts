@@ -2,6 +2,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { compare } from 'bcryptjs';
+import { AuditService } from '../audit/audit.service';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { SafeUser } from '../users/user.entity';
@@ -13,6 +14,7 @@ import { AuthResponse } from './types/auth-response';
 @Injectable()
 export class AuthService {
   constructor(
+    private readonly auditService: AuditService,
     private readonly configService: ConfigService,
     private readonly jwtService: JwtService,
     private readonly organizationsService: OrganizationsService,
@@ -21,7 +23,16 @@ export class AuthService {
 
   async login(input: LoginDto): Promise<AuthResponse> {
     const user = await this.validateUser(input.email, input.password);
-    return this.issueAuthResponse(user);
+    const response = await this.issueAuthResponse(user);
+
+    await this.auditService.record({
+      actor: this.toAuthenticatedUser(user),
+      action: 'auth.login',
+      entityType: 'user',
+      entityId: user.id,
+    });
+
+    return response;
   }
 
   async register(input: RegisterDto): Promise<AuthResponse> {
@@ -41,7 +52,20 @@ export class AuthService {
       roles: ['org_admin'],
     });
 
-    return this.issueAuthResponse(user);
+    const response = await this.issueAuthResponse(user);
+
+    await this.auditService.record({
+      actor: this.toAuthenticatedUser(user),
+      action: 'auth.register',
+      entityType: 'user',
+      entityId: user.id,
+      organizationId: organization.id,
+      metadata: {
+        organizationName: organization.name,
+      },
+    });
+
+    return response;
   }
 
   async getProfile(currentUser: AuthenticatedUser): Promise<SafeUser> {
@@ -74,25 +98,28 @@ export class AuthService {
   }
 
   private async issueAuthResponse(user: SafeUser): Promise<AuthResponse> {
-    const payload: AuthenticatedUser = {
+    const payload = this.toAuthenticatedUser(user);
+
+    return {
+      accessToken: await this.jwtService.signAsync(payload, {
+        expiresIn: this.getAccessTokenExpiresIn() as '15m',
+      }),
+      tokenType: 'Bearer',
+      expiresIn: this.getAccessTokenExpiresIn(),
+      user,
+    };
+  }
+
+  private toAuthenticatedUser(user: SafeUser): AuthenticatedUser {
+    return {
       sub: user.id,
       email: user.email,
       orgId: user.orgId,
       roles: user.roles,
     };
+  }
 
-    const expiresIn = this.configService.get<string>(
-      'JWT_ACCESS_EXPIRES_IN',
-      '15m',
-    );
-
-    return {
-      accessToken: await this.jwtService.signAsync(payload, {
-        expiresIn: expiresIn as '15m',
-      }),
-      tokenType: 'Bearer',
-      expiresIn,
-      user,
-    };
+  private getAccessTokenExpiresIn(): string {
+    return this.configService.get<string>('JWT_ACCESS_EXPIRES_IN', '15m');
   }
 }

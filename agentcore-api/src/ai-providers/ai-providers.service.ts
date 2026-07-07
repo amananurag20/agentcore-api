@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { AIProviderConfig, Prisma } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -21,6 +22,7 @@ type SafeAIProviderConfig = Omit<
 @Injectable()
 export class AIProvidersService {
   constructor(
+    private readonly auditService: AuditService,
     private readonly cryptoService: CryptoService,
     private readonly prisma: PrismaService,
   ) {}
@@ -61,6 +63,19 @@ export class AIProvidersService {
         sttModel: input.sttModel,
         ttsModel: input.ttsModel,
         settings: this.toJsonObject(input.settings),
+      },
+    });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId,
+      action: 'ai_provider.created',
+      entityType: 'ai_provider',
+      entityId: config.id,
+      metadata: {
+        provider: config.provider,
+        name: config.name,
+        hasApiKey: Boolean(config.apiKeyEncrypted),
       },
     });
 
@@ -107,12 +122,41 @@ export class AIProvidersService {
       },
     });
 
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'ai_provider.updated',
+      entityType: 'ai_provider',
+      entityId: config.id,
+      metadata: this.removeUndefined({
+        provider: input.provider,
+        status: input.status,
+        name: input.name,
+        baseUrl: input.baseUrl,
+        chatModel: input.chatModel,
+        embeddingModel: input.embeddingModel,
+        apiKeyUpdated: input.apiKey !== undefined,
+      }),
+    });
+
     return this.toSafeConfig(config);
   }
 
   async delete(currentUser: AuthenticatedUser, id: string) {
-    await this.findConfigForActor(currentUser, id);
+    const config = await this.findConfigForActor(currentUser, id);
     await this.prisma.aIProviderConfig.delete({ where: { id } });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'ai_provider.deleted',
+      entityType: 'ai_provider',
+      entityId: id,
+      metadata: {
+        provider: config.provider,
+        name: config.name,
+      },
+    });
 
     return { deleted: true };
   }
@@ -183,5 +227,13 @@ export class AIProvidersService {
     }
 
     return value;
+  }
+
+  private removeUndefined(
+    value: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      Object.entries(value).filter(([, entry]) => entry !== undefined),
+    );
   }
 }

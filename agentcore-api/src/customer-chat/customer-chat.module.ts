@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AIModule } from '../ai/ai.module';
+import { AuditModule } from '../audit/audit.module';
 import { KnowledgeModule } from '../knowledge/knowledge.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { RateLimitModule } from '../rate-limit/rate-limit.module';
@@ -10,7 +11,13 @@ import {
 import { CustomerChatService } from './customer-chat.service';
 
 @Module({
-  imports: [AIModule, KnowledgeModule, PrismaModule, RateLimitModule],
+  imports: [
+    AIModule,
+    AuditModule,
+    KnowledgeModule,
+    PrismaModule,
+    RateLimitModule,
+  ],
   controllers: [CustomerChatController, CustomerChatWidgetController],
   providers: [CustomerChatService],
 })

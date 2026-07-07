@@ -12,6 +12,7 @@ import {
 } from '@prisma/client';
 import { EmbeddingsService } from '../ai/embeddings.service';
 import { toPgVector } from '../ai/vector-sql';
+import { AuditService } from '../audit/audit.service';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
 import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-ingestion.service';
@@ -53,6 +54,7 @@ export interface KnowledgeSearchRow {
 @Injectable()
 export class KnowledgeService {
   constructor(
+    private readonly auditService: AuditService,
     private readonly embeddingsService: EmbeddingsService,
     private readonly ingestionService: KnowledgeIngestionService,
     private readonly ingestionQueueService: KnowledgeIngestionQueueService,
@@ -115,6 +117,18 @@ export class KnowledgeService {
 
     await this.enqueueIngestion(source, 'source_created');
 
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: source.organizationId,
+      action: 'knowledge_source.created',
+      entityType: 'knowledge_source',
+      entityId: source.id,
+      metadata: {
+        type: source.type,
+        name: source.name,
+      },
+    });
+
     return this.toSafeSource(source);
   }
 
@@ -156,6 +170,21 @@ export class KnowledgeService {
 
     await this.enqueueIngestion(source, 'file_uploaded');
 
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: source.organizationId,
+      action: 'knowledge_source.file_uploaded',
+      entityType: 'knowledge_source',
+      entityId: source.id,
+      metadata: {
+        name: source.name,
+        fileName: source.fileName,
+        storageProvider: source.storageProvider,
+        storageBucket: source.storageBucket,
+        storageKey: source.storageKey,
+      },
+    });
+
     return this.toSafeSource(source);
   }
 
@@ -177,6 +206,17 @@ export class KnowledgeService {
       organizationId: source.organizationId,
       sourceId: source.id,
       reason: 'manual_retry',
+    });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: source.organizationId,
+      action: 'knowledge_source.ingested',
+      entityType: 'knowledge_source',
+      entityId: source.id,
+      metadata: {
+        reason: 'manual_retry',
+      },
     });
 
     return this.getSourceById(currentUser, id);
@@ -208,12 +248,38 @@ export class KnowledgeService {
       },
     });
 
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: source.organizationId,
+      action: 'knowledge_source.updated',
+      entityType: 'knowledge_source',
+      entityId: source.id,
+      metadata: this.removeUndefined({
+        type: input.type,
+        status: input.status,
+        name: input.name,
+        url: input.url,
+      }),
+    });
+
     return this.toSafeSource(source);
   }
 
   async deleteSource(currentUser: AuthenticatedUser, id: string) {
-    await this.findSourceForActor(currentUser, id);
+    const source = await this.findSourceForActor(currentUser, id);
     await this.prisma.knowledgeSource.delete({ where: { id } });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: source.organizationId,
+      action: 'knowledge_source.deleted',
+      entityType: 'knowledge_source',
+      entityId: id,
+      metadata: {
+        type: source.type,
+        name: source.name,
+      },
+    });
 
     return { deleted: true };
   }
@@ -421,6 +487,14 @@ export class KnowledgeService {
     } catch {
       throw new BadRequestException('metadata must be a valid JSON object');
     }
+  }
+
+  private removeUndefined(
+    value: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      Object.entries(value).filter(([, entry]) => entry !== undefined),
+    );
   }
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {

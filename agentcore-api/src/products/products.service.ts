@@ -5,6 +5,7 @@ import {
   Product,
   ProductKey,
 } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { PrismaService } from '../prisma/prisma.service';
 import { UpdateOrganizationProductDto } from './dto/update-organization-product.dto';
@@ -15,7 +16,10 @@ type ProductWithEntitlement = OrganizationProduct & {
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   async listProducts(): Promise<Product[]> {
     return this.prisma.product.findMany({
@@ -46,7 +50,7 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    return this.prisma.organizationProduct.upsert({
+    const entitlement = await this.prisma.organizationProduct.upsert({
       where: {
         organizationId_productId: {
           organizationId: currentUser.orgId,
@@ -65,6 +69,20 @@ export class ProductsService {
       },
       include: { product: true },
     });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: currentUser.orgId,
+      action: 'organization_product.updated',
+      entityType: 'organization_product',
+      entityId: entitlement.id,
+      metadata: {
+        productKey,
+        status: entitlement.status,
+      },
+    });
+
+    return entitlement;
   }
 
   private toJsonObject(

@@ -1,4 +1,8 @@
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  HeadBucketCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'crypto';
@@ -87,6 +91,32 @@ export class S3StorageService {
       sizeBytes: input.file.size,
       checksumSha256,
     };
+  }
+
+  async getHealth() {
+    if (!this.client || !this.bucket) {
+      return {
+        status: 'disabled',
+        provider: this.provider,
+        bucketConfigured: Boolean(this.bucket),
+      };
+    }
+
+    try {
+      await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
+
+      return {
+        status: 'ok',
+        provider: this.provider,
+        bucketConfigured: true,
+      };
+    } catch {
+      return {
+        status: 'error',
+        provider: this.provider,
+        bucketConfigured: true,
+      };
+    }
   }
 
   private assertConfigured() {
