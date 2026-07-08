@@ -425,6 +425,26 @@ describe('AppController (e2e)', () => {
       });
   });
 
+  it('/observability/summary (GET) returns admin operational summary', async () => {
+    const loginBody = await loginAsAdmin();
+
+    return request(app.getHttpServer())
+      .get('/api/v1/observability/summary')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as {
+          process: { uptimeSeconds: number };
+          customerChat: { open: number };
+          appointmentBooking: { upcoming: number };
+        };
+
+        expect(body.process.uptimeSeconds).toEqual(expect.any(Number));
+        expect(body.customerChat.open).toEqual(expect.any(Number));
+        expect(body.appointmentBooking.upcoming).toEqual(expect.any(Number));
+      });
+  });
+
   it('/openapi.json (GET) returns the generated API schema', () => {
     return request(app.getHttpServer())
       .get('/openapi.json')
@@ -436,6 +456,7 @@ describe('AppController (e2e)', () => {
         expect(body.paths).toHaveProperty('/api/v1/auth/login');
         expect(body.paths).toHaveProperty('/api/v1/audit-logs');
         expect(body.paths).toHaveProperty('/api/v1/health');
+        expect(body.paths).toHaveProperty('/api/v1/observability/summary');
         expect(body.paths).toHaveProperty('/api/v1/organizations/me');
         expect(body.paths).toHaveProperty('/api/v1/users');
         expect(body.paths).toHaveProperty('/api/v1/products');

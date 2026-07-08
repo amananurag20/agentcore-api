@@ -14,6 +14,7 @@ import { validateEnv } from './config/env.validation';
 import { CustomerChatModule } from './customer-chat/customer-chat.module';
 import { HealthModule } from './health/health.module';
 import { KnowledgeModule } from './knowledge/knowledge.module';
+import { ObservabilityModule } from './observability/observability.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { ProductsModule } from './products/products.module';
 import { UsersModule } from './users/users.module';
@@ -34,6 +35,7 @@ import { WhatsAppAssistantModule } from './whatsapp-assistant/whatsapp-assistant
     CustomerChatModule,
     HealthModule,
     KnowledgeModule,
+    ObservabilityModule,
     OrganizationsModule,
     ProductsModule,
     UsersModule,

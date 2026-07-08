@@ -212,7 +212,7 @@ export class WhatsAppAssistantService {
     const config = await this.prisma.whatsAppAssistantConfig.findUniqueOrThrow({
       where: { id: conversation.configId },
     });
-    const delivery = this.outboundService.sendText({
+    const delivery = await this.outboundService.sendText({
       config,
       to: conversation.contactWaId,
       content: input.content,
@@ -480,7 +480,7 @@ export class WhatsAppAssistantService {
       })),
     });
 
-    const delivery = this.outboundService.sendText({
+    const delivery = await this.outboundService.sendText({
       config,
       to: contactWaId,
       content: chatResult.answer,

@@ -23,7 +23,17 @@
 
 ## Description
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+AgentCore API is a NestJS backend for the AI Business Suite MVP.
+
+Implemented modules include auth, organizations, products, AI provider configs,
+knowledge/RAG, customer chat, appointment booking, WhatsApp assistant, voice
+receptionist, queues, storage, health checks, and audit logs.
+
+## Production Integrations
+
+See [docs/production-integrations-checklist.md](docs/production-integrations-checklist.md)
+for the manager-ready access checklist, environment variables, and provider
+integration status.
 
 ## Project setup
 

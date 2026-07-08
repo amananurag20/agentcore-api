@@ -215,7 +215,7 @@ export class VoiceReceptionistService {
     const config = await this.prisma.voiceReceptionistConfig.findUniqueOrThrow({
       where: { id: call.configId },
     });
-    const action = this.outboundService.speakText({
+    const action = await this.outboundService.speakText({
       config,
       providerCallId: call.providerCallId,
       content: input.content,
@@ -378,20 +378,20 @@ export class VoiceReceptionistService {
     let action: VoiceProviderActionResult;
     let status: 'transferred' | 'voicemail' | 'completed';
     if (input.action === VoiceRouteActionDto.transfer) {
-      action = this.outboundService.transferCall({
+      action = await this.outboundService.transferCall({
         config,
         providerCallId: call.providerCallId,
         transferTo: input.transferTo ?? config.transferPhoneNumber,
       });
       status = 'transferred';
     } else if (input.action === VoiceRouteActionDto.voicemail) {
-      action = this.outboundService.sendToVoicemail({
+      action = await this.outboundService.sendToVoicemail({
         config,
         providerCallId: call.providerCallId,
       });
       status = 'voicemail';
     } else {
-      action = this.outboundService.speakText({
+      action = await this.outboundService.speakText({
         config,
         providerCallId: call.providerCallId,
         content: 'Thank you for calling. Goodbye.',
@@ -494,7 +494,7 @@ export class VoiceReceptionistService {
     if (input.eventType === VoiceCallEventTypeDto.call_started) {
       const routing = this.evaluateBusinessHours(config);
       if (!routing.isOpen && config.voicemailEnabled) {
-        action = this.outboundService.sendToVoicemail({
+        action = await this.outboundService.sendToVoicemail({
           config,
           providerCallId: call.providerCallId,
         });
@@ -601,7 +601,7 @@ export class VoiceReceptionistService {
       })),
     });
 
-    const action = this.outboundService.speakText({
+    const action = await this.outboundService.speakText({
       config,
       providerCallId: call.providerCallId,
       content: chatResult.answer,

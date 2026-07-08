@@ -160,6 +160,18 @@ class EnvironmentVariables {
   @IsBoolean()
   @IsOptional()
   VOICE_WEBHOOK_SIGNATURE_REQUIRED = false;
+
+  @IsString()
+  @IsOptional()
+  WHATSAPP_OUTBOUND_MODE?: 'mock' | 'live';
+
+  @IsString()
+  @IsOptional()
+  VOICE_OUTBOUND_MODE?: 'mock' | 'live';
+
+  @IsString()
+  @IsOptional()
+  TWILIO_ACCOUNT_SID?: string;
 }
 
 export function validateEnv(config: Record<string, unknown>) {
