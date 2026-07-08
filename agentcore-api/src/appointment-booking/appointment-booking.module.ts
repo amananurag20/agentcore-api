@@ -8,6 +8,7 @@ import {
 } from './appointment-booking.controller';
 import { AppointmentBookingService } from './appointment-booking.service';
 import { AppointmentReminderQueueService } from './appointment-reminder-queue.service';
+import { AppointmentReminderService } from './appointment-reminder.service';
 
 @Module({
   imports: [AuditModule, PrismaModule, QueueModule],
@@ -15,7 +16,11 @@ import { AppointmentReminderQueueService } from './appointment-reminder-queue.se
     AppointmentBookingController,
     PublicAppointmentBookingController,
   ],
-  providers: [AppointmentBookingService, AppointmentReminderQueueService],
+  providers: [
+    AppointmentBookingService,
+    AppointmentReminderQueueService,
+    AppointmentReminderService,
+  ],
   exports: [AppointmentBookingService],
 })
 export class AppointmentBookingModule {}

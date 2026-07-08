@@ -92,6 +92,13 @@ class EnvironmentVariables {
   @IsOptional()
   APPOINTMENT_REMINDER_OFFSETS_MINUTES?: string;
 
+  @Transform(({ value }) => Number(value ?? 5))
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  @IsOptional()
+  APPOINTMENT_REMINDER_QUEUE_CONCURRENCY = 5;
+
   @IsString()
   @IsOptional()
   DEFAULT_EMBEDDING_MODEL?: string;
