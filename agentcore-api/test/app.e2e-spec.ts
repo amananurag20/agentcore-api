@@ -245,6 +245,54 @@ interface AppointmentBookingListResponseBody {
   limit: number;
 }
 
+interface WhatsAppConfigResponseBody {
+  id: string;
+  organizationId: string;
+  provider: string;
+  status: string;
+  name: string;
+  hasAccessToken: boolean;
+  hasWebhookVerifyToken: boolean;
+  hasAppSecret: boolean;
+}
+
+interface WhatsAppMessageResponseBody {
+  id: string;
+  direction: string;
+  role: string;
+  type: string;
+  content?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+interface WhatsAppConversationResponseBody {
+  id: string;
+  organizationId: string;
+  configId: string;
+  status: string;
+  contactWaId: string;
+  contactName?: string | null;
+  assignedAgentId?: string | null;
+  messages: WhatsAppMessageResponseBody[];
+}
+
+interface WhatsAppConversationListResponseBody {
+  data: WhatsAppConversationResponseBody[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+interface WhatsAppInboundWebhookResponseBody {
+  conversation: WhatsAppConversationResponseBody;
+  inboundMessage: WhatsAppMessageResponseBody;
+  assistantMessage?: WhatsAppMessageResponseBody | null;
+  delivery: {
+    provider: string;
+    status: string;
+  };
+}
+
 interface HealthResponseBody {
   status: string;
   database: string;
@@ -416,6 +464,25 @@ describe('AppController (e2e)', () => {
         );
         expect(body.paths).toHaveProperty(
           '/api/v1/appointment-booking/public/bookings',
+        );
+        expect(body.paths).toHaveProperty('/api/v1/whatsapp-assistant/configs');
+        expect(body.paths).toHaveProperty(
+          '/api/v1/whatsapp-assistant/conversations',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/whatsapp-assistant/conversations/{id}',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/whatsapp-assistant/conversations/{id}/agent-messages',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/whatsapp-assistant/conversations/{id}/handoff',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/whatsapp-assistant/webhook/{configId}',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/whatsapp-assistant/webhook/{configId}/inbound',
         );
       });
   });
@@ -926,6 +993,186 @@ describe('AppController (e2e)', () => {
 
         expect(body.status).toBe('confirmed');
         expect(body.organizationId).toBe('org_demo');
+      });
+  });
+
+  it('/whatsapp-assistant handles inbound RAG, handoff, transcript, and agent replies', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+    const contactWaId = `1555${suffix}`;
+    const allowedAnswer = `E2E WhatsApp support ${suffix}: WhatsApp customers can book appointments from 9am to 3pm.`;
+
+    await request(app.getHttpServer())
+      .patch('/api/v1/organizations/me/products/whatsapp_assistant')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ status: 'enabled' })
+      .expect(200);
+
+    const source = await request(app.getHttpServer())
+      .post('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        type: 'text',
+        name: `E2E WhatsApp Knowledge ${suffix}`,
+        rawText: allowedAnswer,
+      })
+      .expect(201);
+    const sourceBody = source.body as KnowledgeSourceResponseBody;
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/knowledge/sources/${sourceBody.id}/ingest`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(201);
+
+    const config = await request(app.getHttpServer())
+      .post('/api/v1/whatsapp-assistant/configs')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: `E2E WhatsApp ${suffix}`,
+        provider: 'meta',
+        phoneNumberId: `phone-${suffix}`,
+        accessToken: 'test-access-token',
+        webhookVerifyToken: `verify-${suffix}`,
+        defaultLocale: 'en',
+      })
+      .expect(201);
+    const configBody = config.body as WhatsAppConfigResponseBody;
+
+    expect(configBody.organizationId).toBe('org_demo');
+    expect(configBody.hasAccessToken).toBe(true);
+    expect(configBody.hasWebhookVerifyToken).toBe(true);
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp-assistant/webhook/${configBody.id}`)
+      .query({
+        'hub.verify_token': `verify-${suffix}`,
+        'hub.challenge': `challenge-${suffix}`,
+      })
+      .expect(200)
+      .expect('challenge-' + suffix);
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/whatsapp-assistant/webhook/${configBody.id}`)
+      .query({
+        'hub.verify_token': 'wrong-token',
+        'hub.challenge': `challenge-${suffix}`,
+      })
+      .expect(403);
+
+    const inbound = await request(app.getHttpServer())
+      .post(`/api/v1/whatsapp-assistant/webhook/${configBody.id}/inbound`)
+      .send({
+        contactWaId,
+        contactName: 'WhatsApp Customer',
+        contactPhone: `+${contactWaId}`,
+        providerMessageId: `wamid-${suffix}`,
+        type: 'text',
+        content: 'When can WhatsApp customers book appointments?',
+      })
+      .expect(201);
+    const inboundBody = inbound.body as WhatsAppInboundWebhookResponseBody;
+
+    expect(inboundBody.conversation.status).toBe('open');
+    expect(inboundBody.inboundMessage.role).toBe('contact');
+    expect(inboundBody.assistantMessage?.role).toBe('assistant');
+    expect(inboundBody.assistantMessage?.content).toContain(
+      'WhatsApp customers can book appointments',
+    );
+    expect(inboundBody.delivery).toMatchObject({
+      provider: 'mock',
+      status: 'queued',
+    });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/whatsapp-assistant/conversations')
+      .query({ search: contactWaId, limit: 10 })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as WhatsAppConversationListResponseBody;
+
+        expect(body.total).toBeGreaterThanOrEqual(1);
+        expect(
+          body.data.some((item) => item.id === inboundBody.conversation.id),
+        ).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .get(
+        `/api/v1/whatsapp-assistant/conversations/${inboundBody.conversation.id}`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as WhatsAppConversationResponseBody;
+
+        expect(body.messages).toHaveLength(2);
+        expect(body.messages.map((message) => message.role)).toEqual([
+          'contact',
+          'assistant',
+        ]);
+      });
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/whatsapp-assistant/conversations/${inboundBody.conversation.id}/handoff`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as WhatsAppConversationResponseBody;
+
+        expect(body.status).toBe('waiting_for_agent');
+      });
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/whatsapp-assistant/webhook/${configBody.id}/inbound`)
+      .send({
+        contactWaId,
+        type: 'text',
+        content: 'I still need a human.',
+      })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as WhatsAppInboundWebhookResponseBody;
+
+        expect(body.assistantMessage).toBeNull();
+        expect(body.delivery.status).toBe('handoff_waiting');
+      });
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/whatsapp-assistant/conversations/${inboundBody.conversation.id}/agent-messages`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ content: 'A human agent is joining this WhatsApp chat.' })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as {
+          conversation: WhatsAppConversationResponseBody;
+          agentMessage: WhatsAppMessageResponseBody;
+        };
+
+        expect(body.agentMessage.role).toBe('agent');
+        expect(body.agentMessage.direction).toBe('outbound');
+        expect(
+          body.conversation.messages.some(
+            (message) => message.role === 'agent',
+          ),
+        ).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/whatsapp-assistant/conversations/${inboundBody.conversation.id}/status`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ status: 'closed' })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as WhatsAppConversationResponseBody;
+
+        expect(body.status).toBe('closed');
       });
   });
 

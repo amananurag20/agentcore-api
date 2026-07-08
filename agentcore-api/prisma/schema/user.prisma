@@ -9,6 +9,7 @@ model User {
   isActive     Boolean      @default(true) @map("is_active")
   assignedCustomerChatConversations CustomerChatConversation[]
   appointmentStaffProfiles AppointmentStaff[]
+  assignedWhatsAppConversations WhatsAppConversation[]
   createdAt    DateTime     @default(now()) @map("created_at")
   updatedAt    DateTime     @updatedAt @map("updated_at")
 

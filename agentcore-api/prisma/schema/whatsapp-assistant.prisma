@@ -1,0 +1,73 @@
+model WhatsAppAssistantConfig {
+  id                      String               @id @default(uuid())
+  organizationId          String               @map("organization_id")
+  organization            Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  provider                WhatsAppProviderType @default(meta)
+  status                  WhatsAppConfigStatus @default(active)
+  name                    String
+  phoneNumberId           String?              @map("phone_number_id")
+  businessAccountId       String?              @map("business_account_id")
+  accessTokenEncrypted    String?              @map("access_token_encrypted")
+  webhookVerifyTokenEncrypted String?          @map("webhook_verify_token_encrypted")
+  appSecretEncrypted      String?              @map("app_secret_encrypted")
+  defaultLocale           String               @default("en") @map("default_locale")
+  settings                Json                 @default("{}")
+  conversations           WhatsAppConversation[]
+  createdAt               DateTime             @default(now()) @map("created_at")
+  updatedAt               DateTime             @updatedAt @map("updated_at")
+
+  @@index([organizationId, status])
+  @@index([phoneNumberId])
+  @@map("whatsapp_assistant_configs")
+}
+
+model WhatsAppConversation {
+  id               String                     @id @default(uuid())
+  organizationId   String                     @map("organization_id")
+  organization     Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  configId         String                     @map("config_id")
+  config           WhatsAppAssistantConfig    @relation(fields: [configId], references: [id], onDelete: Cascade)
+  status           WhatsAppConversationStatus @default(open)
+  contactWaId      String                     @map("contact_wa_id")
+  contactName      String?                    @map("contact_name")
+  contactPhone     String?                    @map("contact_phone")
+  locale           String                     @default("en")
+  assignedAgentId  String?                    @map("assigned_agent_id")
+  assignedAgent    User?                      @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  sessionExpiresAt DateTime?                  @map("session_expires_at")
+  lastMessageAt    DateTime                   @default(now()) @map("last_message_at")
+  metadata         Json                       @default("{}")
+  messages         WhatsAppMessage[]
+  createdAt        DateTime                   @default(now()) @map("created_at")
+  updatedAt        DateTime                   @updatedAt @map("updated_at")
+
+  @@unique([configId, contactWaId])
+  @@index([organizationId, status])
+  @@index([assignedAgentId])
+  @@index([contactWaId])
+  @@index([lastMessageAt])
+  @@map("whatsapp_conversations")
+}
+
+model WhatsAppMessage {
+  id                String                   @id @default(uuid())
+  organizationId    String                   @map("organization_id")
+  organization      Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversationId    String                   @map("conversation_id")
+  conversation      WhatsAppConversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  direction         WhatsAppMessageDirection
+  role              WhatsAppMessageRole
+  type              WhatsAppMessageType      @default(text)
+  providerMessageId String?                  @map("provider_message_id")
+  content           String?
+  mediaUrl          String?                  @map("media_url")
+  mediaMimeType     String?                  @map("media_mime_type")
+  mediaSha256       String?                  @map("media_sha256")
+  metadata          Json                     @default("{}")
+  createdAt         DateTime                 @default(now()) @map("created_at")
+
+  @@index([organizationId])
+  @@index([conversationId, createdAt])
+  @@index([providerMessageId])
+  @@map("whatsapp_messages")
+}

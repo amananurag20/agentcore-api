@@ -102,3 +102,43 @@ enum AppointmentBookingStatus {
   completed
   no_show
 }
+
+enum WhatsAppProviderType {
+  meta
+  twilio
+  custom
+}
+
+enum WhatsAppConfigStatus {
+  active
+  inactive
+}
+
+enum WhatsAppConversationStatus {
+  open
+  waiting_for_agent
+  closed
+}
+
+enum WhatsAppMessageDirection {
+  inbound
+  outbound
+}
+
+enum WhatsAppMessageRole {
+  contact
+  assistant
+  agent
+  system
+}
+
+enum WhatsAppMessageType {
+  text
+  image
+  audio
+  video
+  document
+  sticker
+  location
+  unknown
+}
