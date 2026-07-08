@@ -8,6 +8,10 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
 
+  app.enableCors({
+    origin: '*',
+  });
+
   app.setGlobalPrefix('api');
   app.enableVersioning({
     type: VersioningType.URI,
