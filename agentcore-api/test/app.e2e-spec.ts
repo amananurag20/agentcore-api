@@ -4,6 +4,7 @@ import {
   ValidationPipe,
   VersioningType,
 } from '@nestjs/common';
+import { createHmac } from 'crypto';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { createOpenApiDocument } from './../src/docs/openapi';
@@ -293,6 +294,53 @@ interface WhatsAppInboundWebhookResponseBody {
   };
 }
 
+interface VoiceConfigResponseBody {
+  id: string;
+  organizationId: string;
+  provider: string;
+  status: string;
+  name: string;
+  hasWebhookVerifyToken: boolean;
+  hasApiKey: boolean;
+}
+
+interface VoiceCallEventResponseBody {
+  id: string;
+  type: string;
+  role: string;
+  content?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+interface VoiceCallResponseBody {
+  id: string;
+  organizationId: string;
+  configId: string;
+  status: string;
+  providerCallId?: string | null;
+  fromNumber?: string | null;
+  callerName?: string | null;
+  assignedAgentId?: string | null;
+  events: VoiceCallEventResponseBody[];
+}
+
+interface VoiceCallListResponseBody {
+  data: VoiceCallResponseBody[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+interface VoiceWebhookResponseBody {
+  call: VoiceCallResponseBody;
+  inboundEvent: VoiceCallEventResponseBody;
+  assistantEvent?: VoiceCallEventResponseBody | null;
+  action: {
+    provider: string;
+    status: string;
+  };
+}
+
 interface HealthResponseBody {
   status: string;
   database: string;
@@ -333,7 +381,7 @@ describe('AppController (e2e)', () => {
       imports: [AppModule],
     }).compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication({ rawBody: true });
     app.setGlobalPrefix('api');
     app.enableVersioning({
       type: VersioningType.URI,
@@ -483,6 +531,26 @@ describe('AppController (e2e)', () => {
         );
         expect(body.paths).toHaveProperty(
           '/api/v1/whatsapp-assistant/webhook/{configId}/inbound',
+        );
+        expect(body.paths).toHaveProperty('/api/v1/voice-receptionist/configs');
+        expect(body.paths).toHaveProperty('/api/v1/voice-receptionist/calls');
+        expect(body.paths).toHaveProperty(
+          '/api/v1/voice-receptionist/calls/{id}',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/voice-receptionist/calls/{id}/agent-messages',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/voice-receptionist/calls/{id}/handoff',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/voice-receptionist/calls/{id}/route',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/voice-receptionist/webhook/{configId}',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/voice-receptionist/webhook/{configId}/events',
         );
       });
   });
@@ -1173,6 +1241,221 @@ describe('AppController (e2e)', () => {
         const body = response.body as WhatsAppConversationResponseBody;
 
         expect(body.status).toBe('closed');
+      });
+  });
+
+  it('/voice-receptionist handles call events, RAG, handoff, routing, and transcript history', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+    const providerCallId = `call-${suffix}`;
+    const allowedAnswer = `E2E Voice support ${suffix}: Voice callers can reach reception from 10am to 4pm.`;
+
+    await request(app.getHttpServer())
+      .patch('/api/v1/organizations/me/products/voice_receptionist')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ status: 'enabled' })
+      .expect(200);
+
+    const source = await request(app.getHttpServer())
+      .post('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        type: 'text',
+        name: `E2E Voice Knowledge ${suffix}`,
+        rawText: allowedAnswer,
+      })
+      .expect(201);
+    const sourceBody = source.body as KnowledgeSourceResponseBody;
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/knowledge/sources/${sourceBody.id}/ingest`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(201);
+
+    const config = await request(app.getHttpServer())
+      .post('/api/v1/voice-receptionist/configs')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: `E2E Voice ${suffix}`,
+        provider: 'twilio',
+        phoneNumber: `+1555${suffix}`,
+        apiKey: 'test-voice-api-key',
+        webhookVerifyToken: `verify-${suffix}`,
+        sttProvider: 'openai',
+        ttsProvider: 'openai',
+        ttsVoice: 'alloy',
+        transferPhoneNumber: '+15550001111',
+        voicemailEnabled: true,
+      })
+      .expect(201);
+    const configBody = config.body as VoiceConfigResponseBody;
+
+    expect(configBody.organizationId).toBe('org_demo');
+    expect(configBody.hasApiKey).toBe(true);
+    expect(configBody.hasWebhookVerifyToken).toBe(true);
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/voice-receptionist/webhook/${configBody.id}`)
+      .query({
+        verify_token: `verify-${suffix}`,
+        challenge: `challenge-${suffix}`,
+      })
+      .expect(200)
+      .expect('challenge-' + suffix);
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/voice-receptionist/webhook/${configBody.id}`)
+      .query({
+        verify_token: 'wrong-token',
+        challenge: `challenge-${suffix}`,
+      })
+      .expect(403);
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/voice-receptionist/webhook/${configBody.id}/events`)
+      .send({
+        providerCallId,
+        fromNumber: '+15551230000',
+        toNumber: `+1555${suffix}`,
+        callerName: 'Voice Customer',
+        eventType: 'call_started',
+      })
+      .expect(201);
+
+    const signedPayload = {
+      providerCallId,
+      eventType: 'stt_partial',
+      content: 'When can voice',
+      confidence: 0.88,
+    };
+    const signedJson = JSON.stringify(signedPayload);
+    const signature = createHmac('sha256', 'test-voice-api-key')
+      .update(Buffer.from(signedJson))
+      .digest('hex');
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/voice-receptionist/webhook/${configBody.id}/events`)
+      .set('Content-Type', 'application/json')
+      .set('x-agentcore-signature', `sha256=${signature}`)
+      .send(signedJson)
+      .expect(201);
+
+    const transcript = await request(app.getHttpServer())
+      .post(`/api/v1/voice-receptionist/webhook/${configBody.id}/events`)
+      .send({
+        providerCallId,
+        eventType: 'transcript',
+        content: 'When can voice callers reach reception?',
+        confidence: 0.96,
+      })
+      .expect(201);
+    const transcriptBody = transcript.body as VoiceWebhookResponseBody;
+
+    expect(transcriptBody.call.status).toBe('in_progress');
+    expect(transcriptBody.inboundEvent.role).toBe('caller');
+    expect(transcriptBody.assistantEvent?.role).toBe('assistant');
+    expect(transcriptBody.assistantEvent?.content).toContain(
+      'Voice callers can reach reception',
+    );
+    expect(transcriptBody.action).toMatchObject({
+      provider: 'mock',
+      status: 'queued',
+    });
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/voice-receptionist/webhook/${configBody.id}/events`)
+      .send({
+        providerCallId,
+        eventType: 'barge_in',
+        content: 'Actually I need a human.',
+      })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .get('/api/v1/voice-receptionist/calls')
+      .query({ search: providerCallId, limit: 10 })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as VoiceCallListResponseBody;
+
+        expect(body.total).toBeGreaterThanOrEqual(1);
+        expect(
+          body.data.some((item) => item.id === transcriptBody.call.id),
+        ).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/voice-receptionist/calls/${transcriptBody.call.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as VoiceCallResponseBody;
+
+        expect(body.events.some((event) => event.type === 'transcript')).toBe(
+          true,
+        );
+        expect(
+          body.events.some((event) => event.type === 'assistant_response'),
+        ).toBe(true);
+        expect(body.events.some((event) => event.type === 'barge_in')).toBe(
+          true,
+        );
+      });
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/voice-receptionist/calls/${transcriptBody.call.id}/handoff`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as VoiceCallResponseBody;
+
+        expect(body.status).toBe('waiting_for_agent');
+      });
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/voice-receptionist/calls/${transcriptBody.call.id}/agent-messages`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ content: 'A human agent is joining this voice call.' })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as {
+          call: VoiceCallResponseBody;
+          event: VoiceCallEventResponseBody;
+        };
+
+        expect(body.event.role).toBe('agent');
+        expect(body.call.events.some((event) => event.role === 'agent')).toBe(
+          true,
+        );
+      });
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/voice-receptionist/calls/${transcriptBody.call.id}/route`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ action: 'voicemail', reason: 'Caller requested voicemail.' })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as { call: VoiceCallResponseBody };
+
+        expect(body.call.status).toBe('voicemail');
+      });
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/voice-receptionist/calls/${transcriptBody.call.id}/status`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ status: 'completed' })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as VoiceCallResponseBody;
+
+        expect(body.status).toBe('completed');
       });
   });
 

@@ -1,0 +1,78 @@
+model VoiceReceptionistConfig {
+  id                          String              @id @default(uuid())
+  organizationId              String              @map("organization_id")
+  organization                Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  provider                    VoiceProviderType   @default(twilio)
+  status                      VoiceConfigStatus   @default(active)
+  name                        String
+  phoneNumber                 String?             @map("phone_number")
+  sipDomain                   String?             @map("sip_domain")
+  webhookVerifyTokenEncrypted String?             @map("webhook_verify_token_encrypted")
+  apiKeyEncrypted             String?             @map("api_key_encrypted")
+  sttProvider                 String?             @map("stt_provider")
+  sttModel                    String?             @map("stt_model")
+  ttsProvider                 String?             @map("tts_provider")
+  ttsVoice                    String?             @map("tts_voice")
+  defaultLocale               String              @default("en") @map("default_locale")
+  transferPhoneNumber         String?             @map("transfer_phone_number")
+  voicemailEnabled            Boolean             @default(true) @map("voicemail_enabled")
+  settings                    Json                @default("{}")
+  calls                       VoiceCall[]
+  createdAt                   DateTime            @default(now()) @map("created_at")
+  updatedAt                   DateTime            @updatedAt @map("updated_at")
+
+  @@index([organizationId, status])
+  @@index([phoneNumber])
+  @@map("voice_receptionist_configs")
+}
+
+model VoiceCall {
+  id               String                   @id @default(uuid())
+  organizationId   String                   @map("organization_id")
+  organization     Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  configId         String                   @map("config_id")
+  config           VoiceReceptionistConfig  @relation(fields: [configId], references: [id], onDelete: Cascade)
+  status           VoiceCallStatus          @default(ringing)
+  providerCallId   String?                  @map("provider_call_id")
+  fromNumber       String?                  @map("from_number")
+  toNumber         String?                  @map("to_number")
+  callerName       String?                  @map("caller_name")
+  locale           String                   @default("en")
+  assignedAgentId  String?                  @map("assigned_agent_id")
+  assignedAgent    User?                    @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  startedAt        DateTime                 @default(now()) @map("started_at")
+  endedAt          DateTime?                @map("ended_at")
+  lastEventAt      DateTime                 @default(now()) @map("last_event_at")
+  summary          String?
+  metadata         Json                     @default("{}")
+  events           VoiceCallEvent[]
+  createdAt        DateTime                 @default(now()) @map("created_at")
+  updatedAt        DateTime                 @updatedAt @map("updated_at")
+
+  @@unique([configId, providerCallId])
+  @@index([organizationId, status])
+  @@index([assignedAgentId])
+  @@index([providerCallId])
+  @@index([lastEventAt])
+  @@map("voice_calls")
+}
+
+model VoiceCallEvent {
+  id             String             @id @default(uuid())
+  organizationId String             @map("organization_id")
+  organization   Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  callId         String             @map("call_id")
+  call           VoiceCall          @relation(fields: [callId], references: [id], onDelete: Cascade)
+  type           VoiceCallEventType
+  role           String             @default("system")
+  content        String?
+  confidence     Float?
+  audioUrl       String?            @map("audio_url")
+  metadata       Json               @default("{}")
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  @@index([organizationId])
+  @@index([callId, createdAt])
+  @@index([type])
+  @@map("voice_call_events")
+}

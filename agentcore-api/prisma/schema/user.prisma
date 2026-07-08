@@ -10,6 +10,7 @@ model User {
   assignedCustomerChatConversations CustomerChatConversation[]
   appointmentStaffProfiles AppointmentStaff[]
   assignedWhatsAppConversations WhatsAppConversation[]
+  assignedVoiceCalls VoiceCall[]
   createdAt    DateTime     @default(now()) @map("created_at")
   updatedAt    DateTime     @updatedAt @map("updated_at")
 

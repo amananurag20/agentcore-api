@@ -22,6 +22,9 @@ model Organization {
   whatsAppConfigs WhatsAppAssistantConfig[]
   whatsAppConversations WhatsAppConversation[]
   whatsAppMessages WhatsAppMessage[]
+  voiceReceptionistConfigs VoiceReceptionistConfig[]
+  voiceCalls VoiceCall[]
+  voiceCallEvents VoiceCallEvent[]
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
 

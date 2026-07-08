@@ -17,6 +17,7 @@ import { KnowledgeModule } from './knowledge/knowledge.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { ProductsModule } from './products/products.module';
 import { UsersModule } from './users/users.module';
+import { VoiceReceptionistModule } from './voice-receptionist/voice-receptionist.module';
 import { WhatsAppAssistantModule } from './whatsapp-assistant/whatsapp-assistant.module';
 
 @Module({
@@ -36,6 +37,7 @@ import { WhatsAppAssistantModule } from './whatsapp-assistant/whatsapp-assistant
     OrganizationsModule,
     ProductsModule,
     UsersModule,
+    VoiceReceptionistModule,
     WhatsAppAssistantModule,
   ],
   controllers: [AppController],

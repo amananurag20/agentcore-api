@@ -155,6 +155,11 @@ class EnvironmentVariables {
   @Max(10000)
   @IsOptional()
   PUBLIC_CHAT_MAX_MESSAGE_LENGTH = 2000;
+
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  @IsOptional()
+  VOICE_WEBHOOK_SIGNATURE_REQUIRED = false;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

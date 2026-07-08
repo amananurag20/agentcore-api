@@ -142,3 +142,38 @@ enum WhatsAppMessageType {
   location
   unknown
 }
+
+enum VoiceProviderType {
+  twilio
+  sip
+  custom
+}
+
+enum VoiceConfigStatus {
+  active
+  inactive
+}
+
+enum VoiceCallStatus {
+  ringing
+  in_progress
+  waiting_for_agent
+  transferred
+  voicemail
+  completed
+  failed
+}
+
+enum VoiceCallEventType {
+  call_started
+  stt_partial
+  transcript
+  assistant_response
+  tts_started
+  barge_in
+  route_decision
+  transfer_requested
+  voicemail
+  call_ended
+  system
+}
