@@ -202,6 +202,49 @@ interface AuditLogListResponseBody {
   limit: number;
 }
 
+interface AppointmentServiceResponseBody {
+  id: string;
+  organizationId: string;
+  name: string;
+  durationMinutes: number;
+  status: string;
+}
+
+interface AppointmentStaffResponseBody {
+  id: string;
+  organizationId: string;
+  name: string;
+  status: string;
+  services: AppointmentServiceResponseBody[];
+}
+
+interface AppointmentSlotResponseBody {
+  staffId: string;
+  staffName: string;
+  startAt: string;
+  endAt: string;
+  timezone: string;
+}
+
+interface AppointmentBookingResponseBody {
+  id: string;
+  organizationId: string;
+  serviceId: string;
+  staffId: string;
+  status: string;
+  customerName: string;
+  customerEmail?: string | null;
+  startAt: string;
+  endAt: string;
+}
+
+interface AppointmentBookingListResponseBody {
+  data: AppointmentBookingResponseBody[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
 interface HealthResponseBody {
   status: string;
   database: string;
@@ -345,6 +388,34 @@ describe('AppController (e2e)', () => {
         );
         expect(body.paths).toHaveProperty(
           '/api/v1/customer-chat/widget/conversations/{id}/messages',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/services',
+        );
+        expect(body.paths).toHaveProperty('/api/v1/appointment-booking/staff');
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/staff/{id}/availability',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/availability',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/bookings',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/bookings/{id}/reschedule',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/bookings/{id}/cancel',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/public/services',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/public/availability',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/public/bookings',
         );
       });
   });
@@ -647,6 +718,214 @@ describe('AppController (e2e)', () => {
         expect(body.status).toBe('enabled');
         expect(body.product.key).toBe('appointment_booking');
         expect(body.config).toMatchObject({ defaultDurationMinutes: 30 });
+      });
+  });
+
+  it('/appointment-booking manages availability, conflicts, reschedule, cancel, and public booking', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+    const date = '2031-01-06';
+    const dayOfWeek = new Date(`${date}T00:00:00.000Z`).getUTCDay();
+
+    await request(app.getHttpServer())
+      .patch('/api/v1/organizations/me/products/appointment_booking')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ status: 'enabled' })
+      .expect(200);
+
+    const service = await request(app.getHttpServer())
+      .post('/api/v1/appointment-booking/services')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: `E2E Consultation ${suffix}`,
+        description: 'E2E appointment service',
+        durationMinutes: 30,
+        bufferBeforeMinutes: 0,
+        bufferAfterMinutes: 0,
+      })
+      .expect(201);
+    const serviceBody = service.body as AppointmentServiceResponseBody;
+
+    expect(serviceBody.organizationId).toBe('org_demo');
+    expect(serviceBody.durationMinutes).toBe(30);
+    expect(serviceBody.status).toBe('active');
+
+    const staff = await request(app.getHttpServer())
+      .post('/api/v1/appointment-booking/staff')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: `E2E Staff ${suffix}`,
+        email: `appointment-staff-${suffix}@agentcore.local`,
+        timezone: 'UTC',
+        serviceIds: [serviceBody.id],
+      })
+      .expect(201);
+    const staffBody = staff.body as AppointmentStaffResponseBody;
+
+    expect(staffBody.organizationId).toBe('org_demo');
+    expect(staffBody.services.map((item) => item.id)).toContain(serviceBody.id);
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/appointment-booking/staff/${staffBody.id}/availability`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        dayOfWeek,
+        startTime: '09:00',
+        endTime: '12:00',
+      })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/appointment-booking/staff/${staffBody.id}/availability`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as Array<{ dayOfWeek: number }>;
+
+        expect(body.some((item) => item.dayOfWeek === dayOfWeek)).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/appointment-booking/availability')
+      .query({ serviceId: serviceBody.id, date })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AppointmentSlotResponseBody[];
+
+        expect(
+          body.some(
+            (slot) =>
+              slot.staffId === staffBody.id &&
+              slot.startAt === `${date}T10:00:00.000Z`,
+          ),
+        ).toBe(true);
+      });
+
+    const booking = await request(app.getHttpServer())
+      .post('/api/v1/appointment-booking/bookings')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        serviceId: serviceBody.id,
+        staffId: staffBody.id,
+        customerName: 'E2E Appointment Customer',
+        customerEmail: `appointment-customer-${suffix}@agentcore.local`,
+        startAt: `${date}T10:00:00.000Z`,
+      })
+      .expect(201);
+    const bookingBody = booking.body as AppointmentBookingResponseBody;
+
+    expect(bookingBody.status).toBe('confirmed');
+    expect(bookingBody.staffId).toBe(staffBody.id);
+
+    await request(app.getHttpServer())
+      .post('/api/v1/appointment-booking/bookings')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        serviceId: serviceBody.id,
+        staffId: staffBody.id,
+        customerName: 'Blocked Double Booking',
+        startAt: `${date}T10:00:00.000Z`,
+      })
+      .expect(409);
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/appointment-booking/bookings/${bookingBody.id}/reschedule`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        staffId: staffBody.id,
+        startAt: `${date}T11:00:00.000Z`,
+      })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AppointmentBookingResponseBody;
+
+        expect(body.startAt).toBe(`${date}T11:00:00.000Z`);
+        expect(body.status).toBe('confirmed');
+      });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/appointment-booking/bookings')
+      .query({ serviceId: serviceBody.id, staffId: staffBody.id, limit: 10 })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AppointmentBookingListResponseBody;
+
+        expect(body.total).toBeGreaterThanOrEqual(1);
+        expect(body.data.some((item) => item.id === bookingBody.id)).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/appointment-booking/bookings/${bookingBody.id}/cancel`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ reason: 'E2E cancellation' })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AppointmentBookingResponseBody;
+
+        expect(body.status).toBe('cancelled');
+      });
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/appointment-booking/bookings/${bookingBody.id}/reschedule`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        staffId: staffBody.id,
+        startAt: `${date}T11:30:00.000Z`,
+      })
+      .expect(409);
+
+    await request(app.getHttpServer())
+      .get('/api/v1/appointment-booking/public/services')
+      .query({ organizationId: 'org_demo' })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AppointmentServiceResponseBody[];
+
+        expect(body.some((item) => item.id === serviceBody.id)).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/appointment-booking/public/availability')
+      .query({
+        organizationId: 'org_demo',
+        serviceId: serviceBody.id,
+        date,
+      })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AppointmentSlotResponseBody[];
+
+        expect(
+          body.some(
+            (slot) =>
+              slot.staffId === staffBody.id &&
+              slot.startAt === `${date}T10:00:00.000Z`,
+          ),
+        ).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .post('/api/v1/appointment-booking/public/bookings')
+      .send({
+        organizationId: 'org_demo',
+        serviceId: serviceBody.id,
+        staffId: staffBody.id,
+        customerName: 'Public Appointment Customer',
+        customerEmail: `public-appointment-${suffix}@agentcore.local`,
+        startAt: `${date}T10:00:00.000Z`,
+      })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as AppointmentBookingResponseBody;
+
+        expect(body.status).toBe('confirmed');
+        expect(body.organizationId).toBe('org_demo');
       });
   });
 
