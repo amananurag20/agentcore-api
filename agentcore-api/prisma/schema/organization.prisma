@@ -14,6 +14,11 @@ model Organization {
   customerChatConversations CustomerChatConversation[]
   customerChatMessages CustomerChatMessage[]
   customerChatWidgetConfig CustomerChatWidgetConfig?
+  appointmentServices AppointmentService[]
+  appointmentStaff AppointmentStaff[]
+  appointmentBookings AppointmentBooking[]
+  appointmentAvailability AppointmentStaffAvailability[]
+  appointmentTimeOff AppointmentStaffTimeOff[]
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
 

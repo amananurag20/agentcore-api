@@ -84,3 +84,21 @@ enum CustomerChatMessageRole {
   agent
   system
 }
+
+enum AppointmentServiceStatus {
+  active
+  inactive
+}
+
+enum AppointmentStaffStatus {
+  active
+  inactive
+}
+
+enum AppointmentBookingStatus {
+  pending
+  confirmed
+  cancelled
+  completed
+  no_show
+}

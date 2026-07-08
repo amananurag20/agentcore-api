@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { AIProvidersModule } from './ai-providers/ai-providers.module';
+import { AppointmentBookingModule } from './appointment-booking/appointment-booking.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuditModule } from './audit/audit.module';
@@ -25,6 +26,7 @@ import { UsersModule } from './users/users.module';
       validate: validateEnv,
     }),
     AIProvidersModule,
+    AppointmentBookingModule,
     AuditModule,
     AuthModule,
     CustomerChatModule,
