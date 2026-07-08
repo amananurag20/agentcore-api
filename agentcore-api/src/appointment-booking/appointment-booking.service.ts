@@ -14,6 +14,7 @@ import {
 import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { PrismaService } from '../prisma/prisma.service';
+import { AppointmentReminderQueueService } from './appointment-reminder-queue.service';
 import {
   CancelAppointmentBookingDto,
   CreateAppointmentBookingDto,
@@ -46,6 +47,7 @@ type StaffWithServices = Prisma.AppointmentStaffGetPayload<{
 export class AppointmentBookingService {
   constructor(
     private readonly auditService: AuditService,
+    private readonly reminderQueueService: AppointmentReminderQueueService,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -435,6 +437,11 @@ export class AppointmentBookingService {
         startAt: booking.startAt.toISOString(),
       },
     });
+    await this.reminderQueueService.enqueueBookingReminders({
+      bookingId: booking.id,
+      organizationId,
+      startAt: booking.startAt,
+    });
 
     return this.toBookingResponse(booking);
   }
@@ -455,6 +462,11 @@ export class AppointmentBookingService {
         staffId: booking.staffId,
         startAt: booking.startAt.toISOString(),
       },
+    });
+    await this.reminderQueueService.enqueueBookingReminders({
+      bookingId: booking.id,
+      organizationId: input.organizationId,
+      startAt: booking.startAt,
     });
 
     return this.toBookingResponse(booking);
@@ -530,6 +542,11 @@ export class AppointmentBookingService {
         staffId: updated.staffId,
         startAt: updated.startAt.toISOString(),
       },
+    });
+    await this.reminderQueueService.enqueueBookingReminders({
+      bookingId: updated.id,
+      organizationId: updated.organizationId,
+      startAt: updated.startAt,
     });
 
     return this.toBookingResponse(updated);

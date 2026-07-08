@@ -90,6 +90,10 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
+  APPOINTMENT_REMINDER_OFFSETS_MINUTES?: string;
+
+  @IsString()
+  @IsOptional()
   DEFAULT_EMBEDDING_MODEL?: string;
 
   @Transform(({ value }) => Number(value ?? 1536))
