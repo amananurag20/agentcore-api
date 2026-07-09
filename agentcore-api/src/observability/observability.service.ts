@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -19,6 +20,12 @@ export class ObservabilityService {
       appointmentCancelled24h,
       knowledgeReady,
       knowledgeFailed,
+      activeSessions,
+      pendingInvites,
+      passwordResetTokens24h,
+      customerChatAssistantMessages,
+      whatsappAssistantMessages,
+      voiceAssistantEvents,
     ] = await Promise.all([
       this.prisma.auditLog.count({ where: { createdAt: { gte: since } } }),
       this.prisma.customerChatConversation.count({
@@ -49,9 +56,66 @@ export class ObservabilityService {
       }),
       this.prisma.knowledgeSource.count({ where: { status: 'ready' } }),
       this.prisma.knowledgeSource.count({ where: { status: 'failed' } }),
+      this.prisma.authSession.count({
+        where: {
+          revokedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+      }),
+      this.prisma.authOneTimeToken.count({
+        where: {
+          type: 'invite',
+          consumedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+      }),
+      this.prisma.authOneTimeToken.count({
+        where: {
+          type: 'password_reset',
+          createdAt: { gte: since },
+        },
+      }),
+      this.prisma.customerChatMessage.findMany({
+        where: {
+          role: 'assistant',
+          createdAt: { gte: since },
+        },
+        select: { metadata: true },
+        take: 500,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.whatsAppMessage.findMany({
+        where: {
+          role: 'assistant',
+          createdAt: { gte: since },
+        },
+        select: { metadata: true },
+        take: 500,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.voiceCallEvent.findMany({
+        where: {
+          type: 'assistant_response',
+          createdAt: { gte: since },
+        },
+        select: { metadata: true },
+        take: 500,
+        orderBy: { createdAt: 'desc' },
+      }),
     ]);
 
     const memory = process.memoryUsage();
+    const aiMessages = [
+      ...customerChatAssistantMessages,
+      ...whatsappAssistantMessages,
+      ...voiceAssistantEvents,
+    ];
+    const aiFallbacks24h = aiMessages.filter(
+      (message) => this.toRecord(message.metadata).usedFallback === true,
+    ).length;
+    const aiProviderErrors24h = aiMessages.filter((message) =>
+      Boolean(this.toRecord(message.metadata).error),
+    ).length;
 
     return {
       generatedAt: new Date().toISOString(),
@@ -62,6 +126,16 @@ export class ObservabilityService {
       },
       audit: {
         events24h: auditEvents24h,
+      },
+      auth: {
+        activeSessions,
+        pendingInvites,
+        passwordResetTokens24h,
+      },
+      ai: {
+        assistantMessagesSampled24h: aiMessages.length,
+        fallbacks24h: aiFallbacks24h,
+        providerErrors24h: aiProviderErrors24h,
       },
       customerChat: {
         open: customerChatOpen,
@@ -84,5 +158,13 @@ export class ObservabilityService {
         failedSources: knowledgeFailed,
       },
     };
+  }
+
+  private toRecord(value: Prisma.JsonValue): Record<string, unknown> {
+    if (!value || Array.isArray(value) || typeof value !== 'object') {
+      return {};
+    }
+
+    return value;
   }
 }

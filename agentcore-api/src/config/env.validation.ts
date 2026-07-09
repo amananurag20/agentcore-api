@@ -29,6 +29,27 @@ class EnvironmentVariables {
   @MinLength(2)
   JWT_ACCESS_EXPIRES_IN: string;
 
+  @Transform(({ value }) => Number(value ?? 30))
+  @IsInt()
+  @Min(1)
+  @Max(365)
+  @IsOptional()
+  REFRESH_TOKEN_EXPIRES_DAYS = 30;
+
+  @Transform(({ value }) => Number(value ?? 72))
+  @IsInt()
+  @Min(1)
+  @Max(720)
+  @IsOptional()
+  AUTH_INVITE_TOKEN_EXPIRES_HOURS = 72;
+
+  @Transform(({ value }) => Number(value ?? 30))
+  @IsInt()
+  @Min(5)
+  @Max(1440)
+  @IsOptional()
+  AUTH_PASSWORD_RESET_TOKEN_EXPIRES_MINUTES = 30;
+
   @IsString()
   @MinLength(32)
   AI_CONFIG_ENCRYPTION_KEY: string;

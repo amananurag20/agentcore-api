@@ -71,7 +71,7 @@ model AppointmentStaffAvailability {
   updatedAt      DateTime         @updatedAt @map("updated_at")
 
   @@index([organizationId])
-  @@index([staffId, dayOfWeek, isActive])
+  @@index([staffId, dayOfWeek, isActive], map: "appointment_staff_availability_staff_id_day_of_week_is_active_i")
   @@map("appointment_staff_availability")
 }
 

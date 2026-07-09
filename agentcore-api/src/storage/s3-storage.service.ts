@@ -4,7 +4,11 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'crypto';
 import { extname } from 'path';
@@ -160,7 +164,7 @@ export class S3StorageService {
       return;
     }
 
-    throw new ServiceUnavailableException(
+    throw new BadRequestException(
       `File exceeds upload limit of ${this.maxFileSizeBytes} bytes`,
     );
   }

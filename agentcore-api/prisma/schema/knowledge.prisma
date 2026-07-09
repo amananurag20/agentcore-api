@@ -24,6 +24,7 @@ model KnowledgeSource {
 
   @@index([organizationId, status])
   @@index([type])
+  @@index([storageProvider, storageBucket])
   @@map("knowledge_sources")
 }
 

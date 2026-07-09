@@ -10,6 +10,7 @@ import {
   KnowledgeSource,
   Prisma,
 } from '@prisma/client';
+import { extname } from 'path';
 import { EmbeddingsService } from '../ai/embeddings.service';
 import { toPgVector } from '../ai/vector-sql';
 import { AuditService } from '../audit/audit.service';
@@ -140,6 +141,7 @@ export class KnowledgeService {
     if (!file) {
       throw new BadRequestException('File is required');
     }
+    this.assertSupportedUploadFile(file);
 
     const organizationId = this.resolveOrganizationId(
       currentUser,
@@ -518,6 +520,31 @@ export class KnowledgeService {
 
   private toErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private assertSupportedUploadFile(file: Express.Multer.File) {
+    if (!file.size) {
+      throw new BadRequestException('Uploaded file is empty');
+    }
+
+    const extension = extname(file.originalname).toLowerCase();
+    const mimeType = file.mimetype.toLowerCase();
+    const allowedExtensions = new Set(['.pdf', '.txt', '.md', '.csv', '.tsv']);
+    const allowedMimeTypes = new Set([
+      'application/pdf',
+      'text/plain',
+      'text/markdown',
+      'text/csv',
+      'text/tab-separated-values',
+    ]);
+
+    if (allowedMimeTypes.has(mimeType) || allowedExtensions.has(extension)) {
+      return;
+    }
+
+    throw new BadRequestException(
+      'Unsupported file type. Upload PDF, TXT, Markdown, CSV, or TSV files.',
+    );
   }
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {

@@ -10,6 +10,13 @@ export class AuthResponseDto {
   @ApiProperty({ example: 'Bearer' })
   tokenType: 'Bearer';
 
+  @ApiProperty({
+    example: 'opaque-refresh-token-value',
+    description:
+      'Opaque refresh token. Store securely on the client and rotate through /auth/refresh.',
+  })
+  refreshToken: string;
+
   @ApiProperty({ example: '15m' })
   expiresIn: string;
 

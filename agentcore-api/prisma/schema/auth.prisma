@@ -1,0 +1,41 @@
+model AuthSession {
+  id             String       @id @default(uuid())
+  userId         String       @map("user_id")
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tokenHash      String       @unique @map("token_hash")
+  userAgent      String?      @map("user_agent")
+  ipAddress      String?      @map("ip_address")
+  expiresAt      DateTime     @map("expires_at")
+  revokedAt      DateTime?    @map("revoked_at")
+  replacedById   String?      @map("replaced_by_id")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  @@index([userId, revokedAt])
+  @@index([organizationId])
+  @@index([expiresAt])
+  @@map("auth_sessions")
+}
+
+model AuthOneTimeToken {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String?      @map("user_id")
+  user           User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           String
+  email          String
+  tokenHash      String       @unique @map("token_hash")
+  metadata       Json         @default("{}")
+  expiresAt      DateTime     @map("expires_at")
+  consumedAt     DateTime?    @map("consumed_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@index([organizationId, type])
+  @@index([userId, type])
+  @@index([email, type])
+  @@index([expiresAt])
+  @@map("auth_one_time_tokens")
+}
