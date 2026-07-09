@@ -5,6 +5,7 @@ import { QueueModule } from '../queue/queue.module';
 import { KnowledgeIngestionQueueService } from './knowledge-ingestion-queue.service';
 import { KnowledgeIngestionService } from './knowledge-ingestion.service';
 import { TextChunkerService } from './text-chunker.service';
+import { UrlScraperService } from './url-scraper.service';
 
 @Module({
   imports: [AIModule, PrismaModule, QueueModule],
@@ -12,6 +13,7 @@ import { TextChunkerService } from './text-chunker.service';
     KnowledgeIngestionQueueService,
     KnowledgeIngestionService,
     TextChunkerService,
+    UrlScraperService,
   ],
   exports: [KnowledgeIngestionQueueService, KnowledgeIngestionService],
 })

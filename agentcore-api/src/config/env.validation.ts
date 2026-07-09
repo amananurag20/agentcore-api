@@ -88,6 +88,27 @@ class EnvironmentVariables {
   @IsOptional()
   KNOWLEDGE_INGESTION_QUEUE_CONCURRENCY = 2;
 
+  @Transform(({ value }) => Number(value ?? 5))
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  @IsOptional()
+  KNOWLEDGE_URL_SCRAPER_MAX_PAGES = 5;
+
+  @Transform(({ value }) => Number(value ?? 10000))
+  @IsInt()
+  @Min(1000)
+  @Max(60000)
+  @IsOptional()
+  KNOWLEDGE_URL_SCRAPER_TIMEOUT_MS = 10000;
+
+  @Transform(({ value }) => Number(value ?? 1000000))
+  @IsInt()
+  @Min(10000)
+  @Max(10000000)
+  @IsOptional()
+  KNOWLEDGE_URL_SCRAPER_MAX_BYTES = 1000000;
+
   @IsString()
   @IsOptional()
   APPOINTMENT_REMINDER_OFFSETS_MINUTES?: string;

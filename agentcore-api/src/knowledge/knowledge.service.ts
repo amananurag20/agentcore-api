@@ -455,7 +455,10 @@ export class KnowledgeService {
     source: KnowledgeSource,
     reason: 'source_created' | 'file_uploaded',
   ) {
-    if (!this.ingestionQueueService.isEnabled() && source.rawText) {
+    if (
+      !this.ingestionQueueService.isEnabled() &&
+      (source.rawText || source.type === 'website_url')
+    ) {
       await this.ingestionService.ingestSource({
         organizationId: source.organizationId,
         sourceId: source.id,

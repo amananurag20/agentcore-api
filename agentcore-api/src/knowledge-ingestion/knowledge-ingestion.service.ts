@@ -1,10 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { KnowledgeDocument, KnowledgeSource, Prisma } from '@prisma/client';
 import { EmbeddingsService } from '../ai/embeddings.service';
 import { toPgVector } from '../ai/vector-sql';
 import { PrismaService } from '../prisma/prisma.service';
 import { KnowledgeIngestionJobData } from './knowledge-ingestion.types';
 import { TextChunkerService } from './text-chunker.service';
+import { UrlScraperService } from './url-scraper.service';
 
 @Injectable()
 export class KnowledgeIngestionService {
@@ -12,6 +13,7 @@ export class KnowledgeIngestionService {
     private readonly chunker: TextChunkerService,
     private readonly embeddingsService: EmbeddingsService,
     private readonly prisma: PrismaService,
+    private readonly urlScraper: UrlScraperService,
   ) {}
 
   async ingestSource(data: KnowledgeIngestionJobData) {
@@ -37,61 +39,59 @@ export class KnowledgeIngestionService {
         },
       });
 
-      if (!source.rawText && source.type !== 'text' && source.type !== 'faq') {
+      if (
+        source.type !== 'website_url' &&
+        !source.rawText &&
+        source.type !== 'text' &&
+        source.type !== 'faq'
+      ) {
         await this.markUnsupportedSource(data.sourceId, source.type);
         return;
       }
 
-      const document =
-        source.documents[0] ??
-        (await this.prisma.knowledgeDocument.create({
-          data: {
-            organizationId: source.organizationId,
-            sourceId: source.id,
-            title: source.name,
-            uri: source.url,
-            contentText: source.rawText,
-            metadata: this.toJsonObject(source.metadata),
-          },
-        }));
+      const documents = await this.prepareDocuments(source);
+      let totalChunks = 0;
 
-      const chunks = this.chunker.chunk(
-        document.contentText ?? source.rawText ?? '',
-      );
+      for (const document of documents) {
+        const chunks = this.chunker.chunk(document.contentText ?? '');
 
-      await this.prisma.knowledgeChunk.deleteMany({
-        where: { documentId: document.id },
-      });
-
-      for (const [index, chunk] of chunks.entries()) {
-        const embedding = await this.embeddingsService.embedText({
-          organizationId: source.organizationId,
-          text: chunk.content,
-        });
-        const createdChunk = await this.prisma.knowledgeChunk.create({
-          data: {
-            organizationId: source.organizationId,
-            sourceId: source.id,
-            documentId: document.id,
-            chunkIndex: index,
-            content: chunk.content,
-            charCount: chunk.charCount,
-            tokenEstimate: chunk.tokenEstimate,
-            metadata: this.toJsonObject({
-              sourceType: source.type,
-            }),
-            embeddingModel: embedding.model,
-            embeddingProvider:
-              embedding.provider === 'local' ? undefined : embedding.provider,
-            embeddedAt: new Date(),
-          },
+        await this.prisma.knowledgeChunk.deleteMany({
+          where: { documentId: document.id },
         });
 
-        await this.prisma.$executeRaw`
-          UPDATE "knowledge_chunks"
-          SET "embedding" = ${toPgVector(embedding.vector)}::vector
-          WHERE "id" = ${createdChunk.id}
-        `;
+        for (const [index, chunk] of chunks.entries()) {
+          const embedding = await this.embeddingsService.embedText({
+            organizationId: source.organizationId,
+            text: chunk.content,
+          });
+          const createdChunk = await this.prisma.knowledgeChunk.create({
+            data: {
+              organizationId: source.organizationId,
+              sourceId: source.id,
+              documentId: document.id,
+              chunkIndex: index,
+              content: chunk.content,
+              charCount: chunk.charCount,
+              tokenEstimate: chunk.tokenEstimate,
+              metadata: this.toJsonObject({
+                sourceType: source.type,
+                uri: document.uri,
+              }),
+              embeddingModel: embedding.model,
+              embeddingProvider:
+                embedding.provider === 'local' ? undefined : embedding.provider,
+              embeddedAt: new Date(),
+            },
+          });
+
+          await this.prisma.$executeRaw`
+            UPDATE "knowledge_chunks"
+            SET "embedding" = ${toPgVector(embedding.vector)}::vector
+            WHERE "id" = ${createdChunk.id}
+          `;
+        }
+
+        totalChunks += chunks.length;
       }
 
       await this.prisma.knowledgeSource.update({
@@ -101,7 +101,8 @@ export class KnowledgeIngestionService {
           errorMessage: null,
           lastIngestedAt: new Date(),
           metadata: this.mergeMetadata(source.metadata, {
-            chunkCount: chunks.length,
+            chunkCount: totalChunks,
+            documentCount: documents.length,
             ingestionCompletedAt: new Date().toISOString(),
             ingestionReason: data.reason,
           }),
@@ -131,6 +132,60 @@ export class KnowledgeIngestionService {
         errorMessage: `${sourceType} ingestion is not implemented yet`,
       },
     });
+  }
+
+  private async prepareDocuments(
+    source: KnowledgeSource & { documents: KnowledgeDocument[] },
+  ): Promise<KnowledgeDocument[]> {
+    if (source.type === 'website_url') {
+      if (!source.url) {
+        throw new Error('Website URL source is missing a URL');
+      }
+
+      const pages = await this.urlScraper.scrape(source.url);
+
+      await this.prisma.knowledgeDocument.deleteMany({
+        where: { sourceId: source.id },
+      });
+
+      return Promise.all(
+        pages.map((page) =>
+          this.prisma.knowledgeDocument.create({
+            data: {
+              organizationId: source.organizationId,
+              sourceId: source.id,
+              title: page.title,
+              uri: page.url,
+              contentText: page.text,
+              metadata: this.toJsonObject({
+                sourceType: source.type,
+                scrapedAt: new Date().toISOString(),
+                statusCode: page.statusCode,
+              }),
+            },
+          }),
+        ),
+      );
+    }
+
+    const document =
+      source.documents[0] ??
+      (await this.prisma.knowledgeDocument.create({
+        data: {
+          organizationId: source.organizationId,
+          sourceId: source.id,
+          title: source.name,
+          uri: source.url,
+          contentText: source.rawText,
+          metadata: this.toJsonObject(source.metadata),
+        },
+      }));
+
+    if (!document.contentText?.trim()) {
+      throw new Error('Knowledge source has no text content to ingest');
+    }
+
+    return [document];
   }
 
   private mergeMetadata(
