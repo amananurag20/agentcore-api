@@ -457,7 +457,9 @@ export class KnowledgeService {
   ): Promise<KnowledgeSource> {
     if (
       !this.ingestionQueueService.isEnabled() &&
-      (source.rawText || source.type === 'website_url')
+      (source.rawText ||
+        source.type === 'website_url' ||
+        source.type === 'uploaded_file')
     ) {
       await this.ingestionService.ingestSource({
         organizationId: source.organizationId,

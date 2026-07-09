@@ -3,6 +3,8 @@ import { KnowledgeDocument, KnowledgeSource, Prisma } from '@prisma/client';
 import { EmbeddingsService } from '../ai/embeddings.service';
 import { toPgVector } from '../ai/vector-sql';
 import { PrismaService } from '../prisma/prisma.service';
+import { S3StorageService } from '../storage/s3-storage.service';
+import { KnowledgeFileExtractorService } from './knowledge-file-extractor.service';
 import { KnowledgeIngestionJobData } from './knowledge-ingestion.types';
 import { TextChunkerService } from './text-chunker.service';
 import { UrlScraperService } from './url-scraper.service';
@@ -12,7 +14,9 @@ export class KnowledgeIngestionService {
   constructor(
     private readonly chunker: TextChunkerService,
     private readonly embeddingsService: EmbeddingsService,
+    private readonly fileExtractor: KnowledgeFileExtractorService,
     private readonly prisma: PrismaService,
+    private readonly storageService: S3StorageService,
     private readonly urlScraper: UrlScraperService,
   ) {}
 
@@ -41,6 +45,7 @@ export class KnowledgeIngestionService {
 
       if (
         source.type !== 'website_url' &&
+        source.type !== 'uploaded_file' &&
         !source.rawText &&
         source.type !== 'text' &&
         source.type !== 'faq'
@@ -166,6 +171,50 @@ export class KnowledgeIngestionService {
           }),
         ),
       );
+    }
+
+    if (source.type === 'uploaded_file') {
+      if (!source.storageKey) {
+        throw new Error('Uploaded file source is missing a storage key');
+      }
+
+      const fileBuffer = await this.storageService.getKnowledgeFile({
+        bucket: source.storageBucket,
+        key: source.storageKey,
+      });
+      const extracted = await this.fileExtractor.extract({
+        buffer: fileBuffer,
+        fileName: source.fileName,
+        mimeType: source.mimeType,
+      });
+
+      await this.prisma.knowledgeDocument.deleteMany({
+        where: { sourceId: source.id },
+      });
+
+      const document = await this.prisma.knowledgeDocument.create({
+        data: {
+          organizationId: source.organizationId,
+          sourceId: source.id,
+          title: source.fileName ?? source.name,
+          uri: source.storageKey,
+          contentText: extracted.text,
+          metadata: this.toJsonObject({
+            ...this.toRecord(source.metadata),
+            ...extracted.metadata,
+            sourceType: source.type,
+            mimeType: source.mimeType,
+            fileName: source.fileName,
+            storageProvider: source.storageProvider,
+            storageBucket: source.storageBucket,
+            storageKey: source.storageKey,
+            checksumSha256: source.checksumSha256,
+            extractedAt: new Date().toISOString(),
+          }),
+        },
+      });
+
+      return [document];
     }
 
     const document =

@@ -1,4 +1,5 @@
 import {
+  GetObjectCommand,
   HeadBucketCommand,
   PutObjectCommand,
   S3Client,
@@ -15,6 +16,11 @@ export interface StoredObject {
   sizeBytes: number;
   checksumSha256: string;
 }
+
+type S3Body = {
+  transformToByteArray?: () => Promise<Uint8Array>;
+  [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array | Buffer | string>;
+};
 
 @Injectable()
 export class S3StorageService {
@@ -93,6 +99,26 @@ export class S3StorageService {
     };
   }
 
+  async getKnowledgeFile(input: {
+    bucket?: string | null;
+    key?: string | null;
+  }) {
+    this.assertConfigured();
+
+    if (!input.key) {
+      throw new ServiceUnavailableException('Stored file key is missing');
+    }
+
+    const response = await this.client!.send(
+      new GetObjectCommand({
+        Bucket: input.bucket ?? this.bucket,
+        Key: input.key,
+      }),
+    );
+
+    return this.bodyToBuffer(response.Body as S3Body | undefined);
+  }
+
   async getHealth() {
     if (!this.client || !this.bucket) {
       return {
@@ -137,6 +163,30 @@ export class S3StorageService {
     throw new ServiceUnavailableException(
       `File exceeds upload limit of ${this.maxFileSizeBytes} bytes`,
     );
+  }
+
+  private async bodyToBuffer(body?: S3Body): Promise<Buffer> {
+    if (!body) {
+      return Buffer.alloc(0);
+    }
+
+    if (body.transformToByteArray) {
+      return Buffer.from(await body.transformToByteArray());
+    }
+
+    if (!body[Symbol.asyncIterator]) {
+      return Buffer.alloc(0);
+    }
+
+    const chunks: Buffer[] = [];
+
+    for await (const chunk of body as AsyncIterable<
+      Uint8Array | Buffer | string
+    >) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+
+    return Buffer.concat(chunks);
   }
 
   private buildObjectKey(
