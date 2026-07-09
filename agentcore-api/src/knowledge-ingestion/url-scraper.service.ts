@@ -1,5 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as cheerio from 'cheerio';
+import type { CheerioAPI } from 'cheerio';
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
 
@@ -11,10 +13,35 @@ export interface ScrapedPage {
   links: string[];
 }
 
+type RobotsRules = {
+  allow: string[];
+  disallow: string[];
+  sitemaps: string[];
+};
+
+const BOT_USER_AGENT = 'AgentCoreKnowledgeBot/1.0';
+const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
+const RETRYABLE_STATUSES = [408, 425, 429, 500, 502, 503, 504];
+const TRACKING_PARAMS = [
+  'fbclid',
+  'gclid',
+  'mc_cid',
+  'mc_eid',
+  'msclkid',
+  'utm_campaign',
+  'utm_content',
+  'utm_medium',
+  'utm_source',
+  'utm_term',
+];
+
 @Injectable()
 export class UrlScraperService {
   private readonly maxBytes: number;
   private readonly maxPages: number;
+  private readonly maxRetries: number;
+  private readonly respectRobots: boolean;
+  private readonly sitemapEnabled: boolean;
   private readonly timeoutMs: number;
 
   constructor(private readonly configService: ConfigService) {
@@ -23,6 +50,15 @@ export class UrlScraperService {
       1_000_000;
     this.maxPages =
       this.configService.get<number>('KNOWLEDGE_URL_SCRAPER_MAX_PAGES') ?? 5;
+    this.maxRetries =
+      this.configService.get<number>('KNOWLEDGE_URL_SCRAPER_MAX_RETRIES') ?? 2;
+    this.respectRobots =
+      this.configService.get<boolean>('KNOWLEDGE_URL_SCRAPER_RESPECT_ROBOTS') ??
+      true;
+    this.sitemapEnabled =
+      this.configService.get<boolean>(
+        'KNOWLEDGE_URL_SCRAPER_SITEMAP_ENABLED',
+      ) ?? true;
     this.timeoutMs =
       this.configService.get<number>('KNOWLEDGE_URL_SCRAPER_TIMEOUT_MS') ??
       10_000;
@@ -32,9 +68,22 @@ export class UrlScraperService {
     const rootUrl = this.normalizeHttpUrl(startUrl);
     await this.assertPublicUrl(rootUrl);
 
+    const robots = await this.loadRobotsRules(rootUrl);
+    this.assertRobotsAllowed(rootUrl, robots);
+
     const seen = new Set<string>();
-    const queue = [rootUrl];
+    const queued = new Set<string>([rootUrl]);
+    const queue = [
+      rootUrl,
+      ...(await this.discoverSitemapUrls(rootUrl, robots)).filter(
+        (url) => url !== rootUrl,
+      ),
+    ].slice(0, this.maxPages * 3);
     const pages: ScrapedPage[] = [];
+
+    for (const item of queue) {
+      queued.add(item);
+    }
 
     while (queue.length && pages.length < this.maxPages) {
       const url = queue.shift()!;
@@ -44,9 +93,10 @@ export class UrlScraperService {
       }
 
       seen.add(url);
+      this.assertRobotsAllowed(url, robots);
 
       const page = await this.fetchPage(url);
-      if (page.text) {
+      if (this.isUsefulText(page.text)) {
         pages.push(page);
       }
 
@@ -55,7 +105,8 @@ export class UrlScraperService {
       }
 
       for (const link of page.links) {
-        if (!seen.has(link) && !queue.includes(link)) {
+        if (!seen.has(link) && !queued.has(link)) {
+          queued.add(link);
           queue.push(link);
         }
       }
@@ -86,11 +137,24 @@ export class UrlScraperService {
       );
     }
 
-    const html = await this.readLimitedText(response);
+    const body = await this.readLimitedText(response);
     const finalUrl = this.normalizeHttpUrl(response.url || url);
-    const title = this.extractTitle(html) || finalUrl;
-    const text = this.htmlToText(html);
-    const links = this.extractSameOriginLinks(finalUrl, html);
+
+    if (contentType.includes('text/plain')) {
+      const text = this.cleanText(body);
+      return {
+        title: finalUrl,
+        url: finalUrl,
+        text,
+        statusCode: response.status,
+        links: [],
+      };
+    }
+
+    const $ = cheerio.load(body);
+    const title = this.extractTitle($) || finalUrl;
+    const text = this.extractReadableText($);
+    const links = this.extractSameOriginLinks(finalUrl, $);
 
     return {
       title,
@@ -109,7 +173,7 @@ export class UrlScraperService {
 
       const response = await this.safeFetch(currentUrl);
 
-      if (![301, 302, 303, 307, 308].includes(response.status)) {
+      if (!REDIRECT_STATUSES.includes(response.status)) {
         return response;
       }
 
@@ -128,24 +192,200 @@ export class UrlScraperService {
   }
 
   private async safeFetch(url: string): Promise<Response> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+      try {
+        const response = await fetch(url, {
+          headers: {
+            Accept:
+              'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
+            'User-Agent': BOT_USER_AGENT,
+          },
+          redirect: 'manual',
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+
+        if (
+          attempt < this.maxRetries &&
+          RETRYABLE_STATUSES.includes(response.status)
+        ) {
+          await this.sleep(250 * (attempt + 1));
+          continue;
+        }
+
+        return response;
+      } catch (error) {
+        lastError = error;
+
+        if (attempt < this.maxRetries) {
+          await this.sleep(250 * (attempt + 1));
+          continue;
+        }
+      }
+    }
+
+    throw new BadRequestException(
+      `Website could not be fetched: ${this.toErrorMessage(lastError)}`,
+    );
+  }
+
+  private async loadRobotsRules(startUrl: string): Promise<RobotsRules | null> {
+    if (!this.respectRobots && !this.sitemapEnabled) {
+      return null;
+    }
+
+    const origin = new URL(startUrl).origin;
+    const robotsUrl = `${origin}/robots.txt`;
+
     try {
-      return await fetch(url, {
+      await this.assertPublicUrl(robotsUrl);
+      const response = await fetch(robotsUrl, {
         headers: {
-          Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
-          'User-Agent': 'AgentCoreKnowledgeBot/1.0',
+          Accept: 'text/plain,*/*;q=0.8',
+          'User-Agent': BOT_USER_AGENT,
         },
         redirect: 'manual',
         signal: AbortSignal.timeout(this.timeoutMs),
       });
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
+
+      if (!response.ok) {
+        return null;
       }
 
-      throw new BadRequestException(
-        `Website could not be fetched: ${this.toErrorMessage(error)}`,
-      );
+      return this.parseRobotsTxt(await this.readLimitedText(response));
+    } catch {
+      return null;
     }
+  }
+
+  private parseRobotsTxt(content: string): RobotsRules {
+    const groups: Array<{
+      agents: string[];
+      allow: string[];
+      disallow: string[];
+    }> = [];
+    const sitemaps: string[] = [];
+    let current:
+      { agents: string[]; allow: string[]; disallow: string[] } | undefined;
+
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.replace(/#.*/, '').trim();
+      if (!line) {
+        continue;
+      }
+
+      const separator = line.indexOf(':');
+      if (separator === -1) {
+        continue;
+      }
+
+      const key = line.slice(0, separator).trim().toLowerCase();
+      const value = line.slice(separator + 1).trim();
+
+      if (key === 'sitemap' && value) {
+        sitemaps.push(value);
+        continue;
+      }
+
+      if (key === 'user-agent') {
+        current = { agents: [value.toLowerCase()], allow: [], disallow: [] };
+        groups.push(current);
+        continue;
+      }
+
+      if (!current) {
+        continue;
+      }
+
+      if (key === 'allow') {
+        current.allow.push(value);
+      }
+
+      if (key === 'disallow') {
+        current.disallow.push(value);
+      }
+    }
+
+    const matchingGroups = groups.filter((group) =>
+      group.agents.some(
+        (agent) =>
+          agent === '*' ||
+          BOT_USER_AGENT.toLowerCase().startsWith(agent.toLowerCase()),
+      ),
+    );
+    const selected = matchingGroups[0];
+
+    return {
+      allow: selected?.allow ?? [],
+      disallow: selected?.disallow ?? [],
+      sitemaps,
+    };
+  }
+
+  private async discoverSitemapUrls(
+    rootUrl: string,
+    robots: RobotsRules | null,
+  ): Promise<string[]> {
+    if (!this.sitemapEnabled) {
+      return [];
+    }
+
+    const origin = new URL(rootUrl).origin;
+    const sitemapUrls = robots?.sitemaps.length
+      ? robots.sitemaps
+      : [`${origin}/sitemap.xml`];
+    const discovered = new Set<string>();
+
+    for (const sitemapUrl of sitemapUrls.slice(0, 3)) {
+      try {
+        const normalizedSitemapUrl = this.normalizeHttpUrl(sitemapUrl);
+        await this.assertPublicUrl(normalizedSitemapUrl);
+        const response = await this.safeFetch(normalizedSitemapUrl);
+
+        if (!response.ok) {
+          continue;
+        }
+
+        const xml = await this.readLimitedText(response);
+        for (const url of this.extractSitemapLocs(xml, rootUrl)) {
+          discovered.add(url);
+          if (discovered.size >= this.maxPages * 3) {
+            return [...discovered];
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return [...discovered];
+  }
+
+  private extractSitemapLocs(xml: string, rootUrl: string): string[] {
+    const root = new URL(rootUrl);
+    const locs = new Set<string>();
+    const locRegex = /<loc>\s*([\s\S]*?)\s*<\/loc>/gi;
+    let match: RegExpExecArray | null;
+
+    while ((match = locRegex.exec(xml)) !== null) {
+      try {
+        const url = this.normalizeHttpUrl(this.decodeHtml(match[1].trim()));
+        const parsed = new URL(url);
+
+        if (
+          parsed.protocol === root.protocol &&
+          parsed.hostname === root.hostname &&
+          !this.isSkippedLink(parsed)
+        ) {
+          locs.add(url);
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return [...locs];
   }
 
   private async readLimitedText(response: Response): Promise<string> {
@@ -179,59 +419,98 @@ export class UrlScraperService {
     return new TextDecoder().decode(Buffer.concat(chunks));
   }
 
-  private extractSameOriginLinks(pageUrl: string, html: string): string[] {
+  private extractSameOriginLinks(pageUrl: string, $: CheerioAPI): string[] {
     const page = new URL(pageUrl);
     const links = new Set<string>();
-    const hrefRegex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>/gi;
-    let match: RegExpExecArray | null;
 
-    while ((match = hrefRegex.exec(html)) !== null) {
-      const href = this.decodeHtml(match[1]);
+    $('a[href]').each((_, element) => {
+      const href = $(element).attr('href');
+      if (!href) {
+        return;
+      }
 
       try {
         const link = new URL(href, page);
-        link.hash = '';
+        const normalized = this.normalizeHttpUrl(link.toString());
+        const parsed = new URL(normalized);
 
         if (
-          link.protocol === page.protocol &&
-          link.hostname === page.hostname &&
-          !this.isSkippedLink(link)
+          parsed.protocol === page.protocol &&
+          parsed.hostname === page.hostname &&
+          !this.isSkippedLink(parsed)
         ) {
-          links.add(link.toString());
+          links.add(normalized);
         }
       } catch {
-        continue;
+        return;
       }
-    }
+    });
 
     return [...links].slice(0, this.maxPages * 3);
   }
 
-  private htmlToText(html: string): string {
-    return this.decodeHtml(
-      html
-        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ')
-        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ')
-        .replace(
-          /<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi,
-          ' ',
-        )
-        .replace(/<!--[\s\S]*?-->/g, ' ')
-        .replace(
-          /<\/(p|div|section|article|main|header|footer|li|h[1-6]|br)>/gi,
-          '\n',
-        )
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/[ \t\r\f\v]+/g, ' ')
-        .replace(/\n\s+/g, '\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim(),
-    );
+  private extractReadableText($: CheerioAPI): string {
+    $(
+      'script, style, noscript, svg, canvas, iframe, form, input, button',
+    ).remove();
+    $('[aria-hidden="true"], [hidden]').remove();
+    $('nav, footer, header, aside').remove();
+    $('.nav, .navbar, .footer, .sidebar, .menu, .breadcrumb').remove();
+    $('#nav, #navbar, #footer, #sidebar, #menu, #breadcrumb').remove();
+
+    const candidateSelectors = [
+      'main',
+      'article',
+      '[role="main"]',
+      '.content',
+      '#content',
+      '.course-content',
+      '.lesson-content',
+      'body',
+    ];
+    const bestSelector =
+      candidateSelectors
+        .map((selector) => ({
+          selector,
+          text: this.cleanText($(selector).first().text()),
+        }))
+        .filter((candidate) => candidate.text.length > 0)
+        .sort((a, b) => b.text.length - a.text.length)[0]?.selector ?? 'body';
+    const root = $(bestSelector).first();
+    const blocks: string[] = [];
+
+    root
+      .find('h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,td,th,dt,dd')
+      .each((_, element) => {
+        const text = this.cleanText($(element).text());
+        if (text) {
+          blocks.push(text);
+        }
+      });
+
+    if (!blocks.length) {
+      blocks.push(this.cleanText(root.text()));
+    }
+
+    return this.dedupeLines(blocks.join('\n\n'));
   }
 
-  private extractTitle(html: string): string | null {
-    const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    return match?.[1] ? this.decodeHtml(match[1]).trim() : null;
+  private extractTitle($: CheerioAPI): string | null {
+    const candidates = [
+      $('meta[property="og:title"]').attr('content'),
+      $('meta[name="twitter:title"]').attr('content'),
+      $('h1').first().text(),
+      $('title').first().text(),
+    ];
+
+    for (const candidate of candidates) {
+      const title = this.cleanText(candidate ?? '');
+      if (title) {
+        return title;
+      }
+    }
+
+    return null;
   }
 
   private normalizeHttpUrl(input: string): string {
@@ -248,6 +527,18 @@ export class UrlScraperService {
     }
 
     url.hash = '';
+    url.hostname = url.hostname.toLowerCase();
+
+    for (const param of TRACKING_PARAMS) {
+      url.searchParams.delete(param);
+    }
+
+    url.searchParams.sort();
+
+    if (url.pathname !== '/') {
+      url.pathname = url.pathname.replace(/\/+$/, '');
+    }
+
     return url.toString();
   }
 
@@ -280,6 +571,77 @@ export class UrlScraperService {
 
       throw new BadRequestException('Website host could not be resolved');
     }
+  }
+
+  private assertRobotsAllowed(url: string, robots: RobotsRules | null) {
+    if (!this.respectRobots || !robots) {
+      return;
+    }
+
+    const path = new URL(url).pathname || '/';
+    const matchingAllow = this.longestMatchingRule(path, robots.allow);
+    const matchingDisallow = this.longestMatchingRule(path, robots.disallow);
+
+    if (
+      matchingDisallow &&
+      (!matchingAllow || matchingDisallow.length > matchingAllow.length)
+    ) {
+      throw new BadRequestException('Website robots.txt disallows scraping');
+    }
+  }
+
+  private longestMatchingRule(path: string, rules: string[]): string | null {
+    return (
+      rules
+        .filter((rule) => rule && this.matchesRobotsRule(path, rule))
+        .sort((a, b) => b.length - a.length)[0] ?? null
+    );
+  }
+
+  private matchesRobotsRule(path: string, rule: string): boolean {
+    if (rule === '/') {
+      return true;
+    }
+
+    const escaped = rule
+      .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '.*')
+      .replace(/\\\$/g, '$');
+
+    return new RegExp(`^${escaped}`).test(path);
+  }
+
+  private isUsefulText(text: string): boolean {
+    const normalized = this.cleanText(text);
+    return normalized.length >= 80 && /[a-zA-Z]{3,}/.test(normalized);
+  }
+
+  private cleanText(input: string): string {
+    return this.decodeHtml(input)
+      .replace(/\u00a0/g, ' ')
+      .replace(/[ \t\r\f\v]+/g, ' ')
+      .replace(/\n\s+/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  private dedupeLines(input: string): string {
+    const seen = new Set<string>();
+    const lines: string[] = [];
+
+    for (const line of input.split(/\n+/)) {
+      const cleaned = this.cleanText(line);
+      const key = cleaned.toLowerCase();
+
+      if (!cleaned || seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      lines.push(cleaned);
+    }
+
+    return lines.join('\n\n');
   }
 
   private isPrivateIp(value: string): boolean {
@@ -348,6 +710,10 @@ export class UrlScraperService {
 
       return namedEntities[normalizedCode] ?? entity;
     });
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private toErrorMessage(error: unknown): string {

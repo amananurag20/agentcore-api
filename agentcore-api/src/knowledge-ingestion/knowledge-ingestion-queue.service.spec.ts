@@ -7,8 +7,9 @@ import { KnowledgeIngestionQueueService } from './knowledge-ingestion-queue.serv
 
 describe('KnowledgeIngestionQueueService', () => {
   it('uses a BullMQ-safe custom job id', async () => {
+    const add = jest.fn().mockResolvedValue({ id: 'job' });
     const queueService = {
-      add: jest.fn().mockResolvedValue({ id: 'job' }),
+      add,
       isEnabled: jest.fn().mockReturnValue(true),
     } as unknown as QueueService;
     const service = new KnowledgeIngestionQueueService(queueService);
@@ -19,7 +20,7 @@ describe('KnowledgeIngestionQueueService', () => {
       reason: 'source_created',
     });
 
-    expect(queueService.add).toHaveBeenCalledWith(
+    expect(add).toHaveBeenCalledWith(
       KNOWLEDGE_INGESTION_QUEUE,
       KNOWLEDGE_INGESTION_JOB,
       {

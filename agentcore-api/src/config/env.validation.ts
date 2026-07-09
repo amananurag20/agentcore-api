@@ -102,12 +102,33 @@ class EnvironmentVariables {
   @IsOptional()
   KNOWLEDGE_URL_SCRAPER_TIMEOUT_MS = 10000;
 
+  @Transform(({ value }) => Number(value ?? 2))
+  @IsInt()
+  @Min(0)
+  @Max(5)
+  @IsOptional()
+  KNOWLEDGE_URL_SCRAPER_MAX_RETRIES = 2;
+
   @Transform(({ value }) => Number(value ?? 1000000))
   @IsInt()
   @Min(10000)
   @Max(10000000)
   @IsOptional()
   KNOWLEDGE_URL_SCRAPER_MAX_BYTES = 1000000;
+
+  @Transform(
+    ({ value }) => value === undefined || value === 'true' || value === true,
+  )
+  @IsBoolean()
+  @IsOptional()
+  KNOWLEDGE_URL_SCRAPER_RESPECT_ROBOTS = true;
+
+  @Transform(
+    ({ value }) => value === undefined || value === 'true' || value === true,
+  )
+  @IsBoolean()
+  @IsOptional()
+  KNOWLEDGE_URL_SCRAPER_SITEMAP_ENABLED = true;
 
   @IsString()
   @IsOptional()
