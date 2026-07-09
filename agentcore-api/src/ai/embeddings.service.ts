@@ -1,9 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AIProviderConfig, AIProviderType } from '@prisma/client';
 import { createHash } from 'crypto';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { AIAdapterRegistryService } from './adapters/ai-adapter-registry.service';
 
 export interface EmbeddingResult {
   vector: number[];
@@ -11,14 +12,9 @@ export interface EmbeddingResult {
   provider: AIProviderType | 'local';
 }
 
-interface OpenAIEmbeddingResponse {
-  data: Array<{
-    embedding: number[];
-  }>;
-}
-
 @Injectable()
 export class EmbeddingsService {
+  private readonly logger = new Logger(EmbeddingsService.name);
   private readonly defaultDimensions: number;
   private readonly defaultModel: string;
 
@@ -26,6 +22,7 @@ export class EmbeddingsService {
     private readonly configService: ConfigService,
     private readonly cryptoService: CryptoService,
     private readonly prisma: PrismaService,
+    private readonly adapterRegistry: AIAdapterRegistryService,
   ) {
     this.defaultDimensions =
       this.configService.get<number>('DEFAULT_EMBEDDING_DIMENSIONS') ?? 1536;
@@ -68,10 +65,9 @@ export class EmbeddingsService {
     providerConfig: AIProviderConfig,
     text: string,
   ): Promise<EmbeddingResult> {
-    if (
-      providerConfig.provider !== 'openai' &&
-      providerConfig.provider !== 'custom'
-    ) {
+    const adapter = this.adapterRegistry.getAdapter(providerConfig);
+
+    if (!adapter.createEmbedding) {
       return {
         vector: this.createDeterministicVector(text),
         model: providerConfig.embeddingModel ?? this.defaultModel,
@@ -80,37 +76,32 @@ export class EmbeddingsService {
     }
 
     const apiKey = this.cryptoService.decrypt(providerConfig.apiKeyEncrypted!);
-    const baseUrl =
-      providerConfig.baseUrl?.replace(/\/+$/, '') ??
-      'https://api.openai.com/v1';
-    const response = await fetch(`${baseUrl}/embeddings`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
+    const model = providerConfig.embeddingModel ?? this.defaultModel;
+
+    try {
+      const result = await adapter.createEmbedding({
+        apiKey,
+        baseUrl: providerConfig.baseUrl,
+        model,
+        text,
+      });
+
+      return {
+        vector: result.vector,
+        model: result.model,
+        provider: providerConfig.provider,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `AI embedding adapter failed for provider ${providerConfig.id}; using local deterministic vector. ${this.toErrorMessage(error)}`,
+      );
+
+      return {
+        vector: this.createDeterministicVector(text),
         model: providerConfig.embeddingModel ?? this.defaultModel,
-        input: text,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Embedding provider returned ${response.status}`);
+        provider: providerConfig.provider,
+      };
     }
-
-    const body = (await response.json()) as OpenAIEmbeddingResponse;
-    const vector = body.data[0]?.embedding;
-
-    if (!vector?.length) {
-      throw new Error('Embedding provider returned an empty vector');
-    }
-
-    return {
-      vector,
-      model: providerConfig.embeddingModel ?? this.defaultModel,
-      provider: providerConfig.provider,
-    };
   }
 
   private createDeterministicVector(text: string): number[] {
@@ -128,5 +119,9 @@ export class EmbeddingsService {
       Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
 
     return vector.map((value) => Number((value / magnitude).toFixed(8)));
+  }
+
+  private toErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 }

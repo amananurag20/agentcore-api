@@ -1,8 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AIProviderConfig, AIProviderType } from '@prisma/client';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { AIAdapterRegistryService } from './adapters/ai-adapter-registry.service';
 
 export interface ChatContextChunk {
   content: string;
@@ -15,22 +16,16 @@ export interface ChatResult {
   provider: AIProviderType | 'local';
 }
 
-interface OpenAIChatResponse {
-  choices: Array<{
-    message?: {
-      content?: string;
-    };
-  }>;
-}
-
 @Injectable()
 export class ChatService {
+  private readonly logger = new Logger(ChatService.name);
   private readonly defaultModel: string;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly cryptoService: CryptoService,
     private readonly prisma: PrismaService,
+    private readonly adapterRegistry: AIAdapterRegistryService,
   ) {
     this.defaultModel =
       this.configService.get<string>('DEFAULT_CHAT_MODEL') ?? 'gpt-4.1-mini';
@@ -76,10 +71,9 @@ export class ChatService {
     question: string,
     context: ChatContextChunk[],
   ): Promise<ChatResult> {
-    if (
-      providerConfig.provider !== 'openai' &&
-      providerConfig.provider !== 'custom'
-    ) {
+    const adapter = this.adapterRegistry.getAdapter(providerConfig);
+
+    if (!adapter.createChatCompletion) {
       return {
         answer: this.createFallbackAnswer(question, context),
         model: providerConfig.chatModel ?? this.defaultModel,
@@ -88,17 +82,13 @@ export class ChatService {
     }
 
     const apiKey = this.cryptoService.decrypt(providerConfig.apiKeyEncrypted!);
-    const baseUrl =
-      providerConfig.baseUrl?.replace(/\/+$/, '') ??
-      'https://api.openai.com/v1';
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: providerConfig.chatModel ?? this.defaultModel,
+    const model = providerConfig.chatModel ?? this.defaultModel;
+
+    try {
+      const result = await adapter.createChatCompletion({
+        apiKey,
+        baseUrl: providerConfig.baseUrl,
+        model,
         messages: [
           {
             role: 'system',
@@ -110,26 +100,25 @@ export class ChatService {
             content: this.buildPrompt(question, context),
           },
         ],
-        temperature: 0.2,
-      }),
-    });
+        temperature: this.readTemperature(providerConfig),
+      });
 
-    if (!response.ok) {
-      throw new Error(`Chat provider returned ${response.status}`);
+      return {
+        answer: result.answer,
+        model: result.model,
+        provider: providerConfig.provider,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `AI chat adapter failed for provider ${providerConfig.id}; using fallback answer. ${this.toErrorMessage(error)}`,
+      );
+
+      return {
+        answer: this.createFallbackAnswer(question, context),
+        model: providerConfig.chatModel ?? this.defaultModel,
+        provider: providerConfig.provider,
+      };
     }
-
-    const body = (await response.json()) as OpenAIChatResponse;
-    const answer = body.choices[0]?.message?.content?.trim();
-
-    if (!answer) {
-      throw new Error('Chat provider returned an empty answer');
-    }
-
-    return {
-      answer,
-      model: providerConfig.chatModel ?? this.defaultModel,
-      provider: providerConfig.provider,
-    };
   }
 
   private buildPrompt(question: string, context: ChatContextChunk[]): string {
@@ -149,5 +138,24 @@ export class ChatService {
     }
 
     return `Based on the available knowledge base: ${context[0].content}`;
+  }
+
+  private readTemperature(providerConfig: AIProviderConfig): number {
+    const settings = providerConfig.settings;
+
+    if (
+      settings &&
+      !Array.isArray(settings) &&
+      typeof settings === 'object' &&
+      typeof settings.temperature === 'number'
+    ) {
+      return settings.temperature;
+    }
+
+    return 0.2;
+  }
+
+  private toErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 }
