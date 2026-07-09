@@ -35,6 +35,31 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
+  CORS_ORIGINS?: string;
+
+  @Transform(({ value }) => Number(value ?? 15000))
+  @IsInt()
+  @Min(1000)
+  @Max(120000)
+  @IsOptional()
+  AI_PROVIDER_TIMEOUT_MS = 15000;
+
+  @Transform(({ value }) => Number(value ?? 2))
+  @IsInt()
+  @Min(0)
+  @Max(5)
+  @IsOptional()
+  AI_PROVIDER_MAX_RETRIES = 2;
+
+  @Transform(({ value }) => Number(value ?? 1024))
+  @IsInt()
+  @Min(128)
+  @Max(8192)
+  @IsOptional()
+  AI_PROVIDER_MAX_OUTPUT_TOKENS = 1024;
+
+  @IsString()
+  @IsOptional()
   S3_STORAGE_PROVIDER?: 's3' | 'r2' | 'minio';
 
   @IsString()

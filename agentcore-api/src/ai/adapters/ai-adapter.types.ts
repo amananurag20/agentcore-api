@@ -11,6 +11,7 @@ export interface AIChatMessage {
 export interface AIChatRequest {
   apiKey?: string;
   baseUrl?: string | null;
+  maxOutputTokens?: number;
   model: string;
   messages: AIChatMessage[];
   temperature?: number;
@@ -39,4 +40,10 @@ export interface AIProviderAdapter {
   readonly kind: AIAdapterKind;
   createChatCompletion?(input: AIChatRequest): Promise<AIChatResponse>;
   createEmbedding?(input: AIEmbeddingRequest): Promise<AIEmbeddingResponse>;
+}
+
+export interface AIProviderAdapterOptions {
+  maxRetries: number;
+  maxOutputTokens: number;
+  timeoutMs: number;
 }

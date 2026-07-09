@@ -1,26 +1,43 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AIProviderConfig, Prisma } from '@prisma/client';
 import { AnthropicAdapter } from './anthropic.adapter';
-import { AIAdapterKind, AIProviderAdapter } from './ai-adapter.types';
+import {
+  AIAdapterKind,
+  AIProviderAdapter,
+  AIProviderAdapterOptions,
+} from './ai-adapter.types';
 import { OllamaAdapter } from './ollama.adapter';
 import { OpenAICompatibleAdapter } from './openai-compatible.adapter';
 
 @Injectable()
 export class AIAdapterRegistryService {
-  private readonly openAI = new OpenAICompatibleAdapter(
-    'openai',
-    'https://api.openai.com/v1',
-  );
-  private readonly openAICompatible = new OpenAICompatibleAdapter(
-    'openai_compatible',
-    'https://api.openai.com/v1',
-  );
-  private readonly mistral = new OpenAICompatibleAdapter(
-    'mistral',
-    'https://api.mistral.ai/v1',
-  );
-  private readonly anthropic = new AnthropicAdapter();
-  private readonly ollama = new OllamaAdapter();
+  private readonly anthropic: AnthropicAdapter;
+  private readonly mistral: OpenAICompatibleAdapter;
+  private readonly ollama: OllamaAdapter;
+  private readonly openAI: OpenAICompatibleAdapter;
+  private readonly openAICompatible: OpenAICompatibleAdapter;
+
+  constructor(private readonly configService: ConfigService) {
+    const options = this.resolveOptions();
+    this.openAI = new OpenAICompatibleAdapter(
+      'openai',
+      'https://api.openai.com/v1',
+      options,
+    );
+    this.openAICompatible = new OpenAICompatibleAdapter(
+      'openai_compatible',
+      'https://api.openai.com/v1',
+      options,
+    );
+    this.mistral = new OpenAICompatibleAdapter(
+      'mistral',
+      'https://api.mistral.ai/v1',
+      options,
+    );
+    this.anthropic = new AnthropicAdapter(options);
+    this.ollama = new OllamaAdapter(options);
+  }
 
   getAdapter(config: AIProviderConfig): AIProviderAdapter {
     const settings = this.toRecord(config.settings);
@@ -85,6 +102,17 @@ export class AIAdapterRegistryService {
 
   private looksLikeMistral(baseUrl?: string | null): boolean {
     return Boolean(baseUrl?.toLowerCase().includes('mistral.ai'));
+  }
+
+  private resolveOptions(): AIProviderAdapterOptions {
+    return {
+      maxOutputTokens:
+        this.configService.get<number>('AI_PROVIDER_MAX_OUTPUT_TOKENS') ?? 1024,
+      maxRetries:
+        this.configService.get<number>('AI_PROVIDER_MAX_RETRIES') ?? 2,
+      timeoutMs:
+        this.configService.get<number>('AI_PROVIDER_TIMEOUT_MS') ?? 15_000,
+    };
   }
 
   private toRecord(value: Prisma.JsonValue): Record<string, unknown> {

@@ -9,7 +9,7 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
 
   app.enableCors({
-    origin: '*',
+    origin: resolveCorsOrigins(configService),
   });
 
   app.setGlobalPrefix('api');
@@ -31,3 +31,16 @@ async function bootstrap() {
   await app.listen(configService.getOrThrow<number>('PORT'));
 }
 void bootstrap();
+
+function resolveCorsOrigins(configService: ConfigService): true | string[] {
+  const rawOrigins = configService.get<string>('CORS_ORIGINS');
+
+  if (!rawOrigins || rawOrigins.trim() === '*') {
+    return true;
+  }
+
+  return rawOrigins
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}

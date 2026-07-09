@@ -23,6 +23,7 @@ export interface ChatResult {
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
   private readonly defaultModel: string;
+  private readonly maxOutputTokens: number;
 
   constructor(
     private readonly configService: ConfigService,
@@ -32,6 +33,8 @@ export class ChatService {
   ) {
     this.defaultModel =
       this.configService.get<string>('DEFAULT_CHAT_MODEL') ?? 'gpt-4.1-mini';
+    this.maxOutputTokens =
+      this.configService.get<number>('AI_PROVIDER_MAX_OUTPUT_TOKENS') ?? 1024;
   }
 
   async answerWithContext(input: {
@@ -99,6 +102,7 @@ export class ChatService {
       const result = await adapter.createChatCompletion({
         apiKey,
         baseUrl: providerConfig.baseUrl,
+        maxOutputTokens: this.maxOutputTokens,
         model,
         messages: [
           {

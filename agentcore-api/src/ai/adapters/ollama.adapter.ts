@@ -4,6 +4,7 @@ import {
   AIEmbeddingRequest,
   AIEmbeddingResponse,
   AIProviderAdapter,
+  AIProviderAdapterOptions,
 } from './ai-adapter.types';
 
 interface OllamaChatResponse {
@@ -17,11 +18,21 @@ interface OllamaEmbeddingResponse {
   embedding?: number[];
 }
 
+const RETRYABLE_STATUSES = [408, 425, 429, 500, 502, 503, 504];
+
 export class OllamaAdapter implements AIProviderAdapter {
   readonly kind = 'ollama' as const;
 
+  constructor(
+    private readonly options: AIProviderAdapterOptions = {
+      maxOutputTokens: 1024,
+      maxRetries: 2,
+      timeoutMs: 15_000,
+    },
+  ) {}
+
   async createChatCompletion(input: AIChatRequest): Promise<AIChatResponse> {
-    const response = await fetch(
+    const response = await this.fetchWithRetry(
       `${this.resolveBaseUrl(input.baseUrl)}/api/chat`,
       {
         method: 'POST',
@@ -31,6 +42,7 @@ export class OllamaAdapter implements AIProviderAdapter {
           messages: input.messages,
           stream: false,
           options: {
+            num_predict: input.maxOutputTokens ?? this.options.maxOutputTokens,
             temperature: input.temperature ?? 0.2,
           },
         }),
@@ -60,7 +72,7 @@ export class OllamaAdapter implements AIProviderAdapter {
   async createEmbedding(
     input: AIEmbeddingRequest,
   ): Promise<AIEmbeddingResponse> {
-    const response = await fetch(
+    const response = await this.fetchWithRetry(
       `${this.resolveBaseUrl(input.baseUrl)}/api/embeddings`,
       {
         method: 'POST',
@@ -94,6 +106,65 @@ export class OllamaAdapter implements AIProviderAdapter {
 
   private resolveBaseUrl(baseUrl?: string | null): string {
     return (baseUrl || 'http://localhost:11434').replace(/\/+$/, '');
+  }
+
+  private async fetchWithRetry(
+    url: string,
+    init: RequestInit,
+  ): Promise<Response> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= this.options.maxRetries; attempt += 1) {
+      try {
+        const response = await fetch(url, {
+          ...init,
+          signal: AbortSignal.timeout(this.options.timeoutMs),
+        });
+
+        if (
+          attempt < this.options.maxRetries &&
+          RETRYABLE_STATUSES.includes(response.status)
+        ) {
+          await this.sleep(this.resolveRetryDelayMs(response, attempt));
+          continue;
+        }
+
+        return response;
+      } catch (error) {
+        lastError = error;
+
+        if (attempt < this.options.maxRetries) {
+          await this.sleep(250 * (attempt + 1));
+          continue;
+        }
+      }
+    }
+
+    throw new Error(
+      `AI provider request failed: ${this.toErrorMessage(lastError)}`,
+    );
+  }
+
+  private resolveRetryDelayMs(response: Response, attempt: number): number {
+    const retryAfter = response.headers.get('retry-after');
+
+    if (retryAfter) {
+      const retryAfterSeconds = Number(retryAfter);
+
+      if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+        return Math.min(retryAfterSeconds * 1000, 5000);
+      }
+    }
+
+    return 250 * (attempt + 1);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private toErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private async readProviderError(response: Response): Promise<string> {
