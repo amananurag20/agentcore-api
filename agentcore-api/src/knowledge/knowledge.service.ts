@@ -84,7 +84,7 @@ export class KnowledgeService {
       input.organizationId,
     );
 
-    const source = await this.prisma.$transaction(async (tx) => {
+    let source = await this.prisma.$transaction(async (tx) => {
       const createdSource = await tx.knowledgeSource.create({
         data: {
           organizationId,
@@ -115,7 +115,7 @@ export class KnowledgeService {
       return createdSource;
     });
 
-    await this.enqueueIngestion(source, 'source_created');
+    source = await this.enqueueIngestion(source, 'source_created');
 
     await this.auditService.record({
       actor: currentUser,
@@ -151,7 +151,7 @@ export class KnowledgeService {
       file,
     });
 
-    const source = await this.prisma.knowledgeSource.create({
+    let source = await this.prisma.knowledgeSource.create({
       data: {
         organizationId,
         type: 'uploaded_file',
@@ -168,7 +168,7 @@ export class KnowledgeService {
       },
     });
 
-    await this.enqueueIngestion(source, 'file_uploaded');
+    source = await this.enqueueIngestion(source, 'file_uploaded');
 
     await this.auditService.record({
       actor: currentUser,
@@ -454,7 +454,7 @@ export class KnowledgeService {
   private async enqueueIngestion(
     source: KnowledgeSource,
     reason: 'source_created' | 'file_uploaded',
-  ) {
+  ): Promise<KnowledgeSource> {
     if (
       !this.ingestionQueueService.isEnabled() &&
       (source.rawText || source.type === 'website_url')
@@ -464,14 +464,28 @@ export class KnowledgeService {
         sourceId: source.id,
         reason,
       });
-      return;
+      return this.prisma.knowledgeSource.findUniqueOrThrow({
+        where: { id: source.id },
+      });
     }
 
-    await this.ingestionQueueService.enqueue({
-      organizationId: source.organizationId,
-      sourceId: source.id,
-      reason,
-    });
+    try {
+      await this.ingestionQueueService.enqueue({
+        organizationId: source.organizationId,
+        sourceId: source.id,
+        reason,
+      });
+
+      return source;
+    } catch (error) {
+      return this.prisma.knowledgeSource.update({
+        where: { id: source.id },
+        data: {
+          status: 'failed',
+          errorMessage: `Knowledge ingestion could not be queued: ${this.toErrorMessage(error)}`,
+        },
+      });
+    }
   }
 
   private parseMetadata(value?: string): Record<string, unknown> {
@@ -498,6 +512,10 @@ export class KnowledgeService {
     return Object.fromEntries(
       Object.entries(value).filter(([, entry]) => entry !== undefined),
     );
+  }
+
+  private toErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {

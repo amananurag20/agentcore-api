@@ -107,14 +107,7 @@ export class UrlScraperService {
     for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
       await this.assertPublicUrl(currentUrl);
 
-      const response = await fetch(currentUrl, {
-        headers: {
-          Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
-          'User-Agent': 'AgentCoreKnowledgeBot/1.0',
-        },
-        redirect: 'manual',
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
+      const response = await this.safeFetch(currentUrl);
 
       if (![301, 302, 303, 307, 308].includes(response.status)) {
         return response;
@@ -132,6 +125,27 @@ export class UrlScraperService {
     }
 
     throw new BadRequestException('Website redirected too many times');
+  }
+
+  private async safeFetch(url: string): Promise<Response> {
+    try {
+      return await fetch(url, {
+        headers: {
+          Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
+          'User-Agent': 'AgentCoreKnowledgeBot/1.0',
+        },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
+      throw new BadRequestException(
+        `Website could not be fetched: ${this.toErrorMessage(error)}`,
+      );
+    }
   }
 
   private async readLimitedText(response: Response): Promise<string> {
@@ -334,5 +348,9 @@ export class UrlScraperService {
 
       return namedEntities[normalizedCode] ?? entity;
     });
+  }
+
+  private toErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 }
