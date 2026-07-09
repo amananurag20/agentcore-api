@@ -616,6 +616,9 @@ export class VoiceReceptionistService {
         metadata: this.toJsonObject({
           model: chatResult.model,
           provider: chatResult.provider,
+          adapter: chatResult.adapter,
+          usedFallback: chatResult.usedFallback,
+          error: chatResult.error,
           action,
           citations: searchResults.map((result) => ({
             chunkId: result.id,

@@ -497,6 +497,9 @@ export class WhatsAppAssistantService {
         metadata: this.toJsonObject({
           model: chatResult.model,
           provider: chatResult.provider,
+          adapter: chatResult.adapter,
+          usedFallback: chatResult.usedFallback,
+          error: chatResult.error,
           delivery,
           citations: searchResults.map((result) => ({
             chunkId: result.id,

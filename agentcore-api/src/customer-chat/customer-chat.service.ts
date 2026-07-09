@@ -182,6 +182,9 @@ export class CustomerChatService {
         metadata: this.toJsonObject({
           model: chatResult.model,
           provider: chatResult.provider,
+          adapter: chatResult.adapter,
+          usedFallback: chatResult.usedFallback,
+          error: chatResult.error,
         }),
         citations: {
           create: searchResults.map((result) => ({

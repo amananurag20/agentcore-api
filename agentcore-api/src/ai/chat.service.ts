@@ -14,6 +14,9 @@ export interface ChatResult {
   answer: string;
   model: string;
   provider: AIProviderType | 'local';
+  adapter?: string;
+  error?: string;
+  usedFallback: boolean;
 }
 
 @Injectable()
@@ -50,6 +53,11 @@ export class ChatService {
       answer: this.createFallbackAnswer(input.question, input.context),
       model: providerConfig?.chatModel ?? this.defaultModel,
       provider: providerConfig?.provider ?? 'local',
+      adapter: providerConfig ? 'none' : 'local',
+      usedFallback: true,
+      error: providerConfig
+        ? 'Provider has no API key configured'
+        : 'No active chat provider configured',
     };
   }
 
@@ -78,6 +86,9 @@ export class ChatService {
         answer: this.createFallbackAnswer(question, context),
         model: providerConfig.chatModel ?? this.defaultModel,
         provider: providerConfig.provider,
+        adapter: adapter.kind,
+        usedFallback: true,
+        error: `Adapter ${adapter.kind} does not support chat completions`,
       };
     }
 
@@ -107,16 +118,22 @@ export class ChatService {
         answer: result.answer,
         model: result.model,
         provider: providerConfig.provider,
+        adapter: result.adapter,
+        usedFallback: false,
       };
     } catch (error) {
+      const errorMessage = this.toErrorMessage(error);
       this.logger.warn(
-        `AI chat adapter failed for provider ${providerConfig.id}; using fallback answer. ${this.toErrorMessage(error)}`,
+        `AI chat adapter failed for provider ${providerConfig.id}; using fallback answer. ${errorMessage}`,
       );
 
       return {
         answer: this.createFallbackAnswer(question, context),
         model: providerConfig.chatModel ?? this.defaultModel,
         provider: providerConfig.provider,
+        adapter: adapter.kind,
+        usedFallback: true,
+        error: errorMessage,
       };
     }
   }
