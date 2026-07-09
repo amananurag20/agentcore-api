@@ -16,7 +16,7 @@ export class KnowledgeIngestionQueueService {
       KNOWLEDGE_INGESTION_JOB,
       data,
       {
-        jobId: `${data.sourceId}:${data.reason}`,
+        jobId: `${data.sourceId}-${data.reason}`,
       },
     );
   }
