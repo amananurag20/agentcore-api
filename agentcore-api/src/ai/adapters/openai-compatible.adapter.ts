@@ -42,7 +42,9 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
     );
 
     if (!response.ok) {
-      throw new Error(`Chat provider returned ${response.status}`);
+      throw new Error(
+        `Chat provider returned ${response.status}: ${await this.readProviderError(response)}`,
+      );
     }
 
     const body = (await response.json()) as OpenAICompatibleChatResponse;
@@ -75,7 +77,9 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
     );
 
     if (!response.ok) {
-      throw new Error(`Embedding provider returned ${response.status}`);
+      throw new Error(
+        `Embedding provider returned ${response.status}: ${await this.readProviderError(response)}`,
+      );
     }
 
     const body = (await response.json()) as OpenAICompatibleEmbeddingResponse;
@@ -118,5 +122,56 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
     }
 
     return '';
+  }
+
+  private async readProviderError(response: Response): Promise<string> {
+    const text = await response.text();
+
+    if (!text) {
+      return response.statusText || 'No provider error body returned';
+    }
+
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      return this.extractErrorMessage(parsed) ?? text;
+    } catch {
+      return text;
+    }
+  }
+
+  private extractErrorMessage(value: unknown): string | null {
+    if (!value || typeof value !== 'object') {
+      return null;
+    }
+
+    const record = value as Record<string, unknown>;
+
+    if (typeof record.message === 'string') {
+      return record.message;
+    }
+
+    if (typeof record.detail === 'string') {
+      return record.detail;
+    }
+
+    if (record.error) {
+      if (typeof record.error === 'string') {
+        return record.error;
+      }
+
+      if (typeof record.error === 'object') {
+        const errorRecord = record.error as Record<string, unknown>;
+
+        if (typeof errorRecord.message === 'string') {
+          return errorRecord.message;
+        }
+
+        if (typeof errorRecord.type === 'string') {
+          return errorRecord.type;
+        }
+      }
+    }
+
+    return null;
   }
 }

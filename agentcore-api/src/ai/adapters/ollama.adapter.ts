@@ -38,7 +38,9 @@ export class OllamaAdapter implements AIProviderAdapter {
     );
 
     if (!response.ok) {
-      throw new Error(`Ollama chat provider returned ${response.status}`);
+      throw new Error(
+        `Ollama chat provider returned ${response.status}: ${await this.readProviderError(response)}`,
+      );
     }
 
     const body = (await response.json()) as OllamaChatResponse;
@@ -71,7 +73,9 @@ export class OllamaAdapter implements AIProviderAdapter {
     );
 
     if (!response.ok) {
-      throw new Error(`Ollama embedding provider returned ${response.status}`);
+      throw new Error(
+        `Ollama embedding provider returned ${response.status}: ${await this.readProviderError(response)}`,
+      );
     }
 
     const body = (await response.json()) as OllamaEmbeddingResponse;
@@ -90,5 +94,33 @@ export class OllamaAdapter implements AIProviderAdapter {
 
   private resolveBaseUrl(baseUrl?: string | null): string {
     return (baseUrl || 'http://localhost:11434').replace(/\/+$/, '');
+  }
+
+  private async readProviderError(response: Response): Promise<string> {
+    const text = await response.text();
+
+    if (!text) {
+      return response.statusText || 'No provider error body returned';
+    }
+
+    try {
+      const parsed = JSON.parse(text) as unknown;
+
+      if (parsed && typeof parsed === 'object') {
+        const record = parsed as Record<string, unknown>;
+
+        if (typeof record.error === 'string') {
+          return record.error;
+        }
+
+        if (typeof record.message === 'string') {
+          return record.message;
+        }
+      }
+
+      return text;
+    } catch {
+      return text;
+    }
   }
 }
