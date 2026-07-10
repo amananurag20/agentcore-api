@@ -63,4 +63,16 @@ export class OrganizationsController {
   getById(@Param('id') id: string) {
     return this.organizationsService.findById(id);
   }
+
+  @Patch(':id')
+  @Roles('super_admin')
+  @ApiOperation({ summary: 'Update an organization by id' })
+  @ApiOkResponse({ type: OrganizationResponseDto })
+  updateById(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: UpdateOrganizationDto,
+  ) {
+    return this.organizationsService.update(id, body, user);
+  }
 }
