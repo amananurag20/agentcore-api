@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Organization, Prisma } from '@prisma/client';
+import { hash } from 'bcryptjs';
 import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { PrismaService } from '../prisma/prisma.service';
@@ -17,37 +18,91 @@ export class OrganizationsService {
     private readonly prisma: PrismaService,
   ) {}
 
-  async create(
-    input: CreateOrganizationDto,
-    actor?: AuthenticatedUser,
-  ): Promise<Organization> {
+  async create(input: CreateOrganizationDto, actor?: AuthenticatedUser) {
     try {
-      const organization = await this.prisma.organization.create({
-        data: {
-          name: input.name,
-          slug: input.slug ?? this.slugify(input.name),
-          plan: input.plan ?? 'free',
-          deploymentMode: input.deploymentMode ?? 'saas',
-        },
+      const passwordHash = await hash(input.firstAdmin.password, 12);
+      const email = input.firstAdmin.email.trim().toLowerCase();
+
+      const result = await this.prisma.$transaction(async (tx) => {
+        const organization = await tx.organization.create({
+          data: {
+            name: input.name,
+            slug: input.slug ?? this.slugify(input.name),
+            contactEmail: input.contactEmail?.trim().toLowerCase(),
+            contactPhone: input.contactPhone?.trim(),
+            plan: input.plan ?? 'free',
+            deploymentMode: input.deploymentMode ?? 'saas',
+          },
+        });
+
+        const firstAdmin = await tx.user.create({
+          data: {
+            orgId: organization.id,
+            email,
+            name: input.firstAdmin.name,
+            passwordHash,
+            roles: ['org_admin'],
+            clearanceLevel: 4,
+          },
+        });
+
+        if (input.enabledProducts?.length) {
+          const products = await tx.product.findMany({
+            where: { key: { in: input.enabledProducts }, status: 'active' },
+          });
+          await tx.organizationProduct.createMany({
+            data: products.map((product) => ({
+              organizationId: organization.id,
+              productId: product.id,
+              status: 'enabled' as const,
+            })),
+          });
+        }
+
+        return { organization, firstAdmin };
       });
 
       await this.auditService.record({
         actor,
-        organizationId: organization.id,
+        organizationId: result.organization.id,
         action: 'organization.created',
         entityType: 'organization',
-        entityId: organization.id,
+        entityId: result.organization.id,
         metadata: {
-          name: organization.name,
-          plan: organization.plan,
+          name: result.organization.name,
+          plan: result.organization.plan,
+          firstAdminId: result.firstAdmin.id,
+          firstAdminEmail: result.firstAdmin.email,
+          enabledProducts: input.enabledProducts ?? [],
         },
       });
 
-      return organization;
+      return {
+        ...result.organization,
+        firstAdmin: {
+          id: result.firstAdmin.id,
+          name: result.firstAdmin.name,
+          email: result.firstAdmin.email,
+        },
+      };
     } catch (error) {
       this.handleKnownError(error);
       throw error;
     }
+  }
+
+  async list() {
+    return this.prisma.organization.findMany({
+      include: {
+        users: {
+          where: { roles: { has: 'org_admin' } },
+          select: { id: true, name: true, email: true, isActive: true },
+          orderBy: { createdAt: 'asc' },
+        },
+        _count: { select: { users: true, products: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   async findById(id: string): Promise<Organization> {
@@ -76,6 +131,8 @@ export class OrganizationsService {
         where: { id },
         data: {
           name: input.name,
+          contactEmail: input.contactEmail?.trim().toLowerCase(),
+          contactPhone: input.contactPhone?.trim(),
           slug: input.slug,
           status: input.status,
           plan: input.plan,
@@ -91,6 +148,8 @@ export class OrganizationsService {
         entityId: organization.id,
         metadata: this.removeUndefined({
           name: input.name,
+          contactEmail: input.contactEmail,
+          contactPhone: input.contactPhone,
           slug: input.slug,
           status: input.status,
           plan: input.plan,

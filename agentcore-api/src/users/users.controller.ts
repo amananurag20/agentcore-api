@@ -74,6 +74,12 @@ export class UsersController {
     @Param('id') id: string,
     @Body() body: UpdateUserRolesDto,
   ) {
-    return this.usersService.updateManagedUserRoles(user, id, body.roles);
+    return this.usersService.updateManagedUserRoles(
+      user,
+      id,
+      body.roles,
+      body.clearanceLevel,
+      body.productAccess,
+    );
   }
 }

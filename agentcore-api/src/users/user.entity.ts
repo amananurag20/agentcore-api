@@ -1,4 +1,5 @@
 import { UserRole } from '../common/auth/authenticated-request';
+import type { ProductAccessGrant } from '../common/auth/product-access.types';
 
 export interface User {
   id: string;
@@ -7,6 +8,8 @@ export interface User {
   name: string;
   passwordHash: string;
   roles: UserRole[];
+  clearanceLevel: number;
+  productAccess: ProductAccessGrant[];
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;

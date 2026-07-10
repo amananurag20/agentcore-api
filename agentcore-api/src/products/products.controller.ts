@@ -66,3 +66,36 @@ export class OrganizationProductsController {
     );
   }
 }
+
+@ApiTags('Platform Organization Products')
+@ApiBearerAuth('bearer')
+@Controller('organizations/:organizationId/products')
+@Roles('super_admin')
+export class PlatformOrganizationProductsController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  @Get()
+  list(@Param('organizationId') organizationId: string) {
+    return this.productsService.listOrganizationProductsById(organizationId);
+  }
+
+  @Patch(':productKey')
+  update(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('organizationId') organizationId: string,
+    @Param('productKey')
+    productKey:
+      | 'customer_chat'
+      | 'appointment_booking'
+      | 'whatsapp_assistant'
+      | 'voice_receptionist',
+    @Body() body: UpdateOrganizationProductDto,
+  ) {
+    return this.productsService.updateOrganizationProduct(
+      user,
+      organizationId,
+      productKey,
+      body,
+    );
+  }
+}

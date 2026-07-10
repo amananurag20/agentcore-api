@@ -92,6 +92,10 @@ export class KnowledgeService {
           type: input.type,
           status: input.status ?? this.resolveInitialStatus(),
           name: input.name,
+          sensitivityLevel: input.sensitivityLevel,
+          productVisibility: input.productVisibility,
+          categories: input.categories,
+          isQuarantined: input.isQuarantined,
           url: input.url,
           fileName: input.fileName,
           mimeType: input.mimeType,
@@ -106,6 +110,10 @@ export class KnowledgeService {
             organizationId,
             sourceId: createdSource.id,
             title: input.name,
+            sensitivityLevel: input.sensitivityLevel,
+            productVisibility: input.productVisibility,
+            categories: input.categories,
+            isQuarantined: input.isQuarantined,
             uri: input.url,
             contentText: input.rawText,
             metadata: this.toJsonObject(input.metadata),
@@ -127,6 +135,8 @@ export class KnowledgeService {
       metadata: {
         type: source.type,
         name: source.name,
+        sensitivityLevel: source.sensitivityLevel,
+        productVisibility: source.productVisibility,
       },
     });
 
@@ -159,6 +169,8 @@ export class KnowledgeService {
         type: 'uploaded_file',
         status: 'pending',
         name: input.name,
+        sensitivityLevel: input.sensitivityLevel,
+        productVisibility: input.productVisibility,
         fileName: file.originalname,
         mimeType: file.mimetype,
         storageProvider: storedObject.provider,
@@ -184,6 +196,8 @@ export class KnowledgeService {
         storageProvider: source.storageProvider,
         storageBucket: source.storageBucket,
         storageKey: source.storageKey,
+        sensitivityLevel: source.sensitivityLevel,
+        productVisibility: source.productVisibility,
       },
     });
 
@@ -231,23 +245,48 @@ export class KnowledgeService {
   ): Promise<SafeKnowledgeSource> {
     await this.findSourceForActor(currentUser, id);
 
-    const source = await this.prisma.knowledgeSource.update({
-      where: { id },
-      data: {
-        organizationId: input.organizationId
-          ? this.resolveOrganizationId(currentUser, input.organizationId)
-          : undefined,
-        type: input.type,
-        status: input.status,
-        name: input.name,
-        url: input.url,
-        fileName: input.fileName,
-        mimeType: input.mimeType,
-        rawText: input.rawText,
-        metadata: input.metadata
-          ? this.toJsonObject(input.metadata)
-          : undefined,
-      },
+    const source = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.knowledgeSource.update({
+        where: { id },
+        data: {
+          organizationId: input.organizationId
+            ? this.resolveOrganizationId(currentUser, input.organizationId)
+            : undefined,
+          type: input.type,
+          status: input.status,
+          name: input.name,
+          sensitivityLevel: input.sensitivityLevel,
+          productVisibility: input.productVisibility,
+          categories: input.categories,
+          isQuarantined: input.isQuarantined,
+          url: input.url,
+          fileName: input.fileName,
+          mimeType: input.mimeType,
+          rawText: input.rawText,
+          metadata: input.metadata
+            ? this.toJsonObject(input.metadata)
+            : undefined,
+        },
+      });
+
+      const inheritedAccess = this.removeUndefined({
+        sensitivityLevel: input.sensitivityLevel,
+        productVisibility: input.productVisibility,
+        categories: input.categories,
+        isQuarantined: input.isQuarantined,
+      });
+      if (Object.keys(inheritedAccess).length) {
+        await tx.knowledgeDocument.updateMany({
+          where: { sourceId: id },
+          data: inheritedAccess,
+        });
+        await tx.knowledgeChunk.updateMany({
+          where: { sourceId: id },
+          data: inheritedAccess,
+        });
+      }
+
+      return updated;
     });
 
     await this.auditService.record({
@@ -261,6 +300,9 @@ export class KnowledgeService {
         status: input.status,
         name: input.name,
         url: input.url,
+        sensitivityLevel: input.sensitivityLevel,
+        productVisibility: input.productVisibility,
+        isQuarantined: input.isQuarantined,
       }),
     });
 
@@ -352,6 +394,10 @@ export class KnowledgeService {
     const sourceFilter = input.sourceId
       ? Prisma.sql`AND "source_id" = ${input.sourceId}`
       : Prisma.empty;
+    const productFilter = input.productKey
+      ? Prisma.sql`AND ${input.productKey}::"ProductKey" = ANY("product_visibility")`
+      : Prisma.empty;
+    const clearanceLevel = currentUser.clearanceLevel ?? 0;
 
     return this.prisma.$queryRaw<KnowledgeSearchRow[]>`
       SELECT
@@ -366,8 +412,11 @@ export class KnowledgeService {
         "embedding_provider"::text AS "embeddingProvider"
       FROM "knowledge_chunks"
       WHERE "organization_id" = ${currentUser.orgId}
+        AND "sensitivity_level" <= ${clearanceLevel}
+        AND "is_quarantined" = false
         AND "embedding" IS NOT NULL
         ${sourceFilter}
+        ${productFilter}
       ORDER BY "embedding" <=> ${toPgVector(embedding.vector)}::vector
       LIMIT ${limit}
     `;

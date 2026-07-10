@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsEmail,
   IsIn,
   IsOptional,
   IsString,
@@ -13,6 +14,16 @@ export class UpdateOrganizationDto {
   @MinLength(2)
   @IsOptional()
   name?: string;
+
+  @ApiPropertyOptional({ example: 'operations@acme.com' })
+  @IsEmail()
+  @IsOptional()
+  contactEmail?: string;
+
+  @ApiPropertyOptional({ example: '+1 555 0100' })
+  @IsString()
+  @IsOptional()
+  contactPhone?: string;
 
   @ApiPropertyOptional({ example: 'acme-inc' })
   @IsString()

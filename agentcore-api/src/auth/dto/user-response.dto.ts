@@ -15,11 +15,22 @@ export class UserResponseDto {
   name: string;
 
   @ApiProperty({
-    enum: ['super_admin', 'org_admin', 'agent', 'user'],
+    enum: ['super_admin', 'org_admin', 'product_admin', 'agent', 'user'],
     isArray: true,
     example: ['super_admin', 'org_admin'],
   })
   roles: UserRole[];
+
+  @ApiProperty({ example: 2, minimum: 0, maximum: 4 })
+  clearanceLevel: number;
+
+  @ApiProperty({ isArray: true, type: Object })
+  productAccess: Array<{
+    productKey: string;
+    canUse: boolean;
+    canConfigure: boolean;
+    canManageAgents: boolean;
+  }>;
 
   @ApiProperty({ example: true })
   isActive: boolean;

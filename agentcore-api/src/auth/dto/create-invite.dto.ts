@@ -6,8 +6,14 @@ import {
   IsOptional,
   IsString,
   MinLength,
+  IsInt,
+  Max,
+  Min,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { UserRole } from '../../common/auth/authenticated-request';
+import { ProductAccessDto } from '../../users/dto/product-access.dto';
 
 export class CreateInviteDto {
   @ApiProperty({ example: 'agent@agentcore.local' })
@@ -30,7 +36,7 @@ export class CreateInviteDto {
   orgId?: string;
 
   @ApiPropertyOptional({
-    enum: ['super_admin', 'org_admin', 'agent', 'user'],
+    enum: ['super_admin', 'org_admin', 'product_admin', 'agent', 'user'],
     isArray: true,
     example: ['agent'],
   })
@@ -38,4 +44,18 @@ export class CreateInviteDto {
   @ArrayNotEmpty()
   @IsOptional()
   roles?: UserRole[];
+
+  @ApiPropertyOptional({ minimum: 0, maximum: 4 })
+  @IsInt()
+  @Min(0)
+  @Max(4)
+  @IsOptional()
+  clearanceLevel?: number;
+
+  @ApiPropertyOptional({ type: ProductAccessDto, isArray: true })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ProductAccessDto)
+  @IsOptional()
+  productAccess?: ProductAccessDto[];
 }

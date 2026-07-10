@@ -5,9 +5,18 @@ import {
   IsOptional,
   IsString,
   IsUrl,
+  IsArray,
+  IsBoolean,
+  IsInt,
+  Max,
+  Min,
   MinLength,
   ValidateIf,
 } from 'class-validator';
+import {
+  PRODUCT_KEYS,
+  type ProductKey,
+} from '../../common/auth/product-access.types';
 
 export class CreateKnowledgeSourceDto {
   @ApiPropertyOptional({
@@ -39,6 +48,30 @@ export class CreateKnowledgeSourceDto {
   @IsString()
   @MinLength(2)
   name: string;
+
+  @ApiPropertyOptional({ minimum: 0, maximum: 4, default: 0 })
+  @IsInt()
+  @Min(0)
+  @Max(4)
+  @IsOptional()
+  sensitivityLevel?: number;
+
+  @ApiPropertyOptional({ enum: PRODUCT_KEYS, isArray: true })
+  @IsArray()
+  @IsIn(PRODUCT_KEYS, { each: true })
+  @IsOptional()
+  productVisibility?: ProductKey[];
+
+  @ApiPropertyOptional({ type: String, isArray: true })
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  categories?: string[];
+
+  @ApiPropertyOptional({ default: false })
+  @IsBoolean()
+  @IsOptional()
+  isQuarantined?: boolean;
 
   @ApiPropertyOptional({ example: 'https://example.com' })
   @ValidateIf((input: CreateKnowledgeSourceDto) => input.type === 'website_url')

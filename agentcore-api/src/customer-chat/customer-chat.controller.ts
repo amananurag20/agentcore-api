@@ -22,6 +22,7 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CurrentUser } from '../common/auth/current-user.decorator';
 import { Public } from '../common/auth/public.decorator';
 import { Roles } from '../common/auth/roles.decorator';
+import { RequireProductAccess } from '../common/auth/product-access.decorator';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
 import {
   AssignCustomerChatConversationDto,
@@ -49,7 +50,8 @@ import { CustomerChatService } from './customer-chat.service';
 @ApiTags('Customer Chat')
 @ApiBearerAuth('bearer')
 @Controller('customer-chat')
-@Roles('super_admin', 'org_admin', 'agent')
+@Roles('super_admin', 'org_admin', 'product_admin', 'agent', 'user')
+@RequireProductAccess('customer_chat')
 export class CustomerChatController {
   constructor(private readonly customerChatService: CustomerChatService) {}
 
@@ -81,6 +83,7 @@ export class CustomerChatController {
   }
 
   @Patch('widget-config')
+  @RequireProductAccess('customer_chat', 'configure')
   @ApiOperation({ summary: 'Update customer chat widget config' })
   @ApiOkResponse({ type: CustomerChatWidgetConfigDto })
   updateWidgetConfig(

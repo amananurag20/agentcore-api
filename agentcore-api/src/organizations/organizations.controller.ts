@@ -31,6 +31,13 @@ export class OrganizationsController {
     return this.organizationsService.create(body, user);
   }
 
+  @Get()
+  @Roles('super_admin')
+  @ApiOperation({ summary: 'List organizations' })
+  list() {
+    return this.organizationsService.list();
+  }
+
   @Get('me')
   @ApiOperation({ summary: "Get the current user's organization" })
   @ApiOkResponse({ type: OrganizationResponseDto })

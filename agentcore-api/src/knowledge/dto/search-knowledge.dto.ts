@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -7,6 +8,10 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import {
+  PRODUCT_KEYS,
+  type ProductKey,
+} from '../../common/auth/product-access.types';
 
 export class SearchKnowledgeDto {
   @ApiProperty({ example: 'What are the business hours?', minLength: 2 })
@@ -25,4 +30,10 @@ export class SearchKnowledgeDto {
   @Max(20)
   @IsOptional()
   limit?: number;
+
+  @ApiPropertyOptional({ enum: PRODUCT_KEYS })
+  @IsString()
+  @IsIn(PRODUCT_KEYS)
+  @IsOptional()
+  productKey?: ProductKey;
 }

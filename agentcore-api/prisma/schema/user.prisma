@@ -6,7 +6,9 @@ model User {
   name         String
   passwordHash String       @map("password_hash")
   roles        UserRole[]   @default([user])
+  clearanceLevel Int        @default(0) @map("clearance_level")
   isActive     Boolean      @default(true) @map("is_active")
+  productAccess UserProductAccess[]
   assignedCustomerChatConversations CustomerChatConversation[]
   appointmentStaffProfiles AppointmentStaff[]
   assignedWhatsAppConversations WhatsAppConversation[]
@@ -19,4 +21,22 @@ model User {
   @@index([orgId])
   @@index([isActive])
   @@map("users")
+}
+
+model UserProductAccess {
+  id               String       @id @default(uuid())
+  userId           String       @map("user_id")
+  organizationId   String       @map("organization_id")
+  productKey       ProductKey   @map("product_key")
+  canUse           Boolean      @default(true) @map("can_use")
+  canConfigure     Boolean      @default(false) @map("can_configure")
+  canManageAgents  Boolean      @default(false) @map("can_manage_agents")
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  @@unique([userId, productKey])
+  @@index([organizationId, productKey])
+  @@map("user_product_access")
 }

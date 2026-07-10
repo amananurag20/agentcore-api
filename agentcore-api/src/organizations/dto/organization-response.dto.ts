@@ -10,6 +10,12 @@ export class OrganizationResponseDto {
   @ApiProperty({ example: 'demo-organization' })
   slug: string;
 
+  @ApiProperty({ nullable: true, example: 'operations@acme.com' })
+  contactEmail: string | null;
+
+  @ApiProperty({ nullable: true, example: '+1 555 0100' })
+  contactPhone: string | null;
+
   @ApiProperty({ enum: ['active', 'inactive', 'suspended'], example: 'active' })
   status: 'active' | 'inactive' | 'suspended';
 

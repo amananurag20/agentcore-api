@@ -18,6 +18,7 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CurrentUser } from '../common/auth/current-user.decorator';
 import { Public } from '../common/auth/public.decorator';
 import { Roles } from '../common/auth/roles.decorator';
+import { RequireProductAccess } from '../common/auth/product-access.decorator';
 import {
   AssignWhatsAppConversationDto,
   CreateWhatsAppConfigDto,
@@ -38,7 +39,8 @@ import { WhatsAppAssistantService } from './whatsapp-assistant.service';
 @ApiTags('WhatsApp Assistant')
 @ApiBearerAuth('bearer')
 @Controller('whatsapp-assistant')
-@Roles('super_admin', 'org_admin', 'agent')
+@Roles('super_admin', 'org_admin', 'product_admin', 'agent', 'user')
+@RequireProductAccess('whatsapp_assistant')
 export class WhatsAppAssistantController {
   constructor(
     private readonly whatsAppAssistantService: WhatsAppAssistantService,
@@ -52,7 +54,8 @@ export class WhatsAppAssistantController {
   }
 
   @Post('configs')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('whatsapp_assistant', 'configure')
   @ApiOperation({ summary: 'Create WhatsApp provider config placeholder' })
   @ApiCreatedResponse({ type: WhatsAppConfigResponseDto })
   createConfig(
@@ -63,7 +66,8 @@ export class WhatsAppAssistantController {
   }
 
   @Patch('configs/:id')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('whatsapp_assistant', 'configure')
   @ApiOperation({ summary: 'Update WhatsApp provider config' })
   @ApiOkResponse({ type: WhatsAppConfigResponseDto })
   updateConfig(

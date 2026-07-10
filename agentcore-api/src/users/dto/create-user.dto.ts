@@ -6,8 +6,14 @@ import {
   IsOptional,
   IsString,
   MinLength,
+  Max,
+  Min,
+  IsInt,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { UserRole } from '../../common/auth/authenticated-request';
+import { ProductAccessDto } from './product-access.dto';
 
 export class CreateUserDto {
   @ApiProperty({ example: 'Support Agent', minLength: 2 })
@@ -34,7 +40,7 @@ export class CreateUserDto {
   orgId?: string;
 
   @ApiPropertyOptional({
-    enum: ['super_admin', 'org_admin', 'agent', 'user'],
+    enum: ['super_admin', 'org_admin', 'product_admin', 'agent', 'user'],
     isArray: true,
     example: ['agent'],
   })
@@ -42,4 +48,18 @@ export class CreateUserDto {
   @ArrayNotEmpty()
   @IsOptional()
   roles?: UserRole[];
+
+  @ApiPropertyOptional({ minimum: 0, maximum: 4, default: 0 })
+  @IsInt()
+  @Min(0)
+  @Max(4)
+  @IsOptional()
+  clearanceLevel?: number;
+
+  @ApiPropertyOptional({ type: ProductAccessDto, isArray: true })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ProductAccessDto)
+  @IsOptional()
+  productAccess?: ProductAccessDto[];
 }

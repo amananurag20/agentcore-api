@@ -1,6 +1,7 @@
 enum UserRole {
   super_admin
   org_admin
+  product_admin
   agent
   user
 }

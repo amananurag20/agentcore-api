@@ -1,5 +1,19 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, MinLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import {
+  IsArray,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+  MinLength,
+} from 'class-validator';
+import {
+  PRODUCT_KEYS,
+  type ProductKey,
+} from '../../common/auth/product-access.types';
 
 export class UploadKnowledgeFileDto {
   @ApiPropertyOptional({
@@ -14,6 +28,23 @@ export class UploadKnowledgeFileDto {
   @IsString()
   @MinLength(2)
   name: string;
+
+  @ApiPropertyOptional({ minimum: 0, maximum: 4, default: 0 })
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(4)
+  @IsOptional()
+  sensitivityLevel?: number;
+
+  @ApiPropertyOptional({ enum: PRODUCT_KEYS, isArray: true })
+  @Transform(({ value }: { value: string | string[] }) =>
+    Array.isArray(value) ? value : [value],
+  )
+  @IsArray()
+  @IsIn(PRODUCT_KEYS, { each: true })
+  @IsOptional()
+  productVisibility?: ProductKey[];
 
   @ApiPropertyOptional({
     description: 'JSON object string stored with the source.',

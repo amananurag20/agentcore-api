@@ -54,12 +54,14 @@ async function main() {
       name: 'AgentCore Admin',
       passwordHash: await hash('Admin@12345', 12),
       roles: ['super_admin', 'org_admin'],
+      clearanceLevel: 4,
       isActive: true,
     },
     update: {
       orgId: 'org_demo',
       name: 'AgentCore Admin',
       roles: ['super_admin', 'org_admin'],
+      clearanceLevel: 4,
       isActive: true,
     },
   });

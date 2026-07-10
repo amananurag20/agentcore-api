@@ -591,6 +591,7 @@ export class VoiceReceptionistService {
     const searchResults = await this.knowledgeService.search(systemUser, {
       query: content,
       limit: 5,
+      productKey: 'voice_receptionist',
     });
     const chatResult = await this.chatService.answerWithContext({
       organizationId: config.organizationId,

@@ -19,6 +19,7 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CurrentUser } from '../common/auth/current-user.decorator';
 import { Public } from '../common/auth/public.decorator';
 import { Roles } from '../common/auth/roles.decorator';
+import { RequireProductAccess } from '../common/auth/product-access.decorator';
 import {
   AssignVoiceCallDto,
   CreateVoiceConfigDto,
@@ -45,7 +46,8 @@ type RawBodyRequest = {
 @ApiTags('Voice Receptionist')
 @ApiBearerAuth('bearer')
 @Controller('voice-receptionist')
-@Roles('super_admin', 'org_admin', 'agent')
+@Roles('super_admin', 'org_admin', 'product_admin', 'agent', 'user')
+@RequireProductAccess('voice_receptionist')
 export class VoiceReceptionistController {
   constructor(
     private readonly voiceReceptionistService: VoiceReceptionistService,
@@ -59,7 +61,8 @@ export class VoiceReceptionistController {
   }
 
   @Post('configs')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('voice_receptionist', 'configure')
   @ApiOperation({ summary: 'Create voice provider config placeholder' })
   @ApiCreatedResponse({ type: VoiceConfigResponseDto })
   createConfig(
@@ -70,7 +73,8 @@ export class VoiceReceptionistController {
   }
 
   @Patch('configs/:id')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('voice_receptionist', 'configure')
   @ApiOperation({ summary: 'Update voice provider config' })
   @ApiOkResponse({ type: VoiceConfigResponseDto })
   updateConfig(

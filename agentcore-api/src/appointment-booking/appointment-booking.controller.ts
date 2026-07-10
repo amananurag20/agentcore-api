@@ -18,6 +18,7 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CurrentUser } from '../common/auth/current-user.decorator';
 import { Public } from '../common/auth/public.decorator';
 import { Roles } from '../common/auth/roles.decorator';
+import { RequireProductAccess } from '../common/auth/product-access.decorator';
 import { AppointmentBookingService } from './appointment-booking.service';
 import {
   CancelAppointmentBookingDto,
@@ -49,7 +50,8 @@ import {
 @ApiTags('Appointment Booking')
 @ApiBearerAuth('bearer')
 @Controller('appointment-booking')
-@Roles('super_admin', 'org_admin', 'agent')
+@Roles('super_admin', 'org_admin', 'product_admin', 'agent', 'user')
+@RequireProductAccess('appointment_booking')
 export class AppointmentBookingController {
   constructor(
     private readonly appointmentBookingService: AppointmentBookingService,
@@ -66,7 +68,8 @@ export class AppointmentBookingController {
   }
 
   @Post('services')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
   @ApiOperation({ summary: 'Create an appointment service' })
   @ApiCreatedResponse({ type: AppointmentServiceResponseDto })
   createService(
@@ -77,7 +80,8 @@ export class AppointmentBookingController {
   }
 
   @Patch('services/:id')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
   @ApiOperation({ summary: 'Update an appointment service' })
   @ApiOkResponse({ type: AppointmentServiceResponseDto })
   updateService(
@@ -99,7 +103,8 @@ export class AppointmentBookingController {
   }
 
   @Post('staff')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
   @ApiOperation({ summary: 'Create appointment staff/resource' })
   @ApiCreatedResponse({ type: AppointmentStaffResponseDto })
   createStaff(
@@ -110,7 +115,8 @@ export class AppointmentBookingController {
   }
 
   @Patch('staff/:id')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
   @ApiOperation({ summary: 'Update appointment staff/resource' })
   @ApiOkResponse({ type: AppointmentStaffResponseDto })
   updateStaff(
@@ -132,7 +138,8 @@ export class AppointmentBookingController {
   }
 
   @Post('staff/:id/availability')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
   @ApiOperation({ summary: 'Create a weekly availability window' })
   @ApiCreatedResponse({ type: AppointmentAvailabilityResponseDto })
   createStaffAvailability(
@@ -158,7 +165,8 @@ export class AppointmentBookingController {
   }
 
   @Post('staff/:id/time-off')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
   @ApiOperation({ summary: 'Create staff time off/blockout' })
   @ApiCreatedResponse({ type: AppointmentTimeOffResponseDto })
   createStaffTimeOff(

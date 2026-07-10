@@ -163,6 +163,7 @@ export class CustomerChatService {
     const searchResults = await this.knowledgeService.search(searchUser, {
       query: input.content,
       limit: 5,
+      productKey: 'customer_chat',
     });
     const chatResult = await this.chatService.answerWithContext({
       organizationId: conversation.organizationId,

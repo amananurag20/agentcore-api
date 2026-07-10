@@ -30,8 +30,14 @@ export class ProductsService {
   async listOrganizationProducts(
     currentUser: AuthenticatedUser,
   ): Promise<ProductWithEntitlement[]> {
+    return this.listOrganizationProductsById(currentUser.orgId);
+  }
+
+  async listOrganizationProductsById(
+    organizationId: string,
+  ): Promise<ProductWithEntitlement[]> {
     return this.prisma.organizationProduct.findMany({
-      where: { organizationId: currentUser.orgId },
+      where: { organizationId },
       include: { product: true },
       orderBy: { product: { name: 'asc' } },
     });
@@ -39,6 +45,20 @@ export class ProductsService {
 
   async updateCurrentOrganizationProduct(
     currentUser: AuthenticatedUser,
+    productKey: ProductKey,
+    input: UpdateOrganizationProductDto,
+  ): Promise<ProductWithEntitlement> {
+    return this.updateOrganizationProduct(
+      currentUser,
+      currentUser.orgId,
+      productKey,
+      input,
+    );
+  }
+
+  async updateOrganizationProduct(
+    currentUser: AuthenticatedUser,
+    organizationId: string,
     productKey: ProductKey,
     input: UpdateOrganizationProductDto,
   ): Promise<ProductWithEntitlement> {
@@ -53,12 +73,12 @@ export class ProductsService {
     const entitlement = await this.prisma.organizationProduct.upsert({
       where: {
         organizationId_productId: {
-          organizationId: currentUser.orgId,
+          organizationId,
           productId: product.id,
         },
       },
       create: {
-        organizationId: currentUser.orgId,
+        organizationId,
         productId: product.id,
         status: input.status,
         config: this.toJsonObject(input.config),
@@ -72,7 +92,7 @@ export class ProductsService {
 
     await this.auditService.record({
       actor: currentUser,
-      organizationId: currentUser.orgId,
+      organizationId,
       action: 'organization_product.updated',
       entityType: 'organization_product',
       entityId: entitlement.id,

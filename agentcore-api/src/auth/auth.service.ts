@@ -65,13 +65,12 @@ export class AuthService {
     input: RegisterDto,
     context: AuthRequestContext = {},
   ): Promise<AuthResponse> {
-    const organization = input.orgId
-      ? await this.organizationsService.findById(input.orgId)
-      : await this.organizationsService.create({
-          name: input.orgName ?? `${input.name}'s Organization`,
-          plan: 'free',
-          deploymentMode: 'saas',
-        });
+    if (!input.orgId) {
+      throw new BadRequestException(
+        'orgId is required. New organizations must be created with a first administrator.',
+      );
+    }
+    const organization = await this.organizationsService.findById(input.orgId);
 
     const user = await this.usersService.create({
       orgId: organization.id,
@@ -115,7 +114,10 @@ export class AuthService {
       throw new UnauthorizedException('User is inactive or no longer exists');
     }
 
-    const user = this.usersService.toSafeUser(session.user);
+    const user = await this.usersService.findById(session.userId);
+    if (!user) {
+      throw new UnauthorizedException('User is inactive or no longer exists');
+    }
     const refreshToken = this.generateToken();
     const refreshTokenHash = this.hashToken(refreshToken);
     const expiresAt = this.getRefreshTokenExpiresAt();
@@ -272,7 +274,10 @@ export class AuthService {
     this.assertAllowedRoles(currentUser, roles);
 
     const email = this.normalizeEmail(input.email);
-    let user = await this.prisma.user.findUnique({ where: { email } });
+    let user = await this.prisma.user.findUnique({
+      where: { email },
+      include: { productAccess: true },
+    });
 
     if (user && user.orgId !== organizationId) {
       throw new ConflictException('A user with this email already exists');
@@ -292,17 +297,50 @@ export class AuthService {
           name: input.name ?? email.split('@')[0],
           passwordHash: await hashPassword(this.generateToken(), 12),
           roles: roles,
+          clearanceLevel: input.clearanceLevel ?? 0,
+          productAccess: input.productAccess?.length
+            ? {
+                create: input.productAccess.map((access) => ({
+                  organizationId,
+                  productKey: access.productKey,
+                  canUse: access.canUse ?? true,
+                  canConfigure: access.canConfigure ?? false,
+                  canManageAgents: access.canManageAgents ?? false,
+                })),
+              }
+            : undefined,
           isActive: false,
         },
+        include: { productAccess: true },
       });
     } else {
-      user = await this.prisma.user.update({
-        where: { id: user.id },
-        data: {
-          name: input.name ?? user.name,
-          roles: roles,
-          isActive: user.isActive ? user.isActive : false,
-        },
+      user = await this.prisma.$transaction(async (tx) => {
+        if (input.productAccess !== undefined) {
+          await tx.userProductAccess.deleteMany({
+            where: { userId: user!.id },
+          });
+        }
+        return tx.user.update({
+          where: { id: user!.id },
+          data: {
+            name: input.name ?? user!.name,
+            roles,
+            clearanceLevel: input.clearanceLevel,
+            productAccess: input.productAccess?.length
+              ? {
+                  create: input.productAccess.map((access) => ({
+                    organizationId,
+                    productKey: access.productKey,
+                    canUse: access.canUse ?? true,
+                    canConfigure: access.canConfigure ?? false,
+                    canManageAgents: access.canManageAgents ?? false,
+                  })),
+                }
+              : undefined,
+            isActive: false,
+          },
+          include: { productAccess: true },
+        });
       });
     }
 
@@ -312,7 +350,11 @@ export class AuthService {
       email,
       type: 'invite',
       expiresAt: this.getInviteExpiresAt(),
-      metadata: { roles },
+      metadata: {
+        roles,
+        clearanceLevel: input.clearanceLevel ?? 0,
+        productAccess: input.productAccess ?? [],
+      },
     });
 
     await this.auditService.record({
@@ -324,6 +366,7 @@ export class AuthService {
       metadata: {
         email,
         roles,
+        productAccess: input.productAccess ?? [],
       },
     });
 
@@ -356,6 +399,7 @@ export class AuthService {
         passwordHash: await hashPassword(input.password, 12),
         isActive: true,
       },
+      include: { productAccess: true },
     });
     const safeUser = this.usersService.toSafeUser(user);
 
@@ -423,6 +467,8 @@ export class AuthService {
       email: user.email,
       orgId: user.orgId,
       roles: user.roles,
+      clearanceLevel: user.clearanceLevel,
+      productAccess: user.productAccess,
     };
   }
 
@@ -431,9 +477,16 @@ export class AuthService {
   }
 
   private async issueAccessToken(user: SafeUser): Promise<string> {
-    return this.jwtService.signAsync(this.toAuthenticatedUser(user), {
-      expiresIn: this.getAccessTokenExpiresIn() as '15m',
-    });
+    return this.jwtService.signAsync(
+      {
+        sub: user.id,
+        email: user.email,
+        orgId: user.orgId,
+      },
+      {
+        expiresIn: this.getAccessTokenExpiresIn() as '15m',
+      },
+    );
   }
 
   private async createRefreshSession(

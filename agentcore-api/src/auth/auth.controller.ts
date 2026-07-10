@@ -41,9 +41,11 @@ export class AuthController {
     return this.authService.login(body, this.toAuthContext(request));
   }
 
-  @Public()
   @Post('register')
-  @ApiOperation({ summary: 'Register an organization admin user' })
+  @Roles('super_admin')
+  @ApiOperation({
+    summary: 'Create an organization admin in an existing organization',
+  })
   @ApiCreatedResponse({
     type: AuthResponseDto,
     description: 'Creates an org admin user and returns a JWT access token.',

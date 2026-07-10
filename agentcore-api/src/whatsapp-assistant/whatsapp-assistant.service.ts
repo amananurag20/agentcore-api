@@ -470,6 +470,7 @@ export class WhatsAppAssistantService {
     const searchResults = await this.knowledgeService.search(systemUser, {
       query: content,
       limit: 5,
+      productKey: 'whatsapp_assistant',
     });
     const chatResult = await this.chatService.answerWithContext({
       organizationId,

@@ -5,6 +5,11 @@ model KnowledgeSource {
   type           KnowledgeSourceType
   status         KnowledgeSourceStatus @default(pending)
   name           String
+  sensitivityLevel Int              @default(0) @map("sensitivity_level")
+  levelSource    String              @default("manual") @map("level_source")
+  productVisibility ProductKey[]     @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
+  categories     String[]            @default([])
+  isQuarantined  Boolean             @default(false) @map("is_quarantined")
   url            String?
   fileName       String?               @map("file_name")
   mimeType       String?               @map("mime_type")
@@ -35,6 +40,10 @@ model KnowledgeDocument {
   sourceId       String?          @map("source_id")
   source         KnowledgeSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
   title          String
+  sensitivityLevel Int          @default(0) @map("sensitivity_level")
+  productVisibility ProductKey[] @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
+  categories     String[]        @default([])
+  isQuarantined  Boolean         @default(false) @map("is_quarantined")
   uri            String?
   contentText    String?          @map("content_text")
   metadata       Json             @default("{}")
@@ -57,6 +66,10 @@ model KnowledgeChunk {
   document       KnowledgeDocument  @relation(fields: [documentId], references: [id], onDelete: Cascade)
   chunkIndex     Int                @map("chunk_index")
   content        String
+  sensitivityLevel Int             @default(0) @map("sensitivity_level")
+  productVisibility ProductKey[]   @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
+  categories     String[]           @default([])
+  isQuarantined  Boolean            @default(false) @map("is_quarantined")
   charCount      Int                @map("char_count")
   tokenEstimate  Int                @map("token_estimate")
   embedding      Unsupported("vector")?
@@ -69,7 +82,7 @@ model KnowledgeChunk {
   updatedAt      DateTime           @updatedAt @map("updated_at")
 
   @@unique([documentId, chunkIndex])
-  @@index([organizationId])
+  @@index([organizationId, sensitivityLevel, isQuarantined])
   @@index([sourceId])
   @@index([documentId])
   @@index([embeddingProvider])

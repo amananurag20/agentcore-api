@@ -2,10 +2,13 @@ model Organization {
   id             String             @id @default(uuid())
   name           String
   slug           String             @unique
+  contactEmail   String?            @map("contact_email")
+  contactPhone   String?            @map("contact_phone")
   status         OrganizationStatus @default(active)
   plan           OrganizationPlan   @default(free)
   deploymentMode DeploymentMode     @default(saas) @map("deployment_mode")
   users          User[]
+  userProductAccess UserProductAccess[]
   products       OrganizationProduct[]
   aiProviders    AIProviderConfig[]
   knowledgeSources KnowledgeSource[]
