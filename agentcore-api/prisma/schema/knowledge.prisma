@@ -10,6 +10,8 @@ model KnowledgeSource {
   productVisibility ProductKey[]     @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
   categories     String[]            @default([])
   isQuarantined  Boolean             @default(false) @map("is_quarantined")
+  folderId       String?              @map("folder_id")
+  folder         KnowledgeFolder?     @relation(fields: [folderId], references: [id], onDelete: SetNull)
   url            String?
   fileName       String?               @map("file_name")
   mimeType       String?               @map("mime_type")
@@ -28,9 +30,42 @@ model KnowledgeSource {
   updatedAt      DateTime              @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
+  @@index([folderId])
   @@index([type])
   @@index([storageProvider, storageBucket])
   @@map("knowledge_sources")
+}
+
+model KnowledgeCategory {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  slug           String
+  isSystem       Boolean      @default(false) @map("is_system")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, name])
+  @@map("knowledge_categories")
+}
+
+model KnowledgeFolder {
+  id             String            @id @default(uuid())
+  organizationId String            @map("organization_id")
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  parentId       String?           @map("parent_id")
+  parent         KnowledgeFolder?  @relation("KnowledgeFolderTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children       KnowledgeFolder[] @relation("KnowledgeFolderTree")
+  sources        KnowledgeSource[]
+  createdAt      DateTime          @default(now()) @map("created_at")
+  updatedAt      DateTime          @updatedAt @map("updated_at")
+
+  @@unique([organizationId, parentId, name])
+  @@index([organizationId, parentId])
+  @@map("knowledge_folders")
 }
 
 model KnowledgeDocument {

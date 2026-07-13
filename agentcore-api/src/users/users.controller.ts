@@ -19,7 +19,7 @@ import { UsersService } from './users.service';
 @ApiTags('Users')
 @ApiBearerAuth('bearer')
 @Controller('users')
-@Roles('super_admin', 'org_admin')
+@Roles('super_admin', 'org_admin', 'product_admin')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
@@ -80,6 +80,7 @@ export class UsersController {
       body.roles,
       body.clearanceLevel,
       body.productAccess,
+      body.customRoleIds,
     );
   }
 }

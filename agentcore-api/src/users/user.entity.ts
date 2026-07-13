@@ -1,4 +1,7 @@
-import { UserRole } from '../common/auth/authenticated-request';
+import {
+  CustomRoleGrant,
+  UserRole,
+} from '../common/auth/authenticated-request';
 import type { ProductAccessGrant } from '../common/auth/product-access.types';
 
 export interface User {
@@ -10,6 +13,7 @@ export interface User {
   roles: UserRole[];
   clearanceLevel: number;
   productAccess: ProductAccessGrant[];
+  customRoles: CustomRoleGrant[];
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;

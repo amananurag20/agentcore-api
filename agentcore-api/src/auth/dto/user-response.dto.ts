@@ -30,6 +30,21 @@ export class UserResponseDto {
     canUse: boolean;
     canConfigure: boolean;
     canManageAgents: boolean;
+    canManageKnowledge: boolean;
+  }>;
+
+  @ApiProperty({ isArray: true, type: Object })
+  customRoles: Array<{
+    id: string;
+    name: string;
+    clearanceLevel: number;
+    productAccess: Array<{
+      productKey: string;
+      canUse: boolean;
+      canConfigure: boolean;
+      canManageAgents: boolean;
+      canManageKnowledge: boolean;
+    }>;
   }>;
 
   @ApiProperty({ example: true })

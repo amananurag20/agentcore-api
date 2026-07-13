@@ -7,6 +7,7 @@ import {
   Max,
   Min,
   ValidateNested,
+  IsString,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { UserRole } from '../../common/auth/authenticated-request';
@@ -35,4 +36,10 @@ export class UpdateUserRolesDto {
   @Type(() => ProductAccessDto)
   @IsOptional()
   productAccess?: ProductAccessDto[];
+
+  @ApiProperty({ type: String, isArray: true, required: false })
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  customRoleIds?: string[];
 }

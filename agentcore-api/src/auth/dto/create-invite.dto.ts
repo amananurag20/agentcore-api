@@ -58,4 +58,10 @@ export class CreateInviteDto {
   @Type(() => ProductAccessDto)
   @IsOptional()
   productAccess?: ProductAccessDto[];
+
+  @ApiPropertyOptional({ type: String, isArray: true })
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  customRoleIds?: string[];
 }

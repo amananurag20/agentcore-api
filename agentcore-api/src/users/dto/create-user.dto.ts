@@ -62,4 +62,15 @@ export class CreateUserDto {
   @Type(() => ProductAccessDto)
   @IsOptional()
   productAccess?: ProductAccessDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Tenant-defined role ids assigned in addition to the built-in role.',
+    type: String,
+    isArray: true,
+  })
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  customRoleIds?: string[];
 }

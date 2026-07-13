@@ -46,6 +46,25 @@ export class UploadKnowledgeFileDto {
   @IsOptional()
   productVisibility?: ProductKey[];
 
+  @ApiPropertyOptional()
+  @IsString()
+  @IsOptional()
+  folderId?: string;
+
+  @ApiPropertyOptional({ type: String, isArray: true })
+  @Transform(({ value }: { value: string | string[] }) =>
+    Array.isArray(value)
+      ? value
+      : value
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+  )
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  categories?: string[];
+
   @ApiPropertyOptional({
     description: 'JSON object string stored with the source.',
     example: '{"locale":"en"}',

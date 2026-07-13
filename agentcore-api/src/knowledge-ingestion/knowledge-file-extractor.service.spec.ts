@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { KnowledgeFileExtractorService } from './knowledge-file-extractor.service';
+import * as ExcelJS from 'exceljs';
 
 const getText = jest.fn();
 const destroy = jest.fn();
@@ -53,6 +54,30 @@ describe('KnowledgeFileExtractorService', () => {
       metadata: { extractor: 'text' },
     });
     expect(getText).not.toHaveBeenCalled();
+  });
+
+  it('extracts sheet-aware text from XLSX workbooks', async () => {
+    const service = new KnowledgeFileExtractorService();
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Pricing');
+    sheet.addRows([
+      ['Service', 'Price'],
+      ['Consultation', 120],
+    ]);
+    const workbookBuffer = await workbook.xlsx.writeBuffer();
+    const result = await service.extract({
+      buffer: Buffer.from(workbookBuffer),
+      fileName: 'pricing.xlsx',
+      mimeType:
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+
+    expect(result.text).toContain('Sheet: Pricing');
+    expect(result.text).toContain('Consultation,120');
+    expect(result.metadata).toMatchObject({
+      extractor: 'exceljs',
+      sheetCount: 1,
+    });
   });
 
   it('rejects unsupported uploads', async () => {

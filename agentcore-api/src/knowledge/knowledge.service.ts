@@ -15,14 +15,20 @@ import { EmbeddingsService } from '../ai/embeddings.service';
 import { toPgVector } from '../ai/vector-sql';
 import { AuditService } from '../audit/audit.service';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
+import type { ProductKey } from '../common/auth/product-access.types';
 import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
 import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-ingestion.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { PolicyService } from '../policy/policy.service';
 import { S3StorageService } from '../storage/s3-storage.service';
 import { CreateKnowledgeSourceDto } from './dto/create-knowledge-source.dto';
 import { SearchKnowledgeDto } from './dto/search-knowledge.dto';
 import { UpdateKnowledgeSourceDto } from './dto/update-knowledge-source.dto';
 import { UploadKnowledgeFileDto } from './dto/upload-knowledge-file.dto';
+import {
+  CreateKnowledgeCategoryDto,
+  CreateKnowledgeFolderDto,
+} from './dto/knowledge-taxonomy.dto';
 
 type SafeKnowledgeSource = Omit<
   KnowledgeSource,
@@ -59,17 +65,22 @@ export class KnowledgeService {
     private readonly embeddingsService: EmbeddingsService,
     private readonly ingestionService: KnowledgeIngestionService,
     private readonly ingestionQueueService: KnowledgeIngestionQueueService,
+    private readonly policyService: PolicyService,
     private readonly prisma: PrismaService,
     private readonly storageService: S3StorageService,
   ) {}
 
   async listSources(
     currentUser: AuthenticatedUser,
+    organizationId?: string,
   ): Promise<SafeKnowledgeSource[]> {
+    const requestedOrgId = organizationId
+      ? this.resolveOrganizationId(currentUser, organizationId)
+      : undefined;
     const sources = await this.prisma.knowledgeSource.findMany({
-      where: this.isSuperAdmin(currentUser)
-        ? undefined
-        : { organizationId: currentUser.orgId },
+      where: requestedOrgId
+        ? { organizationId: requestedOrgId }
+        : this.scopedKnowledgeWhere(currentUser),
       orderBy: { createdAt: 'desc' },
     });
 
@@ -84,6 +95,11 @@ export class KnowledgeService {
       currentUser,
       input.organizationId,
     );
+    await this.assertCanManageProducts(currentUser, input.productVisibility);
+    await this.assertFolderBelongsToOrganization(
+      input.folderId,
+      organizationId,
+    );
 
     let source = await this.prisma.$transaction(async (tx) => {
       const createdSource = await tx.knowledgeSource.create({
@@ -93,9 +109,11 @@ export class KnowledgeService {
           status: input.status ?? this.resolveInitialStatus(),
           name: input.name,
           sensitivityLevel: input.sensitivityLevel,
+          levelSource: input.sensitivityLevel === undefined ? 'auto' : 'manual',
           productVisibility: input.productVisibility,
           categories: input.categories,
           isQuarantined: input.isQuarantined,
+          folderId: input.folderId,
           url: input.url,
           fileName: input.fileName,
           mimeType: input.mimeType,
@@ -120,6 +138,12 @@ export class KnowledgeService {
           },
         });
       }
+      await this.registerCategories(
+        tx,
+        organizationId,
+        input.categories ?? [],
+        false,
+      );
 
       return createdSource;
     });
@@ -157,6 +181,11 @@ export class KnowledgeService {
       currentUser,
       input.organizationId,
     );
+    await this.assertCanManageProducts(currentUser, input.productVisibility);
+    await this.assertFolderBelongsToOrganization(
+      input.folderId,
+      organizationId,
+    );
     const metadata = this.parseMetadata(input.metadata);
     const storedObject = await this.storageService.uploadKnowledgeFile({
       organizationId,
@@ -170,7 +199,10 @@ export class KnowledgeService {
         status: 'pending',
         name: input.name,
         sensitivityLevel: input.sensitivityLevel,
+        levelSource: input.sensitivityLevel === undefined ? 'auto' : 'manual',
         productVisibility: input.productVisibility,
+        categories: input.categories,
+        folderId: input.folderId,
         fileName: file.originalname,
         mimeType: file.mimetype,
         storageProvider: storedObject.provider,
@@ -183,6 +215,12 @@ export class KnowledgeService {
     });
 
     source = await this.enqueueIngestion(source, 'file_uploaded');
+    await this.registerCategories(
+      this.prisma,
+      organizationId,
+      input.categories ?? [],
+      false,
+    );
 
     await this.auditService.record({
       actor: currentUser,
@@ -209,6 +247,7 @@ export class KnowledgeService {
     id: string,
   ): Promise<SafeKnowledgeSource> {
     const source = await this.findSourceForActor(currentUser, id);
+    await this.assertCanManageProducts(currentUser, source.productVisibility);
     return this.toSafeSource(source);
   }
 
@@ -217,6 +256,7 @@ export class KnowledgeService {
     id: string,
   ): Promise<SafeKnowledgeSource> {
     const source = await this.findSourceForActor(currentUser, id);
+    await this.assertCanManageProducts(currentUser, source.productVisibility);
 
     await this.ingestionService.ingestSource({
       organizationId: source.organizationId,
@@ -243,7 +283,27 @@ export class KnowledgeService {
     id: string,
     input: UpdateKnowledgeSourceDto,
   ): Promise<SafeKnowledgeSource> {
-    await this.findSourceForActor(currentUser, id);
+    const existing = await this.findSourceForActor(currentUser, id);
+    await this.assertCanManageProducts(
+      currentUser,
+      input.productVisibility ?? existing.productVisibility,
+    );
+    await this.assertFolderBelongsToOrganization(
+      input.folderId,
+      input.organizationId ?? existing.organizationId,
+    );
+    const releasesQuarantine =
+      existing.isQuarantined && input.isQuarantined === false;
+    const metadata = {
+      ...this.toRecord(existing.metadata),
+      ...(input.metadata ?? {}),
+      ...(releasesQuarantine
+        ? {
+            classificationApprovedAt: new Date().toISOString(),
+            classificationApprovedBy: currentUser.sub,
+          }
+        : {}),
+    };
 
     const source = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.knowledgeSource.update({
@@ -256,16 +316,20 @@ export class KnowledgeService {
           status: input.status,
           name: input.name,
           sensitivityLevel: input.sensitivityLevel,
+          levelSource:
+            input.sensitivityLevel === undefined ? undefined : 'manual',
           productVisibility: input.productVisibility,
           categories: input.categories,
           isQuarantined: input.isQuarantined,
+          folderId: input.folderId,
           url: input.url,
           fileName: input.fileName,
           mimeType: input.mimeType,
           rawText: input.rawText,
-          metadata: input.metadata
-            ? this.toJsonObject(input.metadata)
-            : undefined,
+          metadata:
+            input.metadata || releasesQuarantine
+              ? this.toJsonObject(metadata)
+              : undefined,
         },
       });
 
@@ -284,6 +348,14 @@ export class KnowledgeService {
           where: { sourceId: id },
           data: inheritedAccess,
         });
+      }
+      if (input.categories) {
+        await this.registerCategories(
+          tx,
+          updated.organizationId,
+          input.categories,
+          false,
+        );
       }
 
       return updated;
@@ -305,12 +377,23 @@ export class KnowledgeService {
         isQuarantined: input.isQuarantined,
       }),
     });
+    if (releasesQuarantine) {
+      await this.auditService.record({
+        actor: currentUser,
+        organizationId: source.organizationId,
+        action: 'knowledge_source.quarantine_released',
+        entityType: 'knowledge_source',
+        entityId: source.id,
+        metadata: { sensitivityLevel: source.sensitivityLevel },
+      });
+    }
 
     return this.toSafeSource(source);
   }
 
   async deleteSource(currentUser: AuthenticatedUser, id: string) {
     const source = await this.findSourceForActor(currentUser, id);
+    await this.assertCanManageProducts(currentUser, source.productVisibility);
     await this.prisma.knowledgeSource.delete({ where: { id } });
 
     await this.auditService.record({
@@ -328,6 +411,131 @@ export class KnowledgeService {
     return { deleted: true };
   }
 
+  async listCategories(
+    currentUser: AuthenticatedUser,
+    organizationId?: string,
+  ) {
+    const orgId = this.resolveOrganizationId(currentUser, organizationId);
+    return this.prisma.knowledgeCategory.findMany({
+      where: { organizationId: orgId },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  async createCategory(
+    currentUser: AuthenticatedUser,
+    input: CreateKnowledgeCategoryDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    this.assertCanManageAnyKnowledge(currentUser);
+    const [category] = await this.registerCategories(
+      this.prisma,
+      organizationId,
+      [input.name],
+      false,
+    );
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId,
+      action: 'knowledge_category.created',
+      entityType: 'knowledge_category',
+      entityId: category.id,
+      metadata: { name: category.name },
+    });
+    return category;
+  }
+
+  async deleteCategory(currentUser: AuthenticatedUser, id: string) {
+    const category = await this.prisma.knowledgeCategory.findUnique({
+      where: { id },
+    });
+    if (
+      !category ||
+      (!this.isSuperAdmin(currentUser) &&
+        category.organizationId !== currentUser.orgId)
+    ) {
+      throw new NotFoundException('Knowledge category not found');
+    }
+    this.assertCanManageAnyKnowledge(currentUser);
+    await this.prisma.knowledgeCategory.delete({ where: { id } });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: category.organizationId,
+      action: 'knowledge_category.deleted',
+      entityType: 'knowledge_category',
+      entityId: id,
+      metadata: { name: category.name },
+    });
+    return { deleted: true };
+  }
+
+  async listFolders(currentUser: AuthenticatedUser, organizationId?: string) {
+    const orgId = this.resolveOrganizationId(currentUser, organizationId);
+    return this.prisma.knowledgeFolder.findMany({
+      where: { organizationId: orgId },
+      include: { _count: { select: { sources: true, children: true } } },
+      orderBy: [{ parentId: 'asc' }, { name: 'asc' }],
+    });
+  }
+
+  async createFolder(
+    currentUser: AuthenticatedUser,
+    input: CreateKnowledgeFolderDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    this.assertCanManageAnyKnowledge(currentUser);
+    await this.assertFolderBelongsToOrganization(
+      input.parentId,
+      organizationId,
+    );
+    const folder = await this.prisma.knowledgeFolder.create({
+      data: {
+        organizationId,
+        name: input.name.trim(),
+        parentId: input.parentId,
+      },
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId,
+      action: 'knowledge_folder.created',
+      entityType: 'knowledge_folder',
+      entityId: folder.id,
+      metadata: { name: folder.name, parentId: folder.parentId },
+    });
+    return folder;
+  }
+
+  async deleteFolder(currentUser: AuthenticatedUser, id: string) {
+    const folder = await this.prisma.knowledgeFolder.findUnique({
+      where: { id },
+    });
+    if (
+      !folder ||
+      (!this.isSuperAdmin(currentUser) &&
+        folder.organizationId !== currentUser.orgId)
+    ) {
+      throw new NotFoundException('Knowledge folder not found');
+    }
+    this.assertCanManageAnyKnowledge(currentUser);
+    await this.prisma.knowledgeFolder.delete({ where: { id } });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: folder.organizationId,
+      action: 'knowledge_folder.deleted',
+      entityType: 'knowledge_folder',
+      entityId: id,
+      metadata: { name: folder.name },
+    });
+    return { deleted: true };
+  }
+
   async listDocuments(
     currentUser: AuthenticatedUser,
     sourceId?: string,
@@ -338,9 +546,7 @@ export class KnowledgeService {
 
     const documents = await this.prisma.knowledgeDocument.findMany({
       where: {
-        ...(this.isSuperAdmin(currentUser)
-          ? {}
-          : { organizationId: currentUser.orgId }),
+        ...this.scopedKnowledgeWhere(currentUser),
         ...(sourceId ? { sourceId } : {}),
       },
       orderBy: { createdAt: 'desc' },
@@ -363,9 +569,7 @@ export class KnowledgeService {
 
     const chunks = await this.prisma.knowledgeChunk.findMany({
       where: {
-        ...(this.isSuperAdmin(currentUser)
-          ? {}
-          : { organizationId: currentUser.orgId }),
+        ...this.scopedKnowledgeWhere(currentUser),
         ...(filters.sourceId ? { sourceId: filters.sourceId } : {}),
         ...(filters.documentId ? { documentId: filters.documentId } : {}),
         ...(filters.q
@@ -397,7 +601,9 @@ export class KnowledgeService {
     const productFilter = input.productKey
       ? Prisma.sql`AND ${input.productKey}::"ProductKey" = ANY("product_visibility")`
       : Prisma.empty;
-    const clearanceLevel = currentUser.clearanceLevel ?? 0;
+    const clearanceLevel = input.productKey
+      ? this.policyService.getEffectiveClearance(currentUser, input.productKey)
+      : (currentUser.clearanceLevel ?? 0);
 
     return this.prisma.$queryRaw<KnowledgeSearchRow[]>`
       SELECT
@@ -438,6 +644,9 @@ export class KnowledgeService {
       !this.isSuperAdmin(currentUser) &&
       source.organizationId !== currentUser.orgId
     ) {
+      throw new NotFoundException('Knowledge source not found');
+    }
+    if (!this.canViewKnowledgeItem(currentUser, source)) {
       throw new NotFoundException('Knowledge source not found');
     }
 
@@ -578,13 +787,23 @@ export class KnowledgeService {
 
     const extension = extname(file.originalname).toLowerCase();
     const mimeType = file.mimetype.toLowerCase();
-    const allowedExtensions = new Set(['.pdf', '.txt', '.md', '.csv', '.tsv']);
+    const allowedExtensions = new Set([
+      '.pdf',
+      '.docx',
+      '.xlsx',
+      '.txt',
+      '.md',
+      '.csv',
+      '.tsv',
+    ]);
     const allowedMimeTypes = new Set([
       'application/pdf',
       'text/plain',
       'text/markdown',
       'text/csv',
       'text/tab-separated-values',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     ]);
 
     if (allowedMimeTypes.has(mimeType) || allowedExtensions.has(extension)) {
@@ -592,11 +811,144 @@ export class KnowledgeService {
     }
 
     throw new BadRequestException(
-      'Unsupported file type. Upload PDF, TXT, Markdown, CSV, or TSV files.',
+      'Unsupported file type. Upload PDF, DOCX, XLSX, TXT, Markdown, CSV, or TSV files.',
     );
   }
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {
     return user.roles.includes('super_admin');
+  }
+
+  private async assertCanManageProducts(
+    user: AuthenticatedUser,
+    productVisibility?: Array<
+      | 'customer_chat'
+      | 'appointment_booking'
+      | 'whatsapp_assistant'
+      | 'voice_receptionist'
+    >,
+  ) {
+    if (this.isSuperAdmin(user) || user.roles.includes('org_admin')) return;
+    if (!productVisibility?.length) {
+      throw new BadRequestException(
+        'Product visibility is required for delegated knowledge managers',
+      );
+    }
+    for (const productKey of productVisibility ?? []) {
+      await this.policyService.assertProductAccess(
+        user,
+        productKey,
+        'manage_knowledge',
+      );
+    }
+  }
+
+  private scopedKnowledgeWhere(user: AuthenticatedUser) {
+    if (this.isSuperAdmin(user)) return {};
+    if (user.roles.includes('org_admin')) {
+      return { organizationId: user.orgId };
+    }
+
+    const scopes = this.getManagedProductScopes(user);
+    return {
+      organizationId: user.orgId,
+      OR: scopes.map(({ productKey, clearanceLevel }) => ({
+        productVisibility: { has: productKey },
+        sensitivityLevel: { lte: clearanceLevel },
+      })),
+    };
+  }
+
+  private canViewKnowledgeItem(
+    user: AuthenticatedUser,
+    item: { productVisibility: ProductKey[]; sensitivityLevel: number },
+  ) {
+    if (this.isSuperAdmin(user) || user.roles.includes('org_admin'))
+      return true;
+    return this.getManagedProductScopes(user).some(
+      ({ productKey, clearanceLevel }) =>
+        item.productVisibility.includes(productKey) &&
+        item.sensitivityLevel <= clearanceLevel,
+    );
+  }
+
+  private getManagedProductScopes(user: AuthenticatedUser) {
+    const keys = new Set<ProductKey>();
+    for (const access of user.productAccess ?? []) {
+      if (access.canManageKnowledge || access.canConfigure) {
+        keys.add(access.productKey);
+      }
+    }
+    for (const role of user.customRoles ?? []) {
+      for (const access of role.productAccess) {
+        if (access.canManageKnowledge || access.canConfigure) {
+          keys.add(access.productKey);
+        }
+      }
+    }
+    return [...keys].map((productKey) => ({
+      productKey,
+      clearanceLevel: this.policyService.getEffectiveClearance(
+        user,
+        productKey,
+      ),
+    }));
+  }
+
+  private assertCanManageAnyKnowledge(user: AuthenticatedUser) {
+    if (this.isSuperAdmin(user) || user.roles.includes('org_admin')) return;
+    if (!this.getManagedProductScopes(user).length) {
+      throw new ForbiddenException('Knowledge management access is required');
+    }
+  }
+
+  private async assertFolderBelongsToOrganization(
+    folderId: string | undefined,
+    organizationId: string,
+  ) {
+    if (!folderId) return;
+    const folder = await this.prisma.knowledgeFolder.findFirst({
+      where: { id: folderId, organizationId },
+      select: { id: true },
+    });
+    if (!folder) throw new BadRequestException('Knowledge folder is invalid');
+  }
+
+  private async registerCategories(
+    client: Pick<PrismaService, 'knowledgeCategory'> | Prisma.TransactionClient,
+    organizationId: string,
+    names: string[],
+    isSystem: boolean,
+  ) {
+    const normalized = [
+      ...new Set(names.map((name) => name.trim()).filter(Boolean)),
+    ];
+    if (!normalized.length) return [];
+    await client.knowledgeCategory.createMany({
+      data: normalized.map((name) => ({
+        organizationId,
+        name,
+        slug: name
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, ''),
+        isSystem,
+      })),
+      skipDuplicates: true,
+    });
+    return client.knowledgeCategory.findMany({
+      where: {
+        organizationId,
+        slug: {
+          in: normalized.map((name) =>
+            name
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/(^-|-$)/g, ''),
+          ),
+        },
+      },
+      orderBy: { name: 'asc' },
+    });
   }
 }

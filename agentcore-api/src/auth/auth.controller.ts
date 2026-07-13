@@ -106,7 +106,7 @@ export class AuthController {
 
   @Post('invites')
   @ApiBearerAuth('bearer')
-  @Roles('super_admin', 'org_admin')
+  @Roles('super_admin', 'org_admin', 'product_admin')
   @ApiOperation({ summary: 'Invite a user to an organization' })
   @ApiCreatedResponse({
     schema: {

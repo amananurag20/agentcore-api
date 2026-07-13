@@ -68,6 +68,11 @@ export class CreateKnowledgeSourceDto {
   @IsOptional()
   categories?: string[];
 
+  @ApiPropertyOptional()
+  @IsString()
+  @IsOptional()
+  folderId?: string;
+
   @ApiPropertyOptional({ default: false })
   @IsBoolean()
   @IsOptional()

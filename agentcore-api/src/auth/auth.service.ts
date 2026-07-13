@@ -272,11 +272,25 @@ export class AuthService {
     const organizationId = this.resolveOrganizationId(currentUser, input.orgId);
     const roles: UserRole[] = input.roles?.length ? input.roles : ['user'];
     this.assertAllowedRoles(currentUser, roles);
+    await this.usersService.assertCanGrantAccess(
+      currentUser,
+      organizationId,
+      roles,
+      input.clearanceLevel,
+      input.productAccess,
+      input.customRoleIds,
+    );
 
     const email = this.normalizeEmail(input.email);
     let user = await this.prisma.user.findUnique({
       where: { email },
-      include: { productAccess: true },
+      include: {
+        productAccess: true,
+        customRoleAssignments: {
+          where: { customRole: { isActive: true } },
+          include: { customRole: { include: { productAccess: true } } },
+        },
+      },
     });
 
     if (user && user.orgId !== organizationId) {
@@ -306,12 +320,28 @@ export class AuthService {
                   canUse: access.canUse ?? true,
                   canConfigure: access.canConfigure ?? false,
                   canManageAgents: access.canManageAgents ?? false,
+                  canManageKnowledge: access.canManageKnowledge ?? false,
+                })),
+              }
+            : undefined,
+          customRoleAssignments: input.customRoleIds?.length
+            ? {
+                create: input.customRoleIds.map((customRoleId) => ({
+                  organizationId,
+                  customRoleId,
+                  assignedById: currentUser.sub,
                 })),
               }
             : undefined,
           isActive: false,
         },
-        include: { productAccess: true },
+        include: {
+          productAccess: true,
+          customRoleAssignments: {
+            where: { customRole: { isActive: true } },
+            include: { customRole: { include: { productAccess: true } } },
+          },
+        },
       });
     } else {
       user = await this.prisma.$transaction(async (tx) => {
@@ -319,6 +349,9 @@ export class AuthService {
           await tx.userProductAccess.deleteMany({
             where: { userId: user!.id },
           });
+        }
+        if (input.customRoleIds !== undefined) {
+          await tx.userCustomRole.deleteMany({ where: { userId: user!.id } });
         }
         return tx.user.update({
           where: { id: user!.id },
@@ -334,12 +367,31 @@ export class AuthService {
                     canUse: access.canUse ?? true,
                     canConfigure: access.canConfigure ?? false,
                     canManageAgents: access.canManageAgents ?? false,
+                    canManageKnowledge: access.canManageKnowledge ?? false,
                   })),
                 }
               : undefined,
+            customRoleAssignments:
+              input.customRoleIds === undefined
+                ? undefined
+                : input.customRoleIds.length
+                  ? {
+                      create: input.customRoleIds.map((customRoleId) => ({
+                        organizationId,
+                        customRoleId,
+                        assignedById: currentUser.sub,
+                      })),
+                    }
+                  : undefined,
             isActive: false,
           },
-          include: { productAccess: true },
+          include: {
+            productAccess: true,
+            customRoleAssignments: {
+              where: { customRole: { isActive: true } },
+              include: { customRole: { include: { productAccess: true } } },
+            },
+          },
         });
       });
     }
@@ -354,6 +406,7 @@ export class AuthService {
         roles,
         clearanceLevel: input.clearanceLevel ?? 0,
         productAccess: input.productAccess ?? [],
+        customRoleIds: input.customRoleIds ?? [],
       },
     });
 
@@ -367,6 +420,7 @@ export class AuthService {
         email,
         roles,
         productAccess: input.productAccess ?? [],
+        customRoleIds: input.customRoleIds ?? [],
       },
     });
 
@@ -399,7 +453,13 @@ export class AuthService {
         passwordHash: await hashPassword(input.password, 12),
         isActive: true,
       },
-      include: { productAccess: true },
+      include: {
+        productAccess: true,
+        customRoleAssignments: {
+          where: { customRole: { isActive: true } },
+          include: { customRole: { include: { productAccess: true } } },
+        },
+      },
     });
     const safeUser = this.usersService.toSafeUser(user);
 
@@ -469,6 +529,7 @@ export class AuthService {
       roles: user.roles,
       clearanceLevel: user.clearanceLevel,
       productAccess: user.productAccess,
+      customRoles: user.customRoles,
     };
   }
 
@@ -482,6 +543,7 @@ export class AuthService {
         sub: user.id,
         email: user.email,
         orgId: user.orgId,
+        customRoleIds: user.customRoles.map((role) => role.id),
       },
       {
         expiresIn: this.getAccessTokenExpiresIn() as '15m',

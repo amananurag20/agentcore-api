@@ -12,6 +12,8 @@ export interface ProductAccessGrant {
   canUse: boolean;
   canConfigure: boolean;
   canManageAgents: boolean;
+  canManageKnowledge: boolean;
 }
 
-export type ProductAction = 'use' | 'configure' | 'manage_agents';
+export type ProductAction =
+  'use' | 'configure' | 'manage_agents' | 'manage_knowledge';

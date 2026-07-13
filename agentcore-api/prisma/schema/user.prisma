@@ -9,6 +9,7 @@ model User {
   clearanceLevel Int        @default(0) @map("clearance_level")
   isActive     Boolean      @default(true) @map("is_active")
   productAccess UserProductAccess[]
+  customRoleAssignments UserCustomRole[]
   assignedCustomerChatConversations CustomerChatConversation[]
   appointmentStaffProfiles AppointmentStaff[]
   assignedWhatsAppConversations WhatsAppConversation[]
@@ -31,6 +32,7 @@ model UserProductAccess {
   canUse           Boolean      @default(true) @map("can_use")
   canConfigure     Boolean      @default(false) @map("can_configure")
   canManageAgents  Boolean      @default(false) @map("can_manage_agents")
+  canManageKnowledge Boolean    @default(false) @map("can_manage_knowledge")
   user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   createdAt        DateTime     @default(now()) @map("created_at")

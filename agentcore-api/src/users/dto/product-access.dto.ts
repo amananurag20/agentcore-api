@@ -25,4 +25,9 @@ export class ProductAccessDto {
   @IsBoolean()
   @IsOptional()
   canManageAgents?: boolean;
+
+  @ApiPropertyOptional({ default: false })
+  @IsBoolean()
+  @IsOptional()
+  canManageKnowledge?: boolean;
 }

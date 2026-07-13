@@ -8,6 +8,11 @@ model Organization {
   plan           OrganizationPlan   @default(free)
   deploymentMode DeploymentMode     @default(saas) @map("deployment_mode")
   users          User[]
+  customRoles    CustomRole[]
+  customRoleAssignments UserCustomRole[]
+  servicePrincipals ServicePrincipal[]
+  knowledgeCategories KnowledgeCategory[]
+  knowledgeFolders KnowledgeFolder[]
   userProductAccess UserProductAccess[]
   products       OrganizationProduct[]
   aiProviders    AIProviderConfig[]

@@ -53,4 +53,40 @@ describe('PolicyService', () => {
       service.assertProductAccess(user, 'customer_chat', 'configure'),
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
+
+  it('unions custom-role permissions with direct product access', async () => {
+    organizationProduct.findFirst.mockResolvedValue({ id: 'entitlement-1' });
+    userProductAccess.findUnique.mockResolvedValue(null);
+    const roleUser: AuthenticatedUser = {
+      ...user,
+      customRoles: [
+        {
+          id: 'role-1',
+          name: 'Support Lead',
+          clearanceLevel: 2,
+          productAccess: [
+            {
+              productKey: 'customer_chat',
+              canUse: true,
+              canConfigure: false,
+              canManageAgents: true,
+              canManageKnowledge: true,
+            },
+          ],
+        },
+      ],
+    };
+
+    await expect(
+      service.assertProductAccess(
+        roleUser,
+        'customer_chat',
+        'manage_knowledge',
+      ),
+    ).resolves.toBeUndefined();
+    expect(service.getEffectiveClearance(roleUser, 'customer_chat')).toBe(2);
+    expect(service.getEffectiveClearance(roleUser, 'voice_receptionist')).toBe(
+      0,
+    );
+  });
 });

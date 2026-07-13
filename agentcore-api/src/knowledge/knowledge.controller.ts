@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   Param,
   Patch,
@@ -33,11 +34,17 @@ import { SearchKnowledgeDto } from './dto/search-knowledge.dto';
 import { UpdateKnowledgeSourceDto } from './dto/update-knowledge-source.dto';
 import { UploadKnowledgeFileDto } from './dto/upload-knowledge-file.dto';
 import { KnowledgeService } from './knowledge.service';
+import { InternalMemoryRetrieveDto } from './dto/internal-memory-retrieve.dto';
+import {
+  CreateKnowledgeCategoryDto,
+  CreateKnowledgeFolderDto,
+} from './dto/knowledge-taxonomy.dto';
+import { PolicyService } from '../policy/policy.service';
 
 @ApiTags('Knowledge')
 @ApiBearerAuth('bearer')
 @Controller('knowledge')
-@Roles('super_admin', 'org_admin')
+@Roles('super_admin', 'org_admin', 'product_admin')
 export class KnowledgeController {
   constructor(private readonly knowledgeService: KnowledgeService) {}
 
@@ -46,8 +53,11 @@ export class KnowledgeController {
     summary: 'List knowledge sources visible to the current admin',
   })
   @ApiOkResponse({ type: KnowledgeSourceResponseDto, isArray: true })
-  listSources(@CurrentUser() user: AuthenticatedUser) {
-    return this.knowledgeService.listSources(user);
+  listSources(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.knowledgeService.listSources(user, organizationId);
   }
 
   @Post('sources')
@@ -152,6 +162,54 @@ export class KnowledgeController {
     return this.knowledgeService.deleteSource(user, id);
   }
 
+  @Get('taxonomy/categories')
+  listCategories(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.knowledgeService.listCategories(user, organizationId);
+  }
+
+  @Post('taxonomy/categories')
+  createCategory(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateKnowledgeCategoryDto,
+  ) {
+    return this.knowledgeService.createCategory(user, body);
+  }
+
+  @Delete('taxonomy/categories/:id')
+  deleteCategory(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.knowledgeService.deleteCategory(user, id);
+  }
+
+  @Get('taxonomy/folders')
+  listFolders(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.knowledgeService.listFolders(user, organizationId);
+  }
+
+  @Post('taxonomy/folders')
+  createFolder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateKnowledgeFolderDto,
+  ) {
+    return this.knowledgeService.createFolder(user, body);
+  }
+
+  @Delete('taxonomy/folders/:id')
+  deleteFolder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.knowledgeService.deleteFolder(user, id);
+  }
+
   @Get('documents')
   @ApiOperation({ summary: 'List knowledge documents' })
   @ApiQuery({
@@ -192,5 +250,44 @@ export class KnowledgeController {
     @Query('q') q?: string,
   ) {
     return this.knowledgeService.listChunks(user, { sourceId, documentId, q });
+  }
+}
+
+@ApiTags('Internal Memory')
+@ApiBearerAuth('bearer')
+@Controller('internal/memory')
+export class InternalMemoryController {
+  constructor(
+    private readonly knowledgeService: KnowledgeService,
+    private readonly policyService: PolicyService,
+  ) {}
+
+  @Post('retrieve')
+  @ApiOperation({
+    summary: 'Retrieve clearance-filtered memory using a service context token',
+  })
+  async retrieve(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: InternalMemoryRetrieveDto,
+  ) {
+    if (
+      user.principalType !== 'service' ||
+      user.serviceProductKey !== body.product
+    ) {
+      throw new ForbiddenException(
+        'A matching product service token is required',
+      );
+    }
+    await this.policyService.assertProductAccess(user, body.product, 'use');
+    const results = await this.knowledgeService.search(user, {
+      query: body.query,
+      productKey: body.product,
+      limit: body.topK ?? 8,
+    });
+    return results.map((result) => ({
+      ...result,
+      memoryId: result.documentId,
+      categories: body.categoryHint ?? [],
+    }));
   }
 }

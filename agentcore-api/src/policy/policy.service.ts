@@ -36,22 +36,69 @@ export class PolicyService {
 
     if (user.roles.includes('org_admin')) return;
 
-    const access = await this.prisma.userProductAccess.findUnique({
+    const directAccess = await this.prisma.userProductAccess.findUnique({
       where: { userId_productKey: { userId: user.sub, productKey } },
     });
 
-    const allowed =
-      access &&
-      (action === 'use'
-        ? access.canUse
-        : action === 'configure'
-          ? access.canConfigure
-          : access.canManageAgents);
+    const roleAccess = user.customRoles
+      ?.filter((role) =>
+        role.productAccess.some((access) => access.productKey === productKey),
+      )
+      .flatMap((role) => role.productAccess)
+      .filter((access) => access.productKey === productKey);
+
+    const allowed = [directAccess, ...(roleAccess ?? [])].some((access) =>
+      this.grantsAction(access, action),
+    );
 
     if (!allowed) {
       throw new ForbiddenException(
         `You do not have ${action} access to ${productKey}`,
       );
     }
+  }
+
+  getEffectiveClearance(
+    user: AuthenticatedUser,
+    productKey: ProductKey,
+  ): number {
+    if (user.roles.includes('super_admin')) return 4;
+    if (user.roles.includes('org_admin')) return user.clearanceLevel ?? 4;
+
+    const directGrant = user.productAccess?.some(
+      (access) => access.productKey === productKey && access.canUse,
+    );
+    const directClearance = directGrant ? (user.clearanceLevel ?? 0) : 0;
+    const roleClearance = Math.max(
+      0,
+      ...(user.customRoles ?? [])
+        .filter((role) =>
+          role.productAccess.some(
+            (access) => access.productKey === productKey && access.canUse,
+          ),
+        )
+        .map((role) => role.clearanceLevel),
+    );
+
+    return Math.max(directClearance, roleClearance);
+  }
+
+  private grantsAction(
+    access:
+      | {
+          canUse: boolean;
+          canConfigure: boolean;
+          canManageAgents: boolean;
+          canManageKnowledge?: boolean;
+        }
+      | null
+      | undefined,
+    action: ProductAction,
+  ) {
+    if (!access) return false;
+    if (action === 'use') return access.canUse;
+    if (action === 'configure') return access.canConfigure;
+    if (action === 'manage_agents') return access.canManageAgents;
+    return access.canManageKnowledge ?? access.canConfigure;
   }
 }
