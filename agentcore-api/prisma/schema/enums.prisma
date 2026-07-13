@@ -118,6 +118,26 @@ enum AppointmentReminderStatus {
   skipped
 }
 
+enum AppointmentCalendarProvider {
+  google
+  microsoft
+}
+
+enum AppointmentCalendarConnectionStatus {
+  pending
+  active
+  error
+  disconnected
+}
+
+enum AppointmentCalendarEventStatus {
+  pending
+  syncing
+  synced
+  failed
+  deleted
+}
+
 enum WhatsAppProviderType {
   meta
   twilio

@@ -32,6 +32,8 @@ model Organization {
   appointmentReminders      AppointmentReminder[]
   appointmentResources      AppointmentResource[]
   appointmentResourceTimeOff AppointmentResourceTimeOff[]
+  appointmentCalendarConnections AppointmentCalendarConnection[]
+  appointmentCalendarEvents AppointmentCalendarEvent[]
   whatsAppConfigs           WhatsAppAssistantConfig[]
   whatsAppConversations     WhatsAppConversation[]
   whatsAppMessages          WhatsAppMessage[]

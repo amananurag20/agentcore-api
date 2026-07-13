@@ -38,6 +38,7 @@ model AppointmentStaff {
   availability   AppointmentStaffAvailability[]
   timeOff        AppointmentStaffTimeOff[]
   bookings       AppointmentBooking[]
+  calendarConnections AppointmentCalendarConnection[]
   createdAt      DateTime                       @default(now()) @map("created_at")
   updatedAt      DateTime                       @updatedAt @map("updated_at")
 
@@ -178,6 +179,7 @@ model AppointmentBooking {
   metadata           Json                     @default("{}")
   reminders          AppointmentReminder[]
   resourceAllocations AppointmentBookingResource[]
+  calendarEvents      AppointmentCalendarEvent[]
   createdAt          DateTime                 @default(now()) @map("created_at")
   updatedAt          DateTime                 @updatedAt @map("updated_at")
 
@@ -186,6 +188,59 @@ model AppointmentBooking {
   @@index([staffId, startAt, endAt])
   @@index([customerEmail])
   @@map("appointment_bookings")
+}
+
+model AppointmentCalendarConnection {
+  id                    String                              @id @default(uuid())
+  organizationId        String                              @map("organization_id")
+  organization          Organization                        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  staffId               String                              @map("staff_id")
+  staff                 AppointmentStaff                    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  provider              AppointmentCalendarProvider
+  status                AppointmentCalendarConnectionStatus @default(pending)
+  accountEmail          String?                             @map("account_email")
+  calendarId            String                              @default("primary") @map("calendar_id")
+  calendarName          String?                             @map("calendar_name")
+  accessTokenEncrypted  String?                             @map("access_token_encrypted")
+  refreshTokenEncrypted String?                             @map("refresh_token_encrypted")
+  tokenExpiresAt        DateTime?                           @map("token_expires_at")
+  oauthStateHash        String?                             @map("oauth_state_hash")
+  oauthStateExpiresAt   DateTime?                           @map("oauth_state_expires_at")
+  lastSyncedAt          DateTime?                           @map("last_synced_at")
+  lastError             String?                             @map("last_error")
+  settings              Json                                @default("{}")
+  events                AppointmentCalendarEvent[]
+  createdAt             DateTime                            @default(now()) @map("created_at")
+  updatedAt             DateTime                            @updatedAt @map("updated_at")
+
+  @@unique([staffId, provider, calendarId])
+  @@index([organizationId, status])
+  @@index([oauthStateHash])
+  @@map("appointment_calendar_connections")
+}
+
+model AppointmentCalendarEvent {
+  id              String                         @id @default(uuid())
+  organizationId  String                         @map("organization_id")
+  organization    Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bookingId       String                         @map("booking_id")
+  booking         AppointmentBooking             @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  connectionId    String                         @map("connection_id")
+  connection      AppointmentCalendarConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  externalEventId String?                        @map("external_event_id")
+  externalEtag    String?                        @map("external_etag")
+  operation       String                         @default("upsert")
+  status          AppointmentCalendarEventStatus @default(pending)
+  attempts        Int                            @default(0)
+  lastError       String?                        @map("last_error")
+  lastSyncedAt    DateTime?                      @map("last_synced_at")
+  createdAt       DateTime                       @default(now()) @map("created_at")
+  updatedAt       DateTime                       @updatedAt @map("updated_at")
+
+  @@unique([bookingId, connectionId])
+  @@index([organizationId, status])
+  @@index([connectionId, status])
+  @@map("appointment_calendar_events")
 }
 
 model AppointmentBookingResource {

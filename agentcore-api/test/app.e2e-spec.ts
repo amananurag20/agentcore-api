@@ -546,6 +546,15 @@ describe('AppController (e2e)', () => {
           '/api/v1/appointment-booking/bookings/{id}/cancel',
         );
         expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/calendars/connections',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/calendars/connections/{id}',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/appointment-booking/calendar/oauth/{provider}/callback',
+        );
+        expect(body.paths).toHaveProperty(
           '/api/v1/appointment-booking/public/services',
         );
         expect(body.paths).toHaveProperty(

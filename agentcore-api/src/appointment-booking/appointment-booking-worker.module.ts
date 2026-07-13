@@ -9,6 +9,9 @@ import { AppointmentReminderService } from './appointment-reminder.service';
 import { AppointmentReminderDeliveryService } from './appointment-reminder-delivery.service';
 import { AppointmentReminderWorker } from './appointment-reminder.worker';
 import { AppointmentReminderRecoveryService } from './appointment-reminder-recovery.service';
+import { AppointmentCalendarService } from './appointment-calendar.service';
+import { AppointmentCalendarWorker } from './appointment-calendar.worker';
+import { AppointmentCalendarRecoveryService } from './appointment-calendar-recovery.service';
 
 @Module({
   imports: [
@@ -27,6 +30,9 @@ import { AppointmentReminderRecoveryService } from './appointment-reminder-recov
     AppointmentReminderService,
     AppointmentReminderRecoveryService,
     AppointmentReminderWorker,
+    AppointmentCalendarService,
+    AppointmentCalendarWorker,
+    AppointmentCalendarRecoveryService,
   ],
 })
 export class AppointmentBookingWorkerModule {}

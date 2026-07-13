@@ -9,9 +9,9 @@ Implemented in the codebase:
 - Auth, organizations, users, product entitlements, audit logs, health checks.
 - Prisma + Postgres schema with pgvector for knowledge/RAG.
 - S3/R2/MinIO-compatible storage abstraction for knowledge uploads.
-- Redis/BullMQ queues for ingestion and appointment reminders.
+- Redis/BullMQ queues for ingestion, appointment reminders, and calendar event synchronization.
 - Customer Chat backend with RAG, conversation history, handoff, public widget APIs, and rate limits.
-- Appointment Booking with DST-safe IANA timezones, staff schedules/time off, shared resource capacity, conflict-safe booking, secure customer self-service, durable reminders, public rate limits, structured voice/WhatsApp/chat actions, and tests.
+- Appointment Booking with DST-safe IANA timezones, staff schedules/time off, shared resource capacity, conflict-safe booking, secure customer self-service, durable reminders, Google/Outlook OAuth sync, public rate limits, structured voice/WhatsApp/chat actions, and tests.
 - WhatsApp Assistant backend/frontend MVP with config, inbound webhook, conversations, RAG reply, handoff, transcript/history, and mock outbound send.
 - Voice Receptionist backend/frontend MVP with config, call events, transcript history, RAG reply, handoff, route/transfer/voicemail flow, barge-in event logging, and optional webhook signature verification.
 - Live outbound adapter switches for WhatsApp and Voice, disabled by default until provider credentials are configured.
@@ -23,7 +23,6 @@ Provider integrations still pending:
 - Real WhatsApp webhook signature verification and media download.
 - Real Voice telephony streaming/control via Twilio/SIP.
 - Real STT/TTS providers for audio transcription/playback.
-- Google/Outlook calendar sync.
 - Stripe/Razorpay payments if deposits are required.
 
 ## Required Access From Manager
@@ -110,18 +109,28 @@ Provider API keys are stored through AI provider config APIs, encrypted using `A
 | `PUBLIC_APPOINTMENT_RATE_LIMIT_WINDOW_SECONDS` | Public appointment APIs           | Default `60`.                                                                   |
 | `PUBLIC_APPOINTMENT_MAX_READS_PER_WINDOW`      | Public services/availability      | Per-IP default `120`.                                                           |
 | `PUBLIC_APPOINTMENT_MAX_WRITES_PER_WINDOW`     | Public booking/self-service       | Per-IP default `10`.                                                            |
+| `GOOGLE_CALENDAR_CLIENT_ID`                    | Google Calendar OAuth             | OAuth web client ID.                                                            |
+| `GOOGLE_CALENDAR_CLIENT_SECRET`                | Google Calendar OAuth             | OAuth client secret.                                                            |
+| `GOOGLE_CALENDAR_REDIRECT_URI`                 | Google Calendar OAuth             | Must exactly match the provider callback registration.                          |
+| `MICROSOFT_CALENDAR_CLIENT_ID`                 | Microsoft Outlook OAuth           | Microsoft Entra application client ID.                                          |
+| `MICROSOFT_CALENDAR_CLIENT_SECRET`             | Microsoft Outlook OAuth           | Microsoft Entra client secret.                                                  |
+| `MICROSOFT_CALENDAR_REDIRECT_URI`              | Microsoft Outlook OAuth           | Must exactly match the provider callback registration.                          |
+| `APPOINTMENT_CALENDAR_OAUTH_SUCCESS_URL`       | Calendar OAuth UI return          | Frontend appointment URL after authorization.                                   |
+| `APPOINTMENT_CALENDAR_FAIL_OPEN`               | External conflict policy          | Default `false`; keep false to avoid unverified double bookings.                 |
+| `APPOINTMENT_CALENDAR_SYNC_CONCURRENCY`        | Calendar worker throughput        | Current default `5`.                                                            |
+| `APPOINTMENT_CALENDAR_RECOVERY_INTERVAL_MS`    | Durable calendar sync recovery    | Re-publishes pending/failed sync records. Default `60000`.                       |
 
 Provider configuration notes:
 
 - Email uses Resend; SMS uses Twilio; WhatsApp uses the organization's encrypted Meta/Twilio configuration.
 - If a channel is enabled without usable customer contact details or credentials, the durable reminder record is marked `skipped` rather than falsely marked sent.
-- Run `npm run start:worker` alongside the API whenever reminders are enabled.
+- Run `npm run start:worker` alongside the API whenever reminders or calendar sync are enabled.
 
-Future integrations:
-
-- Google Calendar OAuth client id/secret/redirect URL.
-- Microsoft Graph/Azure client id/secret/tenant/redirect URL.
-- Stripe/Razorpay keys and webhook secrets if payments are enabled.
+Calendar provider setup is operational configuration, not remaining application
+code. Register the exact callback URLs, enable Google Calendar API or Microsoft
+Graph delegated `User.Read`/`Calendars.ReadWrite`, and configure the credentials
+above. Stripe/Razorpay keys and webhook secrets remain future work if payments
+are enabled.
 
 ## WhatsApp Assistant Provider Data
 

@@ -8,6 +8,7 @@ import {
   Post,
   Query,
   Req,
+  Res,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
@@ -48,6 +49,11 @@ import {
   UpdateAppointmentStaffDto,
 } from './dto/appointment-booking.dto';
 import {
+  AppointmentCalendarProviderDto,
+  ConnectAppointmentCalendarDto,
+  ListAppointmentCalendarConnectionsDto,
+} from './dto/appointment-calendar.dto';
+import {
   AppointmentAvailabilityResponseDto,
   AppointmentBookingListResponseDto,
   AppointmentBookingResponseDto,
@@ -58,6 +64,8 @@ import {
   AppointmentTimeOffResponseDto,
 } from './dto/appointment-booking-response.dto';
 import { AppointmentActionDto } from './dto/appointment-action.dto';
+import { AppointmentCalendarService } from './appointment-calendar.service';
+import type { Response } from 'express';
 
 @ApiTags('Appointment Booking')
 @ApiBearerAuth('bearer')
@@ -393,6 +401,71 @@ export class AppointmentBookingController {
     @Body() body: UpdateAppointmentBookingStatusDto,
   ) {
     return this.appointmentBookingService.updateBookingStatus(user, id, body);
+  }
+}
+
+@ApiTags('Appointment Calendar Sync')
+@ApiBearerAuth('bearer')
+@Controller('appointment-booking/calendars')
+@Roles('super_admin', 'org_admin', 'product_admin', 'agent', 'user')
+@RequireProductAccess('appointment_booking')
+export class AppointmentCalendarController {
+  constructor(private readonly calendarService: AppointmentCalendarService) {}
+
+  @Get('connections')
+  listConnections(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListAppointmentCalendarConnectionsDto,
+  ) {
+    return this.calendarService.listConnections(user, query);
+  }
+
+  @Post('connections')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  connect(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: ConnectAppointmentCalendarDto,
+  ) {
+    return this.calendarService.beginConnection(user, body);
+  }
+
+  @Delete('connections/:id')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  disconnect(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.calendarService.disconnect(user, id);
+  }
+}
+
+@ApiTags('Appointment Calendar OAuth')
+@Controller('appointment-booking/calendar')
+export class AppointmentCalendarOAuthController {
+  constructor(
+    private readonly calendarService: AppointmentCalendarService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  @Public()
+  @Get('oauth/:provider/callback')
+  async callback(
+    @Param('provider') provider: AppointmentCalendarProviderDto,
+    @Query('code') code: string,
+    @Query('state') state: string,
+    @Res() response: Response,
+  ) {
+    const successUrl =
+      this.configService.get<string>(
+        'APPOINTMENT_CALENDAR_OAUTH_SUCCESS_URL',
+      ) ?? 'http://localhost:3000/?tab=appointments&calendar=connected';
+    try {
+      await this.calendarService.completeConnection(provider, code, state);
+      response.redirect(successUrl);
+    } catch {
+      const errorUrl = new URL(successUrl);
+      errorUrl.searchParams.set('calendar', 'error');
+      response.redirect(errorUrl.toString());
+    }
   }
 }
 

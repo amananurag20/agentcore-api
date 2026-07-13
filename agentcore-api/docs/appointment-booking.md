@@ -58,3 +58,34 @@ npm run start:worker
 Email uses Resend, SMS uses Twilio, and WhatsApp uses the organization's active
 Meta/Twilio configuration. See `.env.example` and
 `docs/production-integrations-checklist.md` for required settings.
+
+## Google Calendar and Microsoft Outlook
+
+Organization administrators connect a provider to an appointment staff member
+through the Calendar sync tab or these authenticated endpoints:
+
+- `GET /api/v1/appointment-booking/calendars/connections`
+- `POST /api/v1/appointment-booking/calendars/connections`
+- `DELETE /api/v1/appointment-booking/calendars/connections/:id`
+
+OAuth state is random, short-lived, and stored only as a SHA-256 hash. Access and
+refresh tokens are encrypted with `AI_CONFIG_ENCRYPTION_KEY` and never returned by
+the API. Connected calendars participate in availability through Google FreeBusy
+or Microsoft Graph calendarView. The default is fail-closed: a provider outage
+prevents an unverified booking unless `APPOINTMENT_CALENDAR_FAIL_OPEN=true` is set
+explicitly.
+
+Booking creates, reschedules, cancellations, and status changes produce durable,
+versioned BullMQ sync records. Failed records are retried and recovered by the
+worker. Connecting a calendar also backfills future pending/confirmed bookings.
+Run `npm run start:worker` with the API.
+
+Provider setup:
+
+1. Create a Google OAuth web client and/or Microsoft Entra web application.
+2. Register the exact callback URLs from `GOOGLE_CALENDAR_REDIRECT_URI` and
+   `MICROSOFT_CALENDAR_REDIRECT_URI`.
+3. Configure the client IDs/secrets and the frontend return URL shown in
+   `.env.example`.
+4. For Microsoft, grant delegated `User.Read` and `Calendars.ReadWrite`; for
+   Google, enable Calendar API access and the calendar OAuth scope.

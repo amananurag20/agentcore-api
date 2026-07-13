@@ -18,6 +18,7 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppointmentReminderQueueService } from './appointment-reminder-queue.service';
 import { AppointmentTimezoneService } from './appointment-timezone.service';
+import { AppointmentCalendarService } from './appointment-calendar.service';
 import {
   AppointmentActionDto,
   AppointmentActionTypeDto,
@@ -69,6 +70,7 @@ type BookingCreationResult = {
 export class AppointmentBookingService {
   constructor(
     private readonly auditService: AuditService,
+    private readonly calendarService: AppointmentCalendarService,
     private readonly reminderQueueService: AppointmentReminderQueueService,
     private readonly prisma: PrismaService,
     private readonly timezoneService: AppointmentTimezoneService,
@@ -829,6 +831,7 @@ export class AppointmentBookingService {
       organizationId,
       startAt: booking.startAt,
     });
+    await this.calendarService.scheduleBookingSync({ booking });
 
     return this.toBookingResponse(booking, manageToken);
   }
@@ -855,6 +858,7 @@ export class AppointmentBookingService {
       organizationId: input.organizationId,
       startAt: booking.startAt,
     });
+    await this.calendarService.scheduleBookingSync({ booking });
 
     return this.toBookingResponse(booking, manageToken);
   }
@@ -971,6 +975,10 @@ export class AppointmentBookingService {
       organizationId: updated.organizationId,
       startAt: updated.startAt,
     });
+    await this.calendarService.scheduleBookingSync({
+      booking: updated,
+      previousStaffId: booking.staffId,
+    });
 
     return this.toBookingResponse(updated);
   }
@@ -1014,6 +1022,10 @@ export class AppointmentBookingService {
       },
     });
     await this.reminderQueueService.cancelBookingReminders(updated.id);
+    await this.calendarService.scheduleBookingSync({
+      booking: updated,
+      operation: 'delete',
+    });
 
     await this.auditService.record({
       actor,
@@ -1043,12 +1055,17 @@ export class AppointmentBookingService {
     });
     if (['cancelled', 'completed', 'no_show'].includes(updated.status)) {
       await this.reminderQueueService.cancelBookingReminders(updated.id);
+      await this.calendarService.scheduleBookingSync({
+        booking: updated,
+        operation: 'delete',
+      });
     } else if (updated.status === 'confirmed') {
       await this.reminderQueueService.enqueueBookingReminders({
         bookingId: updated.id,
         organizationId: updated.organizationId,
         startAt: updated.startAt,
       });
+      await this.calendarService.scheduleBookingSync({ booking: updated });
     }
 
     await this.auditService.record({
@@ -1335,7 +1352,7 @@ export class AppointmentBookingService {
       excludeBookingId?: string;
     },
   ) {
-    const hasConflict = await this.hasConflict(input, tx);
+    const hasConflict = await this.hasConflict(input, tx, false);
 
     if (hasConflict) {
       throw new ConflictException('Selected slot is no longer available');
@@ -1352,6 +1369,7 @@ export class AppointmentBookingService {
       excludeBookingId?: string;
     },
     client: PrismaService | Prisma.TransactionClient = this.prisma,
+    checkExternalCalendar = true,
   ): Promise<boolean> {
     const conflictStart = this.addMinutes(
       input.startAt,
@@ -1362,33 +1380,41 @@ export class AppointmentBookingService {
       input.service.bufferAfterMinutes,
     );
 
-    const [bookings, timeOff, resourceConflict] = await Promise.all([
-      client.appointmentBooking.findMany({
-        where: {
-          organizationId: input.organizationId,
-          staffId: input.staffId,
-          id: input.excludeBookingId
-            ? { not: input.excludeBookingId }
-            : undefined,
-          status: { in: ['pending', 'confirmed'] },
-          startAt: {
-            lt: this.addMinutes(conflictEnd, 240),
-            gt: this.addMinutes(conflictStart, -24 * 60 - 240),
+    const [bookings, timeOff, resourceConflict, externalCalendarConflict] =
+      await Promise.all([
+        client.appointmentBooking.findMany({
+          where: {
+            organizationId: input.organizationId,
+            staffId: input.staffId,
+            id: input.excludeBookingId
+              ? { not: input.excludeBookingId }
+              : undefined,
+            status: { in: ['pending', 'confirmed'] },
+            startAt: {
+              lt: this.addMinutes(conflictEnd, 240),
+              gt: this.addMinutes(conflictStart, -24 * 60 - 240),
+            },
           },
-        },
-        include: { service: true },
-      }),
-      client.appointmentStaffTimeOff.findFirst({
-        where: {
-          organizationId: input.organizationId,
-          staffId: input.staffId,
-          startAt: { lt: conflictEnd },
-          endAt: { gt: conflictStart },
-        },
-        select: { id: true },
-      }),
-      this.hasResourceConflict(input, conflictStart, conflictEnd, client),
-    ]);
+          include: { service: true },
+        }),
+        client.appointmentStaffTimeOff.findFirst({
+          where: {
+            organizationId: input.organizationId,
+            staffId: input.staffId,
+            startAt: { lt: conflictEnd },
+            endAt: { gt: conflictStart },
+          },
+          select: { id: true },
+        }),
+        this.hasResourceConflict(input, conflictStart, conflictEnd, client),
+        checkExternalCalendar
+          ? this.calendarService.hasExternalConflict(
+              input.staffId,
+              conflictStart,
+              conflictEnd,
+            )
+          : false,
+      ]);
 
     const bookingConflict = bookings.some((booking) => {
       const existingStart = this.addMinutes(
@@ -1402,7 +1428,12 @@ export class AppointmentBookingService {
       return existingStart < conflictEnd && existingEnd > conflictStart;
     });
 
-    return bookingConflict || Boolean(timeOff) || resourceConflict;
+    return (
+      bookingConflict ||
+      Boolean(timeOff) ||
+      resourceConflict ||
+      externalCalendarConflict
+    );
   }
 
   private async hasResourceConflict(

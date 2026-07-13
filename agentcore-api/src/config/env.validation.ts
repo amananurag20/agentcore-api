@@ -284,6 +284,53 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
+  GOOGLE_CALENDAR_CLIENT_ID?: string;
+
+  @IsString()
+  @IsOptional()
+  GOOGLE_CALENDAR_CLIENT_SECRET?: string;
+
+  @IsString()
+  @IsOptional()
+  GOOGLE_CALENDAR_REDIRECT_URI?: string;
+
+  @IsString()
+  @IsOptional()
+  MICROSOFT_CALENDAR_CLIENT_ID?: string;
+
+  @IsString()
+  @IsOptional()
+  MICROSOFT_CALENDAR_CLIENT_SECRET?: string;
+
+  @IsString()
+  @IsOptional()
+  MICROSOFT_CALENDAR_REDIRECT_URI?: string;
+
+  @IsString()
+  @IsOptional()
+  APPOINTMENT_CALENDAR_OAUTH_SUCCESS_URL?: string;
+
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  @IsOptional()
+  APPOINTMENT_CALENDAR_FAIL_OPEN = false;
+
+  @Transform(({ value }) => Number(value ?? 5))
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  @IsOptional()
+  APPOINTMENT_CALENDAR_SYNC_CONCURRENCY = 5;
+
+  @Transform(({ value }) => Number(value ?? 60000))
+  @IsInt()
+  @Min(5000)
+  @Max(3600000)
+  @IsOptional()
+  APPOINTMENT_CALENDAR_RECOVERY_INTERVAL_MS = 60000;
+
+  @IsString()
+  @IsOptional()
   DEFAULT_EMBEDDING_MODEL?: string;
 
   @Transform(({ value }) => Number(value ?? 1536))
