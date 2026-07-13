@@ -612,7 +612,7 @@ describe('AppController (e2e)', () => {
       user: {
         email: 'admin@agentcore.local',
         orgId: 'org_demo',
-        roles: ['super_admin', 'org_admin'],
+        roles: ['super_admin'],
       },
     });
     expect(body.accessToken).toEqual(expect.any(String));
