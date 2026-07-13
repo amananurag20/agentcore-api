@@ -1158,8 +1158,7 @@ export class KnowledgeService {
   }
 
   private scopedKnowledgeWhere(user: AuthenticatedUser) {
-    if (this.isSuperAdmin(user)) return {};
-    if (user.roles.includes('org_admin')) {
+    if (this.isSuperAdmin(user) || user.roles.includes('org_admin')) {
       return { organizationId: user.orgId };
     }
 

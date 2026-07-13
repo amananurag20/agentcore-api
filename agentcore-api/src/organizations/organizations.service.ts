@@ -94,6 +94,7 @@ export class OrganizationsService {
 
   async list() {
     return this.prisma.organization.findMany({
+      where: { isSystem: false },
       include: {
         users: {
           where: { roles: { has: 'org_admin' } },

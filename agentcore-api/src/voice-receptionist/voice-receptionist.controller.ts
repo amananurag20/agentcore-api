@@ -56,8 +56,11 @@ export class VoiceReceptionistController {
   @Get('configs')
   @ApiOperation({ summary: 'List voice provider configs' })
   @ApiOkResponse({ type: VoiceConfigResponseDto, isArray: true })
-  listConfigs(@CurrentUser() user: AuthenticatedUser) {
-    return this.voiceReceptionistService.listConfigs(user);
+  listConfigs(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.voiceReceptionistService.listConfigs(user, organizationId);
   }
 
   @Post('configs')

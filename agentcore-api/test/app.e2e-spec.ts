@@ -35,6 +35,7 @@ interface OrganizationResponseBody {
   status: string;
   plan: string;
   deploymentMode: string;
+  isSystem: boolean;
 }
 
 interface UserResponseBody {
@@ -688,6 +689,7 @@ describe('AppController (e2e)', () => {
 
         expect(body.id).toBe('org_demo');
         expect(body.name).toBe('Platform Test Workspace');
+        expect(body.isSystem).toBe(true);
         expect(body.plan).toBe('free');
       });
   });
@@ -713,6 +715,7 @@ describe('AppController (e2e)', () => {
       .expect(201);
 
     const createdBody = created.body as OrganizationResponseBody;
+    expect(createdBody.isSystem).toBe(false);
 
     return request(app.getHttpServer())
       .get(`/api/v1/organizations/${createdBody.id}`)
@@ -724,6 +727,27 @@ describe('AppController (e2e)', () => {
         expect(body.id).toBe(createdBody.id);
         expect(body.slug).toBe(`e2e-organization-${suffix}`);
         expect(body.plan).toBe('starter');
+      });
+  });
+
+  it('/organizations (GET) lists tenants without the system workspace', async () => {
+    const loginBody = await loginAsAdmin();
+
+    return request(app.getHttpServer())
+      .get('/api/v1/organizations')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as OrganizationResponseBody[];
+
+        expect(
+          body.some((organization) => organization.id === 'org_demo'),
+        ).toBe(false);
+        expect(
+          body.every(
+            (organization) => organization.name !== 'Platform Test Workspace',
+          ),
+        ).toBe(true);
       });
   });
 
@@ -1578,6 +1602,190 @@ describe('AppController (e2e)', () => {
       .get(`/api/v1/ai/providers/${createdBody.id}`)
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .expect(404);
+  });
+
+  it('keeps platform workspace operations isolated until a tenant is selected', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+    const tenant = await request(app.getHttpServer())
+      .post('/api/v1/organizations')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: `Isolation Tenant ${suffix}`,
+        slug: `isolation-tenant-${suffix}`,
+        plan: 'starter',
+        deploymentMode: 'saas',
+        enabledProducts: ['whatsapp_assistant', 'voice_receptionist'],
+        firstAdmin: {
+          name: 'Isolation Tenant Admin',
+          email: `isolation-admin-${suffix}@agentcore.local`,
+          password: 'E2E-Admin@12345',
+        },
+      })
+      .expect(201);
+    const tenantBody = tenant.body as OrganizationResponseBody;
+
+    const provider = await request(app.getHttpServer())
+      .post('/api/v1/ai/providers')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        organizationId: tenantBody.id,
+        provider: 'openai',
+        name: `Tenant OpenAI ${suffix}`,
+      })
+      .expect(201);
+    const providerBody = provider.body as AIProviderResponseBody;
+
+    const whatsApp = await request(app.getHttpServer())
+      .post('/api/v1/whatsapp-assistant/configs')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        organizationId: tenantBody.id,
+        name: `Tenant WhatsApp ${suffix}`,
+        provider: 'meta',
+      })
+      .expect(201);
+    const whatsAppBody = whatsApp.body as WhatsAppConfigResponseBody;
+
+    const voice = await request(app.getHttpServer())
+      .post('/api/v1/voice-receptionist/configs')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        organizationId: tenantBody.id,
+        name: `Tenant Voice ${suffix}`,
+        provider: 'twilio',
+      })
+      .expect(201);
+    const voiceBody = voice.body as VoiceConfigResponseBody;
+
+    const knowledge = await request(app.getHttpServer())
+      .post('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        organizationId: tenantBody.id,
+        type: 'text',
+        name: `Tenant Knowledge ${suffix}`,
+        rawText: `Private tenant knowledge ${suffix}`,
+      })
+      .expect(201);
+    const knowledgeBody = knowledge.body as KnowledgeSourceResponseBody;
+
+    const platformProviders = await request(app.getHttpServer())
+      .get('/api/v1/ai/providers')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    expect(
+      (platformProviders.body as AIProviderResponseBody[]).some(
+        (item) => item.id === providerBody.id,
+      ),
+    ).toBe(false);
+
+    const platformWhatsApp = await request(app.getHttpServer())
+      .get('/api/v1/whatsapp-assistant/configs')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    expect(
+      (platformWhatsApp.body as WhatsAppConfigResponseBody[]).some(
+        (item) => item.id === whatsAppBody.id,
+      ),
+    ).toBe(false);
+
+    const platformVoice = await request(app.getHttpServer())
+      .get('/api/v1/voice-receptionist/configs')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    expect(
+      (platformVoice.body as VoiceConfigResponseBody[]).some(
+        (item) => item.id === voiceBody.id,
+      ),
+    ).toBe(false);
+
+    const platformKnowledge = await request(app.getHttpServer())
+      .get('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    expect(
+      (
+        platformKnowledge.body as { data: KnowledgeSourceResponseBody[] }
+      ).data.some((item) => item.id === knowledgeBody.id),
+    ).toBe(false);
+
+    const tenantProviders = await request(app.getHttpServer())
+      .get('/api/v1/ai/providers')
+      .query({ organizationId: tenantBody.id })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    expect(
+      (tenantProviders.body as AIProviderResponseBody[]).some(
+        (item) => item.id === providerBody.id,
+      ),
+    ).toBe(true);
+
+    const tenantWhatsApp = await request(app.getHttpServer())
+      .get('/api/v1/whatsapp-assistant/configs')
+      .query({ organizationId: tenantBody.id })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    expect(
+      (tenantWhatsApp.body as WhatsAppConfigResponseBody[]).some(
+        (item) => item.id === whatsAppBody.id,
+      ),
+    ).toBe(true);
+
+    const tenantVoice = await request(app.getHttpServer())
+      .get('/api/v1/voice-receptionist/configs')
+      .query({ organizationId: tenantBody.id })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    expect(
+      (tenantVoice.body as VoiceConfigResponseBody[]).some(
+        (item) => item.id === voiceBody.id,
+      ),
+    ).toBe(true);
+
+    const tenantKnowledge = await request(app.getHttpServer())
+      .get('/api/v1/knowledge/sources')
+      .query({ organizationId: tenantBody.id })
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    expect(
+      (
+        tenantKnowledge.body as { data: KnowledgeSourceResponseBody[] }
+      ).data.some((item) => item.id === knowledgeBody.id),
+    ).toBe(true);
+
+    const tenantLogin = await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({
+        email: `isolation-admin-${suffix}@agentcore.local`,
+        password: 'E2E-Admin@12345',
+      })
+      .expect(201);
+    const tenantLoginBody = tenantLogin.body as AuthResponseBody;
+
+    await request(app.getHttpServer())
+      .get('/api/v1/ai/providers')
+      .query({ organizationId: 'org_demo' })
+      .set('Authorization', `Bearer ${tenantLoginBody.accessToken}`)
+      .expect(403);
+
+    await request(app.getHttpServer())
+      .get('/api/v1/whatsapp-assistant/configs')
+      .query({ organizationId: 'org_demo' })
+      .set('Authorization', `Bearer ${tenantLoginBody.accessToken}`)
+      .expect(403);
+
+    await request(app.getHttpServer())
+      .get('/api/v1/voice-receptionist/configs')
+      .query({ organizationId: 'org_demo' })
+      .set('Authorization', `Bearer ${tenantLoginBody.accessToken}`)
+      .expect(403);
+
+    await request(app.getHttpServer())
+      .get('/api/v1/knowledge/sources')
+      .query({ organizationId: 'org_demo' })
+      .set('Authorization', `Bearer ${tenantLoginBody.accessToken}`)
+      .expect(403);
   });
 
   it('/knowledge/sources manages knowledge base sources and documents', async () => {

@@ -47,11 +47,17 @@ export class VoiceReceptionistService {
     private readonly prisma: PrismaService,
   ) {}
 
-  async listConfigs(currentUser: AuthenticatedUser) {
+  async listConfigs(
+    currentUser: AuthenticatedUser,
+    requestedOrganizationId?: string,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      requestedOrganizationId,
+    );
+    await this.assertVoiceEnabled(organizationId);
     const configs = await this.prisma.voiceReceptionistConfig.findMany({
-      where: this.isSuperAdmin(currentUser)
-        ? undefined
-        : { organizationId: currentUser.orgId },
+      where: { organizationId },
       orderBy: { createdAt: 'desc' },
     });
 

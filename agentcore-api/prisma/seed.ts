@@ -12,17 +12,20 @@ const products = [
   {
     key: 'appointment_booking',
     name: 'Appointment Booking',
-    description: 'Calendar-aware booking, rescheduling, reminders, and availability.',
+    description:
+      'Calendar-aware booking, rescheduling, reminders, and availability.',
   },
   {
     key: 'whatsapp_assistant',
     name: 'WhatsApp Assistant',
-    description: 'WhatsApp Business assistant with media support and human handoff.',
+    description:
+      'WhatsApp Business assistant with media support and human handoff.',
   },
   {
     key: 'voice_receptionist',
     name: 'Voice Receptionist',
-    description: 'AI voice receptionist for calls, routing, transcripts, and voicemail.',
+    description:
+      'AI voice receptionist for calls, routing, transcripts, and voicemail.',
   },
 ] as const;
 
@@ -36,6 +39,7 @@ async function main() {
       status: 'active',
       plan: 'free',
       deploymentMode: 'saas',
+      isSystem: true,
     },
     update: {
       name: 'Platform Test Workspace',
@@ -43,6 +47,7 @@ async function main() {
       status: 'active',
       plan: 'free',
       deploymentMode: 'saas',
+      isSystem: true,
     },
   });
 
@@ -92,9 +97,9 @@ async function main() {
       create: {
         organizationId: 'org_demo',
         productId: savedProduct.id,
-        status: product.key === 'customer_chat' ? 'enabled' : 'disabled',
+        status: 'enabled',
       },
-      update: {},
+      update: { status: 'enabled' },
     });
   }
 }

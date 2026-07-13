@@ -28,6 +28,9 @@ export class OrganizationResponseDto {
   @ApiProperty({ enum: ['local', 'saas'], example: 'saas' })
   deploymentMode: 'local' | 'saas';
 
+  @ApiProperty({ example: false })
+  isSystem: boolean;
+
   @ApiProperty({ example: '2026-07-06T06:00:00.000Z' })
   createdAt: Date;
 

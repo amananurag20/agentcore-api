@@ -27,11 +27,16 @@ export class AIProvidersService {
     private readonly prisma: PrismaService,
   ) {}
 
-  async list(currentUser: AuthenticatedUser): Promise<SafeAIProviderConfig[]> {
+  async list(
+    currentUser: AuthenticatedUser,
+    requestedOrganizationId?: string,
+  ): Promise<SafeAIProviderConfig[]> {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      requestedOrganizationId,
+    );
     const configs = await this.prisma.aIProviderConfig.findMany({
-      where: this.isSuperAdmin(currentUser)
-        ? undefined
-        : { organizationId: currentUser.orgId },
+      where: { organizationId },
       orderBy: { createdAt: 'desc' },
     });
 

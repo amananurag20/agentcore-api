@@ -7,6 +7,7 @@ model Organization {
   status                    OrganizationStatus             @default(active)
   plan                      OrganizationPlan               @default(free)
   deploymentMode            DeploymentMode                 @default(saas) @map("deployment_mode")
+  isSystem                  Boolean                        @default(false) @map("is_system")
   users                     User[]
   customRoles               CustomRole[]
   customRoleAssignments     UserCustomRole[]
@@ -40,5 +41,6 @@ model Organization {
   updatedAt                 DateTime                       @updatedAt @map("updated_at")
 
   @@index([status])
+  @@index([isSystem])
   @@map("organizations")
 }

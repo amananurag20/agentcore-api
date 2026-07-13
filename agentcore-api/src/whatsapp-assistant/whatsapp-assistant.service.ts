@@ -41,11 +41,17 @@ export class WhatsAppAssistantService {
     private readonly prisma: PrismaService,
   ) {}
 
-  async listConfigs(currentUser: AuthenticatedUser) {
+  async listConfigs(
+    currentUser: AuthenticatedUser,
+    requestedOrganizationId?: string,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      requestedOrganizationId,
+    );
+    await this.assertWhatsAppEnabled(organizationId);
     const configs = await this.prisma.whatsAppAssistantConfig.findMany({
-      where: this.isSuperAdmin(currentUser)
-        ? undefined
-        : { organizationId: currentUser.orgId },
+      where: { organizationId },
       orderBy: { createdAt: 'desc' },
     });
 

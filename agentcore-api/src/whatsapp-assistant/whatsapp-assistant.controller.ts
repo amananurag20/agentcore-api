@@ -49,8 +49,11 @@ export class WhatsAppAssistantController {
   @Get('configs')
   @ApiOperation({ summary: 'List WhatsApp provider configs' })
   @ApiOkResponse({ type: WhatsAppConfigResponseDto, isArray: true })
-  listConfigs(@CurrentUser() user: AuthenticatedUser) {
-    return this.whatsAppAssistantService.listConfigs(user);
+  listConfigs(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.whatsAppAssistantService.listConfigs(user, organizationId);
   }
 
   @Post('configs')

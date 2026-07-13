@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -34,8 +35,11 @@ export class AIProvidersController {
     summary: 'List AI provider configs visible to the current admin',
   })
   @ApiOkResponse({ type: AIProviderResponseDto, isArray: true })
-  list(@CurrentUser() user: AuthenticatedUser) {
-    return this.aiProvidersService.list(user);
+  list(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.aiProvidersService.list(user, organizationId);
   }
 
   @Post()
