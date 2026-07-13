@@ -4,10 +4,10 @@ export class OrganizationResponseDto {
   @ApiProperty({ example: 'org_demo' })
   id: string;
 
-  @ApiProperty({ example: 'Demo Organization' })
+  @ApiProperty({ example: 'Platform Test Workspace' })
   name: string;
 
-  @ApiProperty({ example: 'demo-organization' })
+  @ApiProperty({ example: 'platform-test-workspace' })
   slug: string;
 
   @ApiProperty({ nullable: true, example: 'operations@acme.com' })

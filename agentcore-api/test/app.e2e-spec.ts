@@ -666,7 +666,7 @@ describe('AppController (e2e)', () => {
         const body = response.body as OrganizationResponseBody;
 
         expect(body.id).toBe('org_demo');
-        expect(body.slug).toBe('demo-organization');
+        expect(body.slug).toBe('platform-test-workspace');
         expect(body.status).toBe('active');
       });
   });
@@ -678,7 +678,7 @@ describe('AppController (e2e)', () => {
       .patch('/api/v1/organizations/me')
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .send({
-        name: 'Demo Organization',
+        name: 'Platform Test Workspace',
         plan: 'free',
         deploymentMode: 'saas',
       })
@@ -687,7 +687,7 @@ describe('AppController (e2e)', () => {
         const body = response.body as OrganizationResponseBody;
 
         expect(body.id).toBe('org_demo');
-        expect(body.name).toBe('Demo Organization');
+        expect(body.name).toBe('Platform Test Workspace');
         expect(body.plan).toBe('free');
       });
   });
