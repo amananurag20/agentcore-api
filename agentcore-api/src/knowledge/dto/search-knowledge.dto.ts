@@ -2,8 +2,10 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsIn,
   IsInt,
+  IsArray,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   Min,
   MinLength,
@@ -23,6 +25,12 @@ export class SearchKnowledgeDto {
   @IsString()
   @IsOptional()
   sourceId?: string;
+
+  @ApiPropertyOptional({ type: String, isArray: true })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  @IsOptional()
+  folderIds?: string[];
 
   @ApiPropertyOptional({ example: 5, default: 5 })
   @IsInt()

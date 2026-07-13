@@ -1,20 +1,20 @@
 model AppointmentService {
-  id                  String                         @id @default(uuid())
-  organizationId      String                         @map("organization_id")
-  organization        Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  id                  String                    @id @default(uuid())
+  organizationId      String                    @map("organization_id")
+  organization        Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name                String
   description         String?
-  durationMinutes     Int                            @map("duration_minutes")
-  bufferBeforeMinutes Int                            @default(0) @map("buffer_before_minutes")
-  bufferAfterMinutes  Int                            @default(0) @map("buffer_after_minutes")
-  priceCents          Int?                           @map("price_cents")
-  currency            String                         @default("USD")
-  status              AppointmentServiceStatus       @default(active)
-  metadata            Json                           @default("{}")
+  durationMinutes     Int                       @map("duration_minutes")
+  bufferBeforeMinutes Int                       @default(0) @map("buffer_before_minutes")
+  bufferAfterMinutes  Int                       @default(0) @map("buffer_after_minutes")
+  priceCents          Int?                      @map("price_cents")
+  currency            String                    @default("USD")
+  status              AppointmentServiceStatus  @default(active)
+  metadata            Json                      @default("{}")
   staffServices       AppointmentStaffService[]
   bookings            AppointmentBooking[]
-  createdAt           DateTime                       @default(now()) @map("created_at")
-  updatedAt           DateTime                       @updatedAt @map("updated_at")
+  createdAt           DateTime                  @default(now()) @map("created_at")
+  updatedAt           DateTime                  @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@map("appointment_services")

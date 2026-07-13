@@ -46,18 +46,19 @@ export class OrganizationsService {
           },
         });
 
-        if (input.enabledProducts?.length) {
-          const products = await tx.product.findMany({
-            where: { key: { in: input.enabledProducts }, status: 'active' },
-          });
-          await tx.organizationProduct.createMany({
-            data: products.map((product) => ({
-              organizationId: organization.id,
-              productId: product.id,
-              status: 'enabled' as const,
-            })),
-          });
-        }
+        const products = await tx.product.findMany({
+          where: { status: 'active' },
+        });
+        const enabledProducts = new Set(input.enabledProducts ?? []);
+        await tx.organizationProduct.createMany({
+          data: products.map((product) => ({
+            organizationId: organization.id,
+            productId: product.id,
+            status: enabledProducts.has(product.key)
+              ? ('enabled' as const)
+              : ('disabled' as const),
+          })),
+        });
 
         return { organization, firstAdmin };
       });

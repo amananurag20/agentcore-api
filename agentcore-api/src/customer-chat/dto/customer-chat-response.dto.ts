@@ -102,14 +102,26 @@ export class CustomerChatAgentMessageResponseDto {
 }
 
 export class CustomerChatWidgetConfigDto {
+  @ApiProperty({ example: 'a6f7961d-cf93-47c4-a0fe-9238a0b2f729' })
+  id: string;
+
   @ApiProperty({ example: 'org_demo' })
   organizationId: string;
+
+  @ApiProperty({ example: 'Sales Assistant' })
+  name: string;
 
   @ApiProperty({ example: 'a6f7961d-cf93-47c4-a0fe-9238a0b2f729' })
   widgetKey: string;
 
   @ApiProperty({ example: true })
   enabled: boolean;
+
+  @ApiProperty({ enum: ['all', 'folders'], example: 'all' })
+  knowledgeScope: string;
+
+  @ApiProperty({ type: String, isArray: true })
+  folderIds: string[];
 
   @ApiProperty({ example: 'Hi! How can I help you today?' })
   greetingText: string;
@@ -119,6 +131,23 @@ export class CustomerChatWidgetConfigDto {
 
   @ApiProperty({ example: {} })
   settings: Record<string, unknown>;
+}
+
+export class CustomerChatWidgetConfigListDto {
+  @ApiProperty({ type: CustomerChatWidgetConfigDto, isArray: true })
+  data: CustomerChatWidgetConfigDto[];
+
+  @ApiProperty({ example: 24 })
+  total: number;
+
+  @ApiProperty({ example: 1 })
+  page: number;
+
+  @ApiProperty({ example: 10 })
+  limit: number;
+
+  @ApiProperty({ example: 3 })
+  totalPages: number;
 }
 
 export class PublicCustomerChatConversationCreatedDto {

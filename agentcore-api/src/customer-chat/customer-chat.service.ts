@@ -6,7 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CustomerChatWidgetConfig, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 import { ChatService } from '../ai/chat.service';
 import { AuditService } from '../audit/audit.service';
@@ -29,7 +29,15 @@ import {
   SendPublicCustomerChatMessageDto,
 } from './dto/public-widget.dto';
 import { SendCustomerChatMessageDto } from './dto/send-message.dto';
-import { UpdateCustomerChatWidgetConfigDto } from './dto/update-widget-config.dto';
+import {
+  CreateCustomerChatWidgetConfigDto,
+  UpdateCustomerChatWidgetConfigDto,
+} from './dto/update-widget-config.dto';
+import { ListCustomerChatWidgetConfigsDto } from './dto/list-widget-configs.dto';
+
+type WidgetConfigWithFolders = Prisma.CustomerChatWidgetConfigGetPayload<{
+  include: { folderScopes: true };
+}>;
 
 type ConversationWithMessages = Prisma.CustomerChatConversationGetPayload<{
   include: {
@@ -41,6 +49,9 @@ type ConversationWithMessages = Prisma.CustomerChatConversationGetPayload<{
           };
         };
       };
+    };
+    widgetConfig: {
+      include: { folderScopes: true };
     };
   };
 }>;
@@ -164,6 +175,12 @@ export class CustomerChatService {
       query: input.content,
       limit: 5,
       productKey: 'customer_chat',
+      folderIds:
+        conversation.widgetConfig?.knowledgeScope === 'folders'
+          ? conversation.widgetConfig.folderScopes.map(
+              (scope) => scope.folderId,
+            )
+          : undefined,
     });
     const chatResult = await this.chatService.answerWithContext({
       organizationId: conversation.organizationId,
@@ -365,23 +382,140 @@ export class CustomerChatService {
     currentUser: AuthenticatedUser,
     input: UpdateCustomerChatWidgetConfigDto,
   ) {
-    const config = await this.prisma.customerChatWidgetConfig.upsert({
-      where: { organizationId: currentUser.orgId },
-      create: {
-        organizationId: currentUser.orgId,
+    const existing = await this.ensureWidgetConfig(currentUser.orgId);
+    return this.updateWidgetConfigById(currentUser, existing.id, input);
+  }
+
+  async listWidgetConfigs(
+    currentUser: AuthenticatedUser,
+    input: ListCustomerChatWidgetConfigsDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    await this.assertCustomerChatEnabled(organizationId);
+    const page = input.page ?? 1;
+    const limit = input.limit ?? 10;
+    const [configs, total] = await Promise.all([
+      this.prisma.customerChatWidgetConfig.findMany({
+        where: { organizationId },
+        include: { folderScopes: true },
+        orderBy: { updatedAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.customerChatWidgetConfig.count({ where: { organizationId } }),
+    ]);
+
+    return {
+      data: configs.map((config) => this.toWidgetConfigResponse(config)),
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  }
+
+  async createWidgetConfig(
+    currentUser: AuthenticatedUser,
+    input: CreateCustomerChatWidgetConfigDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    await this.assertCustomerChatEnabled(organizationId);
+    const knowledgeScope = input.knowledgeScope ?? 'all';
+    const folderIds =
+      knowledgeScope === 'folders' ? (input.folderIds ?? []) : [];
+    await this.assertWidgetFolders(organizationId, knowledgeScope, folderIds);
+
+    const config = await this.prisma.customerChatWidgetConfig.create({
+      data: {
+        organizationId,
+        name: input.name.trim(),
         enabled: input.enabled ?? true,
+        knowledgeScope,
         greetingText: input.greetingText,
         allowedDomains: input.allowedDomains,
         settings: this.toJsonObject(input.settings),
+        folderScopes: {
+          create: folderIds.map((folderId) => ({ folderId })),
+        },
       },
-      update: {
+      include: { folderScopes: true },
+    });
+
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId,
+      action: 'customer_chat.widget_config_created',
+      entityType: 'customer_chat_widget_config',
+      entityId: config.id,
+      metadata: { name: config.name, knowledgeScope, folderIds },
+    });
+
+    return this.toWidgetConfigResponse(config);
+  }
+
+  async getWidgetConfigById(currentUser: AuthenticatedUser, id: string) {
+    const config = await this.findWidgetConfigForActor(currentUser, id);
+    return this.toWidgetConfigResponse(config);
+  }
+
+  async updateWidgetConfigById(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: UpdateCustomerChatWidgetConfigDto,
+  ) {
+    const existing = await this.findWidgetConfigForActor(currentUser, id);
+    if (
+      input.organizationId &&
+      input.organizationId !== existing.organizationId
+    ) {
+      throw new BadRequestException(
+        'A widget cannot be moved to another organization',
+      );
+    }
+
+    const knowledgeScope =
+      input.knowledgeScope ??
+      (existing.knowledgeScope === 'folders' ? 'folders' : 'all');
+    const existingFolderIds = existing.folderScopes.map(
+      (scope) => scope.folderId,
+    );
+    const folderIds =
+      knowledgeScope === 'folders'
+        ? (input.folderIds ?? existingFolderIds)
+        : [];
+    await this.assertWidgetFolders(
+      existing.organizationId,
+      knowledgeScope,
+      folderIds,
+    );
+
+    const replaceFolderScopes =
+      input.knowledgeScope !== undefined || input.folderIds !== undefined;
+    const config = await this.prisma.customerChatWidgetConfig.update({
+      where: { id },
+      data: {
+        name: input.name?.trim(),
         enabled: input.enabled,
+        knowledgeScope,
         greetingText: input.greetingText,
         allowedDomains: input.allowedDomains,
         settings: input.settings
           ? this.toJsonObject(input.settings)
           : undefined,
+        folderScopes: replaceFolderScopes
+          ? {
+              deleteMany: {},
+              create: folderIds.map((folderId) => ({ folderId })),
+            }
+          : undefined,
       },
+      include: { folderScopes: true },
     });
 
     await this.auditService.record({
@@ -392,12 +526,29 @@ export class CustomerChatService {
       entityId: config.id,
       metadata: this.removeUndefined({
         enabled: input.enabled,
+        name: input.name,
+        knowledgeScope,
+        folderIds,
         greetingText: input.greetingText,
         allowedDomains: input.allowedDomains,
       }),
     });
 
     return this.toWidgetConfigResponse(config);
+  }
+
+  async deleteWidgetConfig(currentUser: AuthenticatedUser, id: string) {
+    const config = await this.findWidgetConfigForActor(currentUser, id);
+    await this.prisma.customerChatWidgetConfig.delete({ where: { id } });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'customer_chat.widget_config_deleted',
+      entityType: 'customer_chat_widget_config',
+      entityId: id,
+      metadata: { name: config.name },
+    });
+    return { deleted: true };
   }
 
   async getPublicWidgetConfig(widgetKey: string, origin?: string) {
@@ -421,6 +572,7 @@ export class CustomerChatService {
     const conversation = await this.prisma.customerChatConversation.create({
       data: {
         organizationId: config.organizationId,
+        widgetConfigId: config.id,
         visitorId: input.visitorId,
         visitorName: input.visitorName,
         visitorEmail: input.visitorEmail,
@@ -542,17 +694,22 @@ export class CustomerChatService {
 
   private async ensureWidgetConfig(organizationId: string) {
     await this.assertCustomerChatEnabled(organizationId);
-
-    return this.prisma.customerChatWidgetConfig.upsert({
+    const existing = await this.prisma.customerChatWidgetConfig.findFirst({
       where: { organizationId },
-      create: { organizationId },
-      update: {},
+      include: { folderScopes: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (existing) return existing;
+    return this.prisma.customerChatWidgetConfig.create({
+      data: { organizationId },
+      include: { folderScopes: true },
     });
   }
 
   private async findEnabledWidgetConfig(widgetKey: string) {
     const config = await this.prisma.customerChatWidgetConfig.findUnique({
       where: { widgetKey },
+      include: { folderScopes: true },
     });
 
     if (!config?.enabled) {
@@ -560,6 +717,44 @@ export class CustomerChatService {
     }
 
     return config;
+  }
+
+  private async findWidgetConfigForActor(
+    currentUser: AuthenticatedUser,
+    id: string,
+  ): Promise<WidgetConfigWithFolders> {
+    const config = await this.prisma.customerChatWidgetConfig.findUnique({
+      where: { id },
+      include: { folderScopes: true },
+    });
+    if (
+      !config ||
+      (!this.isSuperAdmin(currentUser) &&
+        config.organizationId !== currentUser.orgId)
+    ) {
+      throw new NotFoundException('Customer chat widget not found');
+    }
+    return config;
+  }
+
+  private async assertWidgetFolders(
+    organizationId: string,
+    knowledgeScope: 'all' | 'folders',
+    folderIds: string[],
+  ) {
+    if (knowledgeScope === 'all') return;
+    const uniqueFolderIds = [...new Set(folderIds)];
+    if (!uniqueFolderIds.length) {
+      throw new BadRequestException(
+        'Select at least one knowledge folder for this widget',
+      );
+    }
+    const count = await this.prisma.knowledgeFolder.count({
+      where: { organizationId, id: { in: uniqueFolderIds } },
+    });
+    if (count !== uniqueFolderIds.length) {
+      throw new BadRequestException('Widget knowledge folder scope is invalid');
+    }
   }
 
   private async assertCustomerChatEnabled(organizationId: string) {
@@ -621,6 +816,9 @@ export class CustomerChatService {
 
   private conversationInclude() {
     return {
+      widgetConfig: {
+        include: { folderScopes: true },
+      },
       messages: {
         include: {
           citations: {
@@ -634,18 +832,22 @@ export class CustomerChatService {
     };
   }
 
-  private toWidgetConfigResponse(config: CustomerChatWidgetConfig) {
+  private toWidgetConfigResponse(config: WidgetConfigWithFolders) {
     return {
+      id: config.id,
       organizationId: config.organizationId,
+      name: config.name,
       widgetKey: config.widgetKey,
       enabled: config.enabled,
+      knowledgeScope: config.knowledgeScope,
+      folderIds: config.folderScopes.map((scope) => scope.folderId),
       greetingText: config.greetingText,
       allowedDomains: config.allowedDomains,
       settings: this.toRecord(config.settings),
     };
   }
 
-  private toPublicWidgetConfigResponse(config: CustomerChatWidgetConfig) {
+  private toPublicWidgetConfigResponse(config: WidgetConfigWithFolders) {
     return {
       widgetKey: config.widgetKey,
       enabled: config.enabled,
@@ -655,8 +857,10 @@ export class CustomerChatService {
   }
 
   private toConversationResponse(conversation: ConversationWithMessages) {
+    const { widgetConfig, ...conversationData } = conversation;
     return {
-      ...conversation,
+      ...conversationData,
+      widgetName: widgetConfig?.name ?? null,
       metadata: this.toRecord(conversation.metadata),
       messages: conversation.messages.map((message) =>
         this.toMessageResponse(message),

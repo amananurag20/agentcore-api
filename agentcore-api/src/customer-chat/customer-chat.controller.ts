@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Param,
@@ -37,14 +38,19 @@ import {
   CustomerChatConversationListDto,
   CustomerChatSendMessageResponseDto,
   CustomerChatWidgetConfigDto,
+  CustomerChatWidgetConfigListDto,
   PublicCustomerChatConversationCreatedDto,
 } from './dto/customer-chat-response.dto';
+import { ListCustomerChatWidgetConfigsDto } from './dto/list-widget-configs.dto';
 import {
   CreatePublicCustomerChatConversationDto,
   SendPublicCustomerChatMessageDto,
 } from './dto/public-widget.dto';
 import { SendCustomerChatMessageDto } from './dto/send-message.dto';
-import { UpdateCustomerChatWidgetConfigDto } from './dto/update-widget-config.dto';
+import {
+  CreateCustomerChatWidgetConfigDto,
+  UpdateCustomerChatWidgetConfigDto,
+} from './dto/update-widget-config.dto';
 import { CustomerChatService } from './customer-chat.service';
 
 @ApiTags('Customer Chat')
@@ -91,6 +97,59 @@ export class CustomerChatController {
     @Body() body: UpdateCustomerChatWidgetConfigDto,
   ) {
     return this.customerChatService.updateWidgetConfig(user, body);
+  }
+
+  @Get('widget-configs')
+  @ApiOperation({ summary: 'List customer chat widgets' })
+  @ApiOkResponse({ type: CustomerChatWidgetConfigListDto })
+  listWidgetConfigs(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListCustomerChatWidgetConfigsDto,
+  ) {
+    return this.customerChatService.listWidgetConfigs(user, query);
+  }
+
+  @Post('widget-configs')
+  @RequireProductAccess('customer_chat', 'configure')
+  @ApiOperation({ summary: 'Create a customer chat widget' })
+  @ApiCreatedResponse({ type: CustomerChatWidgetConfigDto })
+  createWidgetConfig(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateCustomerChatWidgetConfigDto,
+  ) {
+    return this.customerChatService.createWidgetConfig(user, body);
+  }
+
+  @Get('widget-configs/:id')
+  @ApiOperation({ summary: 'Get a customer chat widget' })
+  @ApiOkResponse({ type: CustomerChatWidgetConfigDto })
+  getWidgetConfigById(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.customerChatService.getWidgetConfigById(user, id);
+  }
+
+  @Patch('widget-configs/:id')
+  @RequireProductAccess('customer_chat', 'configure')
+  @ApiOperation({ summary: 'Update a customer chat widget' })
+  @ApiOkResponse({ type: CustomerChatWidgetConfigDto })
+  updateWidgetConfigById(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: UpdateCustomerChatWidgetConfigDto,
+  ) {
+    return this.customerChatService.updateWidgetConfigById(user, id, body);
+  }
+
+  @Delete('widget-configs/:id')
+  @RequireProductAccess('customer_chat', 'configure')
+  @ApiOperation({ summary: 'Delete a customer chat widget' })
+  deleteWidgetConfig(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.customerChatService.deleteWidgetConfig(user, id);
   }
 
   @Get('conversations/:id')

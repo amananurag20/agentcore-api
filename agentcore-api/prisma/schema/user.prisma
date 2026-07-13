@@ -1,23 +1,23 @@
 model User {
-  id           String       @id @default(uuid())
-  orgId        String       @map("org_id")
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Restrict)
-  email        String       @unique
-  name         String
-  passwordHash String       @map("password_hash")
-  roles        UserRole[]   @default([user])
-  clearanceLevel Int        @default(0) @map("clearance_level")
-  isActive     Boolean      @default(true) @map("is_active")
-  productAccess UserProductAccess[]
-  customRoleAssignments UserCustomRole[]
+  id                                String                     @id @default(uuid())
+  orgId                             String                     @map("org_id")
+  organization                      Organization               @relation(fields: [orgId], references: [id], onDelete: Restrict)
+  email                             String                     @unique
+  name                              String
+  passwordHash                      String                     @map("password_hash")
+  roles                             UserRole[]                 @default([user])
+  clearanceLevel                    Int                        @default(0) @map("clearance_level")
+  isActive                          Boolean                    @default(true) @map("is_active")
+  productAccess                     UserProductAccess[]
+  customRoleAssignments             UserCustomRole[]
   assignedCustomerChatConversations CustomerChatConversation[]
-  appointmentStaffProfiles AppointmentStaff[]
-  assignedWhatsAppConversations WhatsAppConversation[]
-  assignedVoiceCalls VoiceCall[]
-  authSessions AuthSession[]
-  authOneTimeTokens AuthOneTimeToken[]
-  createdAt    DateTime     @default(now()) @map("created_at")
-  updatedAt    DateTime     @updatedAt @map("updated_at")
+  appointmentStaffProfiles          AppointmentStaff[]
+  assignedWhatsAppConversations     WhatsAppConversation[]
+  assignedVoiceCalls                VoiceCall[]
+  authSessions                      AuthSession[]
+  authOneTimeTokens                 AuthOneTimeToken[]
+  createdAt                         DateTime                   @default(now()) @map("created_at")
+  updatedAt                         DateTime                   @updatedAt @map("updated_at")
 
   @@index([orgId])
   @@index([isActive])
@@ -25,18 +25,18 @@ model User {
 }
 
 model UserProductAccess {
-  id               String       @id @default(uuid())
-  userId           String       @map("user_id")
-  organizationId   String       @map("organization_id")
-  productKey       ProductKey   @map("product_key")
-  canUse           Boolean      @default(true) @map("can_use")
-  canConfigure     Boolean      @default(false) @map("can_configure")
-  canManageAgents  Boolean      @default(false) @map("can_manage_agents")
-  canManageKnowledge Boolean    @default(false) @map("can_manage_knowledge")
-  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  createdAt        DateTime     @default(now()) @map("created_at")
-  updatedAt        DateTime     @updatedAt @map("updated_at")
+  id                 String       @id @default(uuid())
+  userId             String       @map("user_id")
+  organizationId     String       @map("organization_id")
+  productKey         ProductKey   @map("product_key")
+  canUse             Boolean      @default(true) @map("can_use")
+  canConfigure       Boolean      @default(false) @map("can_configure")
+  canManageAgents    Boolean      @default(false) @map("can_manage_agents")
+  canManageKnowledge Boolean      @default(false) @map("can_manage_knowledge")
+  user               User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization       Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt @map("updated_at")
 
   @@unique([userId, productKey])
   @@index([organizationId, productKey])

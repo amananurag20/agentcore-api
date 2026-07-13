@@ -1,47 +1,47 @@
 model KnowledgeSource {
-  id             String                @id @default(uuid())
-  organizationId String                @map("organization_id")
-  organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  type           KnowledgeSourceType
-  status         KnowledgeSourceStatus @default(pending)
-  name           String
-  sensitivityLevel Int              @default(0) @map("sensitivity_level")
-  levelSource    String              @default("manual") @map("level_source")
-  productVisibility ProductKey[]     @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
-  categories     String[]            @default([])
-  isQuarantined  Boolean             @default(false) @map("is_quarantined")
-  folderId       String?              @map("folder_id")
-  folder         KnowledgeFolder?     @relation(fields: [folderId], references: [id], onDelete: SetNull)
-  url            String?
-  fileName       String?               @map("file_name")
-  mimeType       String?               @map("mime_type")
-  storageProvider StorageProvider?     @map("storage_provider")
-  storageBucket  String?               @map("storage_bucket")
-  storageKey     String?               @map("storage_key")
-  fileSizeBytes  BigInt?               @map("file_size_bytes")
-  checksumSha256 String?               @map("checksum_sha256")
-  contentFingerprint String?           @map("content_fingerprint")
-  version        Int                   @default(0)
-  malwareScanStatus String             @default("not_required") @map("malware_scan_status")
-  malwareScanMessage String?           @map("malware_scan_message")
-  recrawlIntervalHours Int?            @map("recrawl_interval_hours")
-  lastCrawledAt  DateTime?             @map("last_crawled_at")
-  nextCrawlAt    DateTime?             @map("next_crawl_at")
-  staleAfterAt   DateTime?             @map("stale_after_at")
-  rawText        String?               @map("raw_text")
-  metadata       Json                  @default("{}")
-  errorMessage   String?               @map("error_message")
-  lastIngestedAt DateTime?             @map("last_ingested_at")
-  documents      KnowledgeDocument[]
-  chunks         KnowledgeChunk[]
-  versions       KnowledgeSourceVersion[]
-  createdAt      DateTime              @default(now()) @map("created_at")
-  updatedAt      DateTime              @updatedAt @map("updated_at")
+  id                   String                   @id @default(uuid())
+  organizationId       String                   @map("organization_id")
+  organization         Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  type                 KnowledgeSourceType
+  status               KnowledgeSourceStatus    @default(pending)
+  name                 String
+  sensitivityLevel     Int                      @default(0) @map("sensitivity_level")
+  levelSource          String                   @default("manual") @map("level_source")
+  productVisibility    ProductKey[]             @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
+  categories           String[]                 @default([])
+  isQuarantined        Boolean                  @default(false) @map("is_quarantined")
+  folderId             String?                  @map("folder_id")
+  folder               KnowledgeFolder?         @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  url                  String?
+  fileName             String?                  @map("file_name")
+  mimeType             String?                  @map("mime_type")
+  storageProvider      StorageProvider?         @map("storage_provider")
+  storageBucket        String?                  @map("storage_bucket")
+  storageKey           String?                  @map("storage_key")
+  fileSizeBytes        BigInt?                  @map("file_size_bytes")
+  checksumSha256       String?                  @map("checksum_sha256")
+  contentFingerprint   String?                  @map("content_fingerprint")
+  version              Int                      @default(0)
+  malwareScanStatus    String                   @default("not_required") @map("malware_scan_status")
+  malwareScanMessage   String?                  @map("malware_scan_message")
+  recrawlIntervalHours Int?                     @map("recrawl_interval_hours")
+  lastCrawledAt        DateTime?                @map("last_crawled_at")
+  nextCrawlAt          DateTime?                @map("next_crawl_at")
+  staleAfterAt         DateTime?                @map("stale_after_at")
+  rawText              String?                  @map("raw_text")
+  metadata             Json                     @default("{}")
+  errorMessage         String?                  @map("error_message")
+  lastIngestedAt       DateTime?                @map("last_ingested_at")
+  documents            KnowledgeDocument[]
+  chunks               KnowledgeChunk[]
+  versions             KnowledgeSourceVersion[]
+  createdAt            DateTime                 @default(now()) @map("created_at")
+  updatedAt            DateTime                 @updatedAt @map("updated_at")
 
+  @@unique([organizationId, contentFingerprint])
   @@index([organizationId, status])
   @@index([folderId])
   @@index([type])
-  @@unique([organizationId, contentFingerprint])
   @@index([type, nextCrawlAt])
   @@index([staleAfterAt])
   @@index([storageProvider, storageBucket])
@@ -84,16 +84,17 @@ model KnowledgeCategory {
 }
 
 model KnowledgeFolder {
-  id             String            @id @default(uuid())
-  organizationId String            @map("organization_id")
-  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  id             String                              @id @default(uuid())
+  organizationId String                              @map("organization_id")
+  organization   Organization                        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name           String
-  parentId       String?           @map("parent_id")
-  parent         KnowledgeFolder?  @relation("KnowledgeFolderTree", fields: [parentId], references: [id], onDelete: SetNull)
-  children       KnowledgeFolder[] @relation("KnowledgeFolderTree")
+  parentId       String?                             @map("parent_id")
+  parent         KnowledgeFolder?                    @relation("KnowledgeFolderTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children       KnowledgeFolder[]                   @relation("KnowledgeFolderTree")
   sources        KnowledgeSource[]
-  createdAt      DateTime          @default(now()) @map("created_at")
-  updatedAt      DateTime          @updatedAt @map("updated_at")
+  widgetScopes   CustomerChatWidgetKnowledgeFolder[]
+  createdAt      DateTime                            @default(now()) @map("created_at")
+  updatedAt      DateTime                            @updatedAt @map("updated_at")
 
   @@unique([organizationId, parentId, name])
   @@index([organizationId, parentId])
@@ -101,22 +102,22 @@ model KnowledgeFolder {
 }
 
 model KnowledgeDocument {
-  id             String           @id @default(uuid())
-  organizationId String           @map("organization_id")
-  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  sourceId       String?          @map("source_id")
-  source         KnowledgeSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
-  title          String
-  sensitivityLevel Int          @default(0) @map("sensitivity_level")
-  productVisibility ProductKey[] @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
-  categories     String[]        @default([])
-  isQuarantined  Boolean         @default(false) @map("is_quarantined")
-  uri            String?
-  contentText    String?          @map("content_text")
-  metadata       Json             @default("{}")
-  chunks         KnowledgeChunk[]
-  createdAt      DateTime         @default(now()) @map("created_at")
-  updatedAt      DateTime         @updatedAt @map("updated_at")
+  id                String           @id @default(uuid())
+  organizationId    String           @map("organization_id")
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceId          String?          @map("source_id")
+  source            KnowledgeSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  title             String
+  sensitivityLevel  Int              @default(0) @map("sensitivity_level")
+  productVisibility ProductKey[]     @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
+  categories        String[]         @default([])
+  isQuarantined     Boolean          @default(false) @map("is_quarantined")
+  uri               String?
+  contentText       String?          @map("content_text")
+  metadata          Json             @default("{}")
+  chunks            KnowledgeChunk[]
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
 
   @@index([organizationId])
   @@index([sourceId])
@@ -124,29 +125,29 @@ model KnowledgeDocument {
 }
 
 model KnowledgeChunk {
-  id             String             @id @default(uuid())
-  organizationId String             @map("organization_id")
-  organization   Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  sourceId       String?            @map("source_id")
-  source         KnowledgeSource?   @relation(fields: [sourceId], references: [id], onDelete: SetNull)
-  documentId     String             @map("document_id")
-  document       KnowledgeDocument  @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  chunkIndex     Int                @map("chunk_index")
-  content        String
-  sensitivityLevel Int             @default(0) @map("sensitivity_level")
-  productVisibility ProductKey[]   @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
-  categories     String[]           @default([])
-  isQuarantined  Boolean            @default(false) @map("is_quarantined")
-  charCount      Int                @map("char_count")
-  tokenEstimate  Int                @map("token_estimate")
-  embedding      Unsupported("vector")?
-  embeddingModel String?            @map("embedding_model")
-  embeddingProvider AIProviderType? @map("embedding_provider")
-  embeddedAt     DateTime?          @map("embedded_at")
-  metadata       Json               @default("{}")
+  id                    String                 @id @default(uuid())
+  organizationId        String                 @map("organization_id")
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceId              String?                @map("source_id")
+  source                KnowledgeSource?       @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  documentId            String                 @map("document_id")
+  document              KnowledgeDocument      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  chunkIndex            Int                    @map("chunk_index")
+  content               String
+  sensitivityLevel      Int                    @default(0) @map("sensitivity_level")
+  productVisibility     ProductKey[]           @default([customer_chat, appointment_booking, whatsapp_assistant, voice_receptionist]) @map("product_visibility")
+  categories            String[]               @default([])
+  isQuarantined         Boolean                @default(false) @map("is_quarantined")
+  charCount             Int                    @map("char_count")
+  tokenEstimate         Int                    @map("token_estimate")
+  embedding             Unsupported("vector")?
+  embeddingModel        String?                @map("embedding_model")
+  embeddingProvider     AIProviderType?        @map("embedding_provider")
+  embeddedAt            DateTime?              @map("embedded_at")
+  metadata              Json                   @default("{}")
   customerChatCitations CustomerChatCitation[]
-  createdAt      DateTime           @default(now()) @map("created_at")
-  updatedAt      DateTime           @updatedAt @map("updated_at")
+  createdAt             DateTime               @default(now()) @map("created_at")
+  updatedAt             DateTime               @updatedAt @map("updated_at")
 
   @@unique([documentId, chunkIndex])
   @@index([organizationId, sensitivityLevel, isQuarantined])

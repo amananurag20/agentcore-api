@@ -1,20 +1,20 @@
 model WhatsAppAssistantConfig {
-  id                      String               @id @default(uuid())
-  organizationId          String               @map("organization_id")
-  organization            Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  provider                WhatsAppProviderType @default(meta)
-  status                  WhatsAppConfigStatus @default(active)
-  name                    String
-  phoneNumberId           String?              @map("phone_number_id")
-  businessAccountId       String?              @map("business_account_id")
-  accessTokenEncrypted    String?              @map("access_token_encrypted")
-  webhookVerifyTokenEncrypted String?          @map("webhook_verify_token_encrypted")
-  appSecretEncrypted      String?              @map("app_secret_encrypted")
-  defaultLocale           String               @default("en") @map("default_locale")
-  settings                Json                 @default("{}")
-  conversations           WhatsAppConversation[]
-  createdAt               DateTime             @default(now()) @map("created_at")
-  updatedAt               DateTime             @updatedAt @map("updated_at")
+  id                          String                 @id @default(uuid())
+  organizationId              String                 @map("organization_id")
+  organization                Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  provider                    WhatsAppProviderType   @default(meta)
+  status                      WhatsAppConfigStatus   @default(active)
+  name                        String
+  phoneNumberId               String?                @map("phone_number_id")
+  businessAccountId           String?                @map("business_account_id")
+  accessTokenEncrypted        String?                @map("access_token_encrypted")
+  webhookVerifyTokenEncrypted String?                @map("webhook_verify_token_encrypted")
+  appSecretEncrypted          String?                @map("app_secret_encrypted")
+  defaultLocale               String                 @default("en") @map("default_locale")
+  settings                    Json                   @default("{}")
+  conversations               WhatsAppConversation[]
+  createdAt                   DateTime               @default(now()) @map("created_at")
+  updatedAt                   DateTime               @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@index([phoneNumberId])

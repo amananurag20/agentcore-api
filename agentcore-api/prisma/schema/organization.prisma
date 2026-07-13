@@ -1,43 +1,43 @@
 model Organization {
-  id             String             @id @default(uuid())
-  name           String
-  slug           String             @unique
-  contactEmail   String?            @map("contact_email")
-  contactPhone   String?            @map("contact_phone")
-  status         OrganizationStatus @default(active)
-  plan           OrganizationPlan   @default(free)
-  deploymentMode DeploymentMode     @default(saas) @map("deployment_mode")
-  users          User[]
-  customRoles    CustomRole[]
-  customRoleAssignments UserCustomRole[]
-  servicePrincipals ServicePrincipal[]
-  knowledgeCategories KnowledgeCategory[]
-  knowledgeFolders KnowledgeFolder[]
-  userProductAccess UserProductAccess[]
-  products       OrganizationProduct[]
-  aiProviders    AIProviderConfig[]
-  knowledgeSources KnowledgeSource[]
-  knowledgeSourceVersions KnowledgeSourceVersion[]
-  knowledgeDocuments KnowledgeDocument[]
-  knowledgeChunks KnowledgeChunk[]
+  id                        String                         @id @default(uuid())
+  name                      String
+  slug                      String                         @unique
+  contactEmail              String?                        @map("contact_email")
+  contactPhone              String?                        @map("contact_phone")
+  status                    OrganizationStatus             @default(active)
+  plan                      OrganizationPlan               @default(free)
+  deploymentMode            DeploymentMode                 @default(saas) @map("deployment_mode")
+  users                     User[]
+  customRoles               CustomRole[]
+  customRoleAssignments     UserCustomRole[]
+  servicePrincipals         ServicePrincipal[]
+  knowledgeCategories       KnowledgeCategory[]
+  knowledgeFolders          KnowledgeFolder[]
+  userProductAccess         UserProductAccess[]
+  products                  OrganizationProduct[]
+  aiProviders               AIProviderConfig[]
+  knowledgeSources          KnowledgeSource[]
+  knowledgeSourceVersions   KnowledgeSourceVersion[]
+  knowledgeDocuments        KnowledgeDocument[]
+  knowledgeChunks           KnowledgeChunk[]
   customerChatConversations CustomerChatConversation[]
-  customerChatMessages CustomerChatMessage[]
-  customerChatWidgetConfig CustomerChatWidgetConfig?
-  appointmentServices AppointmentService[]
-  appointmentStaff AppointmentStaff[]
-  appointmentBookings AppointmentBooking[]
-  appointmentAvailability AppointmentStaffAvailability[]
-  appointmentTimeOff AppointmentStaffTimeOff[]
-  whatsAppConfigs WhatsAppAssistantConfig[]
-  whatsAppConversations WhatsAppConversation[]
-  whatsAppMessages WhatsAppMessage[]
-  voiceReceptionistConfigs VoiceReceptionistConfig[]
-  voiceCalls VoiceCall[]
-  voiceCallEvents VoiceCallEvent[]
-  authSessions AuthSession[]
-  authOneTimeTokens AuthOneTimeToken[]
-  createdAt      DateTime           @default(now()) @map("created_at")
-  updatedAt      DateTime           @updatedAt @map("updated_at")
+  customerChatMessages      CustomerChatMessage[]
+  customerChatWidgetConfigs CustomerChatWidgetConfig[]
+  appointmentServices       AppointmentService[]
+  appointmentStaff          AppointmentStaff[]
+  appointmentBookings       AppointmentBooking[]
+  appointmentAvailability   AppointmentStaffAvailability[]
+  appointmentTimeOff        AppointmentStaffTimeOff[]
+  whatsAppConfigs           WhatsAppAssistantConfig[]
+  whatsAppConversations     WhatsAppConversation[]
+  whatsAppMessages          WhatsAppMessage[]
+  voiceReceptionistConfigs  VoiceReceptionistConfig[]
+  voiceCalls                VoiceCall[]
+  voiceCallEvents           VoiceCallEvent[]
+  authSessions              AuthSession[]
+  authOneTimeTokens         AuthOneTimeToken[]
+  createdAt                 DateTime                       @default(now()) @map("created_at")
+  updatedAt                 DateTime                       @updatedAt @map("updated_at")
 
   @@index([status])
   @@map("organizations")

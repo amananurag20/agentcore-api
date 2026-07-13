@@ -168,12 +168,24 @@ interface CustomerChatConversationListResponseBody {
 }
 
 interface CustomerChatWidgetConfigResponseBody {
-  organizationId?: string;
+  id: string;
+  organizationId: string;
+  name: string;
   widgetKey: string;
   enabled: boolean;
+  knowledgeScope?: 'all' | 'folders';
+  folderIds?: string[];
   greetingText: string;
   allowedDomains?: string[];
   settings: Record<string, unknown>;
+}
+
+interface CustomerChatWidgetConfigListResponseBody {
+  data: CustomerChatWidgetConfigResponseBody[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
 }
 
 interface PublicCustomerChatConversationCreatedBody {
@@ -493,6 +505,12 @@ describe('AppController (e2e)', () => {
         );
         expect(body.paths).toHaveProperty(
           '/api/v1/customer-chat/widget-config',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/widget-configs',
+        );
+        expect(body.paths).toHaveProperty(
+          '/api/v1/customer-chat/widget-configs/{id}',
         );
         expect(body.paths).toHaveProperty(
           '/api/v1/customer-chat/widget/{widgetKey}/config',
@@ -1984,6 +2002,134 @@ describe('AppController (e2e)', () => {
       .set('x-visitor-token', createdBody.visitorToken)
       .send({ content: 'x'.repeat(2001) })
       .expect(400);
+  });
+
+  it('/customer-chat/widgets supports multiple folder-scoped widgets', async () => {
+    const loginBody = await loginAsAdmin();
+    const suffix = Date.now();
+    const allowedOrigin = `https://multi-widget-${suffix}.example.com`;
+
+    const createFolder = async (name: string) => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/knowledge/taxonomy/folders')
+        .set('Authorization', `Bearer ${loginBody.accessToken}`)
+        .send({ name })
+        .expect(201);
+      return (response.body as { id: string }).id;
+    };
+    const alphaFolderId = await createFolder(`Widget Alpha ${suffix}`);
+    const betaFolderId = await createFolder(`Widget Beta ${suffix}`);
+
+    await request(app.getHttpServer())
+      .post('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        type: 'text',
+        name: `Alpha scope ${suffix}`,
+        folderId: alphaFolderId,
+        sensitivityLevel: 0,
+        rawText: `Alpha scope ${suffix}: the public support code is ORBIT-ALPHA.`,
+      })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post('/api/v1/knowledge/sources')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        type: 'text',
+        name: `Beta scope ${suffix}`,
+        folderId: betaFolderId,
+        sensitivityLevel: 0,
+        rawText: `Beta scope ${suffix}: the public support code is ORBIT-BETA.`,
+      })
+      .expect(201);
+
+    const createWidget = async (name: string, folderId: string) => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/customer-chat/widget-configs')
+        .set('Authorization', `Bearer ${loginBody.accessToken}`)
+        .send({
+          name,
+          enabled: true,
+          knowledgeScope: 'folders',
+          folderIds: [folderId],
+          allowedDomains: [allowedOrigin],
+        })
+        .expect(201);
+      return response.body as CustomerChatWidgetConfigResponseBody;
+    };
+    const alphaWidget = await createWidget(
+      `Alpha Widget ${suffix}`,
+      alphaFolderId,
+    );
+    const betaWidget = await createWidget(
+      `Beta Widget ${suffix}`,
+      betaFolderId,
+    );
+    expect(alphaWidget.id).toBeDefined();
+    expect(betaWidget.id).toBeDefined();
+
+    const askWidget = async (widgetKey: string) => {
+      const created = await request(app.getHttpServer())
+        .post(`/api/v1/customer-chat/widget/${widgetKey}/conversations`)
+        .set('Origin', allowedOrigin)
+        .send({ visitorId: `scope-test-${suffix}` })
+        .expect(201);
+      const body = created.body as PublicCustomerChatConversationCreatedBody;
+      const sent = await request(app.getHttpServer())
+        .post(
+          `/api/v1/customer-chat/widget/conversations/${body.conversation.id}/messages`,
+        )
+        .set('x-visitor-token', body.visitorToken)
+        .send({ content: 'What is the public support code?' })
+        .expect(201);
+      return (sent.body as CustomerChatSendMessageResponseBody)
+        .assistantMessage;
+    };
+
+    const alphaAnswer = await askWidget(alphaWidget.widgetKey);
+    const betaAnswer = await askWidget(betaWidget.widgetKey);
+    expect(
+      alphaAnswer.citations.map((citation) => citation.content).join(' '),
+    ).toContain('ORBIT-ALPHA');
+    expect(
+      alphaAnswer.citations.map((citation) => citation.content).join(' '),
+    ).not.toContain('ORBIT-BETA');
+    expect(
+      betaAnswer.citations.map((citation) => citation.content).join(' '),
+    ).toContain('ORBIT-BETA');
+    expect(
+      betaAnswer.citations.map((citation) => citation.content).join(' '),
+    ).not.toContain('ORBIT-ALPHA');
+
+    const widgets = await request(app.getHttpServer())
+      .get('/api/v1/customer-chat/widget-configs?page=1&limit=10')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    const widgetList = widgets.body as CustomerChatWidgetConfigListResponseBody;
+    expect(widgetList.page).toBe(1);
+    expect(widgetList.limit).toBe(10);
+    expect(widgetList.total).toBeGreaterThanOrEqual(2);
+    expect(
+      widgetList.data.some(
+        (widget) => widget.widgetKey === alphaWidget.widgetKey,
+      ),
+    ).toBe(true);
+    expect(
+      widgetList.data.some(
+        (widget) => widget.widgetKey === betaWidget.widgetKey,
+      ),
+    ).toBe(true);
+
+    await request(app.getHttpServer())
+      .delete(`/api/v1/customer-chat/widget-configs/${betaWidget.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect({ deleted: true });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/customer-chat/widget-configs/${betaWidget.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(404);
   });
 
   afterAll(async () => {

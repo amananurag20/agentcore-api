@@ -1,17 +1,17 @@
 model CustomRole {
-  id               String                    @id @default(uuid())
-  organizationId   String                    @map("organization_id")
-  organization     Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  name             String
-  description      String?
-  clearanceLevel   Int                       @default(0) @map("clearance_level")
-  isTemplate       Boolean                   @default(false) @map("is_template")
-  isActive         Boolean                   @default(true) @map("is_active")
-  createdById      String?                   @map("created_by_id")
-  productAccess    CustomRoleProductAccess[]
-  assignments      UserCustomRole[]
-  createdAt        DateTime                  @default(now()) @map("created_at")
-  updatedAt        DateTime                  @updatedAt @map("updated_at")
+  id             String                    @id @default(uuid())
+  organizationId String                    @map("organization_id")
+  organization   Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  clearanceLevel Int                       @default(0) @map("clearance_level")
+  isTemplate     Boolean                   @default(false) @map("is_template")
+  isActive       Boolean                   @default(true) @map("is_active")
+  createdById    String?                   @map("created_by_id")
+  productAccess  CustomRoleProductAccess[]
+  assignments    UserCustomRole[]
+  createdAt      DateTime                  @default(now()) @map("created_at")
+  updatedAt      DateTime                  @updatedAt @map("updated_at")
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
@@ -19,16 +19,16 @@ model CustomRole {
 }
 
 model CustomRoleProductAccess {
-  id                 String      @id @default(uuid())
-  customRoleId       String      @map("custom_role_id")
-  productKey         ProductKey  @map("product_key")
-  canUse             Boolean     @default(true) @map("can_use")
-  canConfigure       Boolean     @default(false) @map("can_configure")
-  canManageAgents    Boolean     @default(false) @map("can_manage_agents")
-  canManageKnowledge Boolean     @default(false) @map("can_manage_knowledge")
-  customRole         CustomRole  @relation(fields: [customRoleId], references: [id], onDelete: Cascade)
-  createdAt          DateTime    @default(now()) @map("created_at")
-  updatedAt          DateTime    @updatedAt @map("updated_at")
+  id                 String     @id @default(uuid())
+  customRoleId       String     @map("custom_role_id")
+  productKey         ProductKey @map("product_key")
+  canUse             Boolean    @default(true) @map("can_use")
+  canConfigure       Boolean    @default(false) @map("can_configure")
+  canManageAgents    Boolean    @default(false) @map("can_manage_agents")
+  canManageKnowledge Boolean    @default(false) @map("can_manage_knowledge")
+  customRole         CustomRole @relation(fields: [customRoleId], references: [id], onDelete: Cascade)
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @updatedAt @map("updated_at")
 
   @@unique([customRoleId, productKey])
   @@index([productKey])

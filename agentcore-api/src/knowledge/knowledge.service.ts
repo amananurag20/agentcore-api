@@ -872,6 +872,16 @@ export class KnowledgeService {
     const productFilter = input.productKey
       ? Prisma.sql`AND ${input.productKey}::"ProductKey" = ANY("product_visibility")`
       : Prisma.empty;
+    const folderIds = input.folderIds?.length
+      ? await this.expandFolderIdsForSearch(currentUser.orgId, input.folderIds)
+      : [];
+    const folderFilter = folderIds.length
+      ? Prisma.sql`AND "source_id" IN (
+          SELECT "id"
+          FROM "knowledge_sources"
+          WHERE "folder_id" IN (${Prisma.join(folderIds)})
+        )`
+      : Prisma.empty;
     const clearanceLevel = input.productKey
       ? this.policyService.getEffectiveClearance(currentUser, input.productKey)
       : (currentUser.clearanceLevel ?? 0);
@@ -894,9 +904,42 @@ export class KnowledgeService {
         AND "embedding" IS NOT NULL
         ${sourceFilter}
         ${productFilter}
+        ${folderFilter}
       ORDER BY "embedding" <=> ${toPgVector(embedding.vector)}::vector
       LIMIT ${limit}
     `;
+  }
+
+  private async expandFolderIdsForSearch(
+    organizationId: string,
+    selectedFolderIds: string[],
+  ): Promise<string[]> {
+    const folders = await this.prisma.knowledgeFolder.findMany({
+      where: { organizationId },
+      select: { id: true, parentId: true },
+    });
+    const availableIds = new Set(folders.map((folder) => folder.id));
+    if (selectedFolderIds.some((folderId) => !availableIds.has(folderId))) {
+      throw new BadRequestException('Knowledge folder scope is invalid');
+    }
+
+    const expanded = new Set(selectedFolderIds);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const folder of folders) {
+        if (
+          folder.parentId &&
+          expanded.has(folder.parentId) &&
+          !expanded.has(folder.id)
+        ) {
+          expanded.add(folder.id);
+          changed = true;
+        }
+      }
+    }
+
+    return [...expanded];
   }
 
   private async findSourceForActor(
