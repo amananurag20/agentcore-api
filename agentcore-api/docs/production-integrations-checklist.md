@@ -11,7 +11,7 @@ Implemented in the codebase:
 - S3/R2/MinIO-compatible storage abstraction for knowledge uploads.
 - Redis/BullMQ queues for ingestion and appointment reminders.
 - Customer Chat backend with RAG, conversation history, handoff, public widget APIs, and rate limits.
-- Appointment Booking backend/frontend with services, staff, availability, booking, reschedule, cancel, reminders queue, and tests.
+- Appointment Booking with DST-safe IANA timezones, staff schedules/time off, shared resource capacity, conflict-safe booking, secure customer self-service, durable reminders, public rate limits, structured voice/WhatsApp/chat actions, and tests.
 - WhatsApp Assistant backend/frontend MVP with config, inbound webhook, conversations, RAG reply, handoff, transcript/history, and mock outbound send.
 - Voice Receptionist backend/frontend MVP with config, call events, transcript history, RAG reply, handoff, route/transfer/voicemail flow, barge-in event logging, and optional webhook signature verification.
 - Live outbound adapter switches for WhatsApp and Voice, disabled by default until provider credentials are configured.
@@ -23,7 +23,6 @@ Provider integrations still pending:
 - Real WhatsApp webhook signature verification and media download.
 - Real Voice telephony streaming/control via Twilio/SIP.
 - Real STT/TTS providers for audio transcription/playback.
-- Real email/SMS/WhatsApp reminder sending.
 - Google/Outlook calendar sync.
 - Stripe/Razorpay payments if deposits are required.
 
@@ -48,63 +47,78 @@ We need production/staging access for:
 
 Required for all modules:
 
-| Env key | Needed for | Notes |
-| --- | --- | --- |
-| `PORT` | API runtime | Default `5000`. |
-| `DATABASE_URL` | Postgres/Prisma | Must support pgvector extension for RAG. |
-| `JWT_ACCESS_SECRET` | Auth | Strong random secret, at least 32 chars. |
-| `JWT_ACCESS_EXPIRES_IN` | Auth | Example `15m`. |
-| `AI_CONFIG_ENCRYPTION_KEY` | Secret encryption | Used to encrypt provider API keys/tokens in DB. Strong random secret, at least 32 chars. |
-| `REDIS_URL` | Queues/rate limits | Required for BullMQ workers and distributed rate limiting. |
-| `QUEUE_PREFIX` | Queues | Namespace for queue keys, default `agentcore`. |
+| Env key                    | Needed for         | Notes                                                                                    |
+| -------------------------- | ------------------ | ---------------------------------------------------------------------------------------- |
+| `PORT`                     | API runtime        | Default `5000`.                                                                          |
+| `DATABASE_URL`             | Postgres/Prisma    | Must support pgvector extension for RAG.                                                 |
+| `JWT_ACCESS_SECRET`        | Auth               | Strong random secret, at least 32 chars.                                                 |
+| `JWT_ACCESS_EXPIRES_IN`    | Auth               | Example `15m`.                                                                           |
+| `AI_CONFIG_ENCRYPTION_KEY` | Secret encryption  | Used to encrypt provider API keys/tokens in DB. Strong random secret, at least 32 chars. |
+| `REDIS_URL`                | Queues/rate limits | Required for BullMQ workers and distributed rate limiting.                               |
+| `QUEUE_PREFIX`             | Queues             | Namespace for queue keys, default `agentcore`.                                           |
 
 ## AI/RAG Env
 
-| Env key | Needed for | Notes |
-| --- | --- | --- |
-| `DEFAULT_EMBEDDING_MODEL` | Knowledge embeddings | Current default `text-embedding-3-small`. |
+| Env key                        | Needed for                       | Notes                                                          |
+| ------------------------------ | -------------------------------- | -------------------------------------------------------------- |
+| `DEFAULT_EMBEDDING_MODEL`      | Knowledge embeddings             | Current default `text-embedding-3-small`.                      |
 | `DEFAULT_EMBEDDING_DIMENSIONS` | pgvector column/query dimensions | Current default `1536`. Must match embedding model dimensions. |
-| `DEFAULT_CHAT_MODEL` | RAG answer generation | Current default `gpt-4.1-mini`. |
+| `DEFAULT_CHAT_MODEL`           | RAG answer generation            | Current default `gpt-4.1-mini`.                                |
 
 Provider API keys are stored through AI provider config APIs, encrypted using `AI_CONFIG_ENCRYPTION_KEY`.
 
 ## Storage Env
 
-| Env key | Needed for | Notes |
-| --- | --- | --- |
-| `S3_STORAGE_PROVIDER` | Knowledge file upload | `s3`, `r2`, or `minio`. |
-| `S3_REGION` | Object storage | Example `us-east-1`. |
-| `S3_BUCKET` | Object storage | Bucket for knowledge/media uploads. |
-| `S3_ENDPOINT` | R2/MinIO/custom S3 | Empty for standard AWS S3. |
-| `S3_FORCE_PATH_STYLE` | R2/MinIO/custom S3 | Often `true` for MinIO, usually `false` for AWS S3. |
-| `S3_ACCESS_KEY_ID` | Object storage | IAM/access key. |
-| `S3_SECRET_ACCESS_KEY` | Object storage | Secret key. |
-| `S3_UPLOAD_PREFIX` | Object storage paths | Current default `knowledge`. |
-| `MAX_UPLOAD_FILE_SIZE_MB` | Upload validation | Current default `25`. |
+| Env key                   | Needed for            | Notes                                               |
+| ------------------------- | --------------------- | --------------------------------------------------- |
+| `S3_STORAGE_PROVIDER`     | Knowledge file upload | `s3`, `r2`, or `minio`.                             |
+| `S3_REGION`               | Object storage        | Example `us-east-1`.                                |
+| `S3_BUCKET`               | Object storage        | Bucket for knowledge/media uploads.                 |
+| `S3_ENDPOINT`             | R2/MinIO/custom S3    | Empty for standard AWS S3.                          |
+| `S3_FORCE_PATH_STYLE`     | R2/MinIO/custom S3    | Often `true` for MinIO, usually `false` for AWS S3. |
+| `S3_ACCESS_KEY_ID`        | Object storage        | IAM/access key.                                     |
+| `S3_SECRET_ACCESS_KEY`    | Object storage        | Secret key.                                         |
+| `S3_UPLOAD_PREFIX`        | Object storage paths  | Current default `knowledge`.                        |
+| `MAX_UPLOAD_FILE_SIZE_MB` | Upload validation     | Current default `25`.                               |
 
 ## Customer Chat Env
 
-| Env key | Needed for | Notes |
-| --- | --- | --- |
-| `PUBLIC_CHAT_RATE_LIMIT_WINDOW_SECONDS` | Public widget rate limiting | Current default `60`. |
-| `PUBLIC_CHAT_MAX_CONFIG_FETCHES_PER_WINDOW` | Public widget config fetch limit | Current default `120`. |
-| `PUBLIC_CHAT_MAX_CONVERSATIONS_PER_WINDOW` | Public conversation creation limit | Current default `10`. |
-| `PUBLIC_CHAT_MAX_MESSAGES_PER_WINDOW` | Public message rate limit | Current default `20`. |
-| `PUBLIC_CHAT_MAX_MESSAGES_PER_CONVERSATION_PER_WINDOW` | Per conversation limit | Current default `10`. |
-| `PUBLIC_CHAT_MAX_MESSAGE_LENGTH` | Message validation | Current default `2000`. |
+| Env key                                                | Needed for                         | Notes                   |
+| ------------------------------------------------------ | ---------------------------------- | ----------------------- |
+| `PUBLIC_CHAT_RATE_LIMIT_WINDOW_SECONDS`                | Public widget rate limiting        | Current default `60`.   |
+| `PUBLIC_CHAT_MAX_CONFIG_FETCHES_PER_WINDOW`            | Public widget config fetch limit   | Current default `120`.  |
+| `PUBLIC_CHAT_MAX_CONVERSATIONS_PER_WINDOW`             | Public conversation creation limit | Current default `10`.   |
+| `PUBLIC_CHAT_MAX_MESSAGES_PER_WINDOW`                  | Public message rate limit          | Current default `20`.   |
+| `PUBLIC_CHAT_MAX_MESSAGES_PER_CONVERSATION_PER_WINDOW` | Per conversation limit             | Current default `10`.   |
+| `PUBLIC_CHAT_MAX_MESSAGE_LENGTH`                       | Message validation                 | Current default `2000`. |
 
 ## Appointment Booking Env
 
-| Env key | Needed for | Notes |
-| --- | --- | --- |
-| `APPOINTMENT_REMINDER_OFFSETS_MINUTES` | Reminder scheduling | Example `1440,60` means 24 hours and 1 hour before. |
-| `APPOINTMENT_REMINDER_QUEUE_CONCURRENCY` | Reminder worker throughput | Current default `5`. |
+| Env key                                        | Needed for                        | Notes                                                                           |
+| ---------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------- |
+| `APPOINTMENT_REMINDER_OFFSETS_MINUTES`         | Reminder scheduling               | Example `1440,60` means 24 hours and 1 hour before.                             |
+| `APPOINTMENT_REMINDER_QUEUE_CONCURRENCY`       | Reminder worker throughput        | Current default `5`.                                                            |
+| `APPOINTMENT_REMINDER_RECOVERY_INTERVAL_MS`    | Durable outbox recovery           | Re-publishes pending/failed reminder records. Default `60000`.                  |
+| `APPOINTMENT_REMINDER_MAX_ATTEMPTS`            | Delivery retry ceiling            | Default `10`.                                                                   |
+| `APPOINTMENT_REMINDER_CHANNELS`                | Enabled channels                  | Comma-separated `email,sms,whatsapp`.                                           |
+| `RESEND_API_KEY`                               | Email reminders                   | Resend API credential.                                                          |
+| `APPOINTMENT_EMAIL_FROM`                       | Email reminders                   | Verified sender address.                                                        |
+| `TWILIO_ACCOUNT_SID`                           | SMS reminders/Twilio integrations | Twilio account SID.                                                             |
+| `TWILIO_AUTH_TOKEN`                            | SMS reminders                     | Twilio auth token.                                                              |
+| `TWILIO_SMS_FROM`                              | SMS reminders                     | E.164 sender number.                                                            |
+| `APPOINTMENT_WHATSAPP_TEMPLATE_NAME`           | Meta WhatsApp reminders           | Approved template with customer, service, date/time, and staff body parameters. |
+| `PUBLIC_APPOINTMENT_RATE_LIMIT_WINDOW_SECONDS` | Public appointment APIs           | Default `60`.                                                                   |
+| `PUBLIC_APPOINTMENT_MAX_READS_PER_WINDOW`      | Public services/availability      | Per-IP default `120`.                                                           |
+| `PUBLIC_APPOINTMENT_MAX_WRITES_PER_WINDOW`     | Public booking/self-service       | Per-IP default `10`.                                                            |
 
-Future provider keys:
+Provider configuration notes:
 
-- Email provider API key/domain/from address.
-- SMS provider account SID/auth token/from number.
-- WhatsApp reminder provider credentials if reminders use WhatsApp.
+- Email uses Resend; SMS uses Twilio; WhatsApp uses the organization's encrypted Meta/Twilio configuration.
+- If a channel is enabled without usable customer contact details or credentials, the durable reminder record is marked `skipped` rather than falsely marked sent.
+- Run `npm run start:worker` alongside the API whenever reminders are enabled.
+
+Future integrations:
+
 - Google Calendar OAuth client id/secret/redirect URL.
 - Microsoft Graph/Azure client id/secret/tenant/redirect URL.
 - Stripe/Razorpay keys and webhook secrets if payments are enabled.
@@ -113,15 +127,15 @@ Future provider keys:
 
 Stored per organization through `/api/v1/whatsapp-assistant/configs`, not as plain env:
 
-| Config field | Needed for | Notes |
-| --- | --- | --- |
-| `provider` | Provider selection | `meta`, `twilio`, or `custom`. |
-| `phoneNumberId` | Meta WhatsApp Cloud | Required for Meta send API. |
-| `businessAccountId` | Meta WhatsApp Cloud | Required for account/template operations. |
-| `accessToken` | Provider API calls | Encrypted in DB. |
-| `webhookVerifyToken` | Webhook verification | Encrypted in DB. |
-| `appSecret` | Webhook signature verification | Encrypted in DB. |
-| `defaultLocale` | Multilingual flows | Example `en`. |
+| Config field         | Needed for                     | Notes                                     |
+| -------------------- | ------------------------------ | ----------------------------------------- |
+| `provider`           | Provider selection             | `meta`, `twilio`, or `custom`.            |
+| `phoneNumberId`      | Meta WhatsApp Cloud            | Required for Meta send API.               |
+| `businessAccountId`  | Meta WhatsApp Cloud            | Required for account/template operations. |
+| `accessToken`        | Provider API calls             | Encrypted in DB.                          |
+| `webhookVerifyToken` | Webhook verification           | Encrypted in DB.                          |
+| `appSecret`          | Webhook signature verification | Encrypted in DB.                          |
+| `defaultLocale`      | Multilingual flows             | Example `en`.                             |
 
 Production work remaining:
 
@@ -134,29 +148,29 @@ Production work remaining:
 
 Stored per organization through `/api/v1/voice-receptionist/configs`, not as plain env:
 
-| Config field | Needed for | Notes |
-| --- | --- | --- |
-| `provider` | Provider selection | `twilio`, `sip`, or `custom`. |
-| `phoneNumber` | PSTN calls | Twilio or provider-owned number. |
-| `sipDomain` | SIP calls | Required for SIP-based routing. |
-| `apiKey` | Provider API/signing secret | Encrypted in DB. Currently used for mock signature verification secret. |
-| `webhookVerifyToken` | Webhook setup verification | Encrypted in DB. |
-| `sttProvider` | Speech to text | Example `openai`, `deepgram`, `assemblyai`. |
-| `sttModel` | Speech to text model | Provider-specific. |
-| `ttsProvider` | Text to speech | Example `openai`, `elevenlabs`, `polly`. |
-| `ttsVoice` | Voice selection | Provider-specific. |
-| `transferPhoneNumber` | Human transfer | Default human fallback number. |
-| `voicemailEnabled` | Voicemail fallback | Boolean. |
-| `settings.businessHours` | Business-hours logic | Example `{ enabled, days, startTime, endTime }`. |
+| Config field             | Needed for                  | Notes                                                                   |
+| ------------------------ | --------------------------- | ----------------------------------------------------------------------- |
+| `provider`               | Provider selection          | `twilio`, `sip`, or `custom`.                                           |
+| `phoneNumber`            | PSTN calls                  | Twilio or provider-owned number.                                        |
+| `sipDomain`              | SIP calls                   | Required for SIP-based routing.                                         |
+| `apiKey`                 | Provider API/signing secret | Encrypted in DB. Currently used for mock signature verification secret. |
+| `webhookVerifyToken`     | Webhook setup verification  | Encrypted in DB.                                                        |
+| `sttProvider`            | Speech to text              | Example `openai`, `deepgram`, `assemblyai`.                             |
+| `sttModel`               | Speech to text model        | Provider-specific.                                                      |
+| `ttsProvider`            | Text to speech              | Example `openai`, `elevenlabs`, `polly`.                                |
+| `ttsVoice`               | Voice selection             | Provider-specific.                                                      |
+| `transferPhoneNumber`    | Human transfer              | Default human fallback number.                                          |
+| `voicemailEnabled`       | Voicemail fallback          | Boolean.                                                                |
+| `settings.businessHours` | Business-hours logic        | Example `{ enabled, days, startTime, endTime }`.                        |
 
 Voice env:
 
-| Env key | Needed for | Notes |
-| --- | --- | --- |
-| `VOICE_WEBHOOK_SIGNATURE_REQUIRED` | Webhook security | Set `true` in production after provider signing is configured. |
-| `WHATSAPP_OUTBOUND_MODE` | WhatsApp outbound delivery | `mock` by default. Set `live` after Meta/Twilio credentials are configured. |
-| `VOICE_OUTBOUND_MODE` | Voice provider call control | `mock` by default. Set `live` after Twilio/SIP credentials are configured. |
-| `TWILIO_ACCOUNT_SID` | Twilio Voice fallback config | Optional global fallback. Prefer per-org config/settings where possible. |
+| Env key                            | Needed for                   | Notes                                                                       |
+| ---------------------------------- | ---------------------------- | --------------------------------------------------------------------------- |
+| `VOICE_WEBHOOK_SIGNATURE_REQUIRED` | Webhook security             | Set `true` in production after provider signing is configured.              |
+| `WHATSAPP_OUTBOUND_MODE`           | WhatsApp outbound delivery   | `mock` by default. Set `live` after Meta/Twilio credentials are configured. |
+| `VOICE_OUTBOUND_MODE`              | Voice provider call control  | `mock` by default. Set `live` after Twilio/SIP credentials are configured.  |
+| `TWILIO_ACCOUNT_SID`               | Twilio Voice fallback config | Optional global fallback. Prefer per-org config/settings where possible.    |
 
 Production work remaining:
 

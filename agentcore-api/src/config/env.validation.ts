@@ -212,12 +212,75 @@ class EnvironmentVariables {
   @IsOptional()
   APPOINTMENT_REMINDER_OFFSETS_MINUTES?: string;
 
+  @IsString()
+  @IsOptional()
+  APPOINTMENT_REMINDER_CHANNELS?: string;
+
+  @IsString()
+  @IsOptional()
+  RESEND_API_KEY?: string;
+
+  @IsString()
+  @IsOptional()
+  APPOINTMENT_EMAIL_FROM?: string;
+
+  @IsString()
+  @IsOptional()
+  TWILIO_ACCOUNT_SID?: string;
+
+  @IsString()
+  @IsOptional()
+  TWILIO_AUTH_TOKEN?: string;
+
+  @IsString()
+  @IsOptional()
+  TWILIO_SMS_FROM?: string;
+
+  @IsString()
+  @IsOptional()
+  APPOINTMENT_WHATSAPP_TEMPLATE_NAME?: string;
+
+  @Transform(({ value }) => Number(value ?? 60))
+  @IsInt()
+  @Min(1)
+  @Max(3600)
+  @IsOptional()
+  PUBLIC_APPOINTMENT_RATE_LIMIT_WINDOW_SECONDS = 60;
+
+  @Transform(({ value }) => Number(value ?? 120))
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  @IsOptional()
+  PUBLIC_APPOINTMENT_MAX_READS_PER_WINDOW = 120;
+
+  @Transform(({ value }) => Number(value ?? 10))
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  @IsOptional()
+  PUBLIC_APPOINTMENT_MAX_WRITES_PER_WINDOW = 10;
+
   @Transform(({ value }) => Number(value ?? 5))
   @IsInt()
   @Min(1)
   @Max(50)
   @IsOptional()
   APPOINTMENT_REMINDER_QUEUE_CONCURRENCY = 5;
+
+  @Transform(({ value }) => Number(value ?? 60000))
+  @IsInt()
+  @Min(5000)
+  @Max(3600000)
+  @IsOptional()
+  APPOINTMENT_REMINDER_RECOVERY_INTERVAL_MS = 60000;
+
+  @Transform(({ value }) => Number(value ?? 10))
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  APPOINTMENT_REMINDER_MAX_ATTEMPTS = 10;
 
   @IsString()
   @IsOptional()
@@ -338,10 +401,6 @@ class EnvironmentVariables {
   @IsString()
   @IsOptional()
   VOICE_OUTBOUND_MODE?: 'mock' | 'live';
-
-  @IsString()
-  @IsOptional()
-  TWILIO_ACCOUNT_SID?: string;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

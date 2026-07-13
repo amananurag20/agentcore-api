@@ -6,6 +6,8 @@ import {
 import { Prisma, WhatsAppAssistantConfig } from '@prisma/client';
 import { ChatService } from '../ai/chat.service';
 import { AuditService } from '../audit/audit.service';
+import { AppointmentBookingService } from '../appointment-booking/appointment-booking.service';
+import { AppointmentActionDto } from '../appointment-booking/dto/appointment-action.dto';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
@@ -34,6 +36,7 @@ type WhatsAppConversationWithMessages = Prisma.WhatsAppConversationGetPayload<{
 export class WhatsAppAssistantService {
   constructor(
     private readonly auditService: AuditService,
+    private readonly appointmentBookingService: AppointmentBookingService,
     private readonly chatService: ChatService,
     private readonly cryptoService: CryptoService,
     private readonly knowledgeService: KnowledgeService,
@@ -427,6 +430,7 @@ export class WhatsAppAssistantService {
         conversation.id,
         conversation.contactWaId,
         input.content ?? this.fallbackMediaQuestion(input.type ?? 'unknown'),
+        this.readAppointmentAction(input.metadata),
       );
       assistantMessage = assistantReply.message;
     }
@@ -468,10 +472,37 @@ export class WhatsAppAssistantService {
     conversationId: string,
     contactWaId: string,
     content: string,
+    appointmentAction?: AppointmentActionDto,
   ): Promise<{
     message: Prisma.WhatsAppMessageGetPayload<object>;
     delivery: WhatsAppOutboundResult;
   }> {
+    if (appointmentAction) {
+      const result = await this.appointmentBookingService.executeAction(
+        organizationId,
+        appointmentAction,
+      );
+      const answer = this.appointmentBookingService.formatActionResult(result);
+      const delivery = await this.outboundService.sendText({
+        config,
+        to: contactWaId,
+        content: answer,
+      });
+      const message = await this.prisma.whatsAppMessage.create({
+        data: {
+          organizationId,
+          conversationId,
+          direction: 'outbound',
+          role: 'assistant',
+          type: 'text',
+          providerMessageId: delivery.providerMessageId,
+          content: answer,
+          metadata: this.toJsonObject({ appointmentAction, delivery }),
+        },
+      });
+      return { message, delivery };
+    }
+
     const systemUser = this.createSystemUser(organizationId);
     const searchResults = await this.knowledgeService.search(systemUser, {
       query: content,
@@ -517,6 +548,15 @@ export class WhatsAppAssistantService {
     });
 
     return { message, delivery };
+  }
+
+  private readAppointmentAction(
+    metadata?: Record<string, unknown>,
+  ): AppointmentActionDto | undefined {
+    const value = metadata?.appointmentAction;
+    return value && !Array.isArray(value) && typeof value === 'object'
+      ? (value as AppointmentActionDto)
+      : undefined;
   }
 
   private async findConfigForActor(currentUser: AuthenticatedUser, id: string) {

@@ -1,12 +1,16 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { Request } from 'express';
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
@@ -19,33 +23,41 @@ import { CurrentUser } from '../common/auth/current-user.decorator';
 import { Public } from '../common/auth/public.decorator';
 import { Roles } from '../common/auth/roles.decorator';
 import { RequireProductAccess } from '../common/auth/product-access.decorator';
+import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { AppointmentBookingService } from './appointment-booking.service';
 import {
   CancelAppointmentBookingDto,
   CreateAppointmentBookingDto,
+  CreateAppointmentResourceDto,
   CreateAppointmentServiceDto,
   CreateAppointmentStaffDto,
   CreateStaffTimeOffDto,
   ListAppointmentBookingsDto,
   ListAvailabilityDto,
   PublicCreateAppointmentBookingDto,
+  PublicCancelAppointmentBookingDto,
   PublicListAppointmentServicesDto,
   PublicListAvailabilityDto,
+  PublicRescheduleAppointmentBookingDto,
   RescheduleAppointmentBookingDto,
+  SetServiceResourceDto,
   SetStaffAvailabilityDto,
   UpdateAppointmentBookingStatusDto,
   UpdateAppointmentServiceDto,
+  UpdateAppointmentResourceDto,
   UpdateAppointmentStaffDto,
 } from './dto/appointment-booking.dto';
 import {
   AppointmentAvailabilityResponseDto,
   AppointmentBookingListResponseDto,
   AppointmentBookingResponseDto,
+  AppointmentResourceResponseDto,
   AppointmentServiceResponseDto,
   AppointmentSlotResponseDto,
   AppointmentStaffResponseDto,
   AppointmentTimeOffResponseDto,
 } from './dto/appointment-booking-response.dto';
+import { AppointmentActionDto } from './dto/appointment-action.dto';
 
 @ApiTags('Appointment Booking')
 @ApiBearerAuth('bearer')
@@ -56,6 +68,17 @@ export class AppointmentBookingController {
   constructor(
     private readonly appointmentBookingService: AppointmentBookingService,
   ) {}
+
+  @Post('actions/execute')
+  @ApiOperation({
+    summary: 'Execute a structured appointment action from an AI channel',
+  })
+  executeAction(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: AppointmentActionDto,
+  ) {
+    return this.appointmentBookingService.executeAction(user.orgId, body);
+  }
 
   @Get('services')
   @ApiOperation({ summary: 'List appointment services' })
@@ -90,6 +113,108 @@ export class AppointmentBookingController {
     @Body() body: UpdateAppointmentServiceDto,
   ) {
     return this.appointmentBookingService.updateService(user, id, body);
+  }
+
+  @Post('services/:id/resources')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  @ApiOperation({ summary: 'Add or update a required resource for a service' })
+  setServiceResource(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: SetServiceResourceDto,
+  ) {
+    return this.appointmentBookingService.setServiceResource(user, id, body);
+  }
+
+  @Get('services/:id/resources')
+  @ApiOperation({ summary: 'List required resources for a service' })
+  listServiceResources(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.appointmentBookingService.listServiceResources(user, id);
+  }
+
+  @Delete('services/:serviceId/resources/:resourceId')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  @ApiOperation({ summary: 'Remove a required resource from a service' })
+  removeServiceResource(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('serviceId') serviceId: string,
+    @Param('resourceId') resourceId: string,
+  ) {
+    return this.appointmentBookingService.removeServiceResource(
+      user,
+      serviceId,
+      resourceId,
+    );
+  }
+
+  @Get('resources')
+  @ApiOkResponse({ type: AppointmentResourceResponseDto, isArray: true })
+  listResources(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.appointmentBookingService.listResources(user, organizationId);
+  }
+
+  @Post('resources')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  @ApiCreatedResponse({ type: AppointmentResourceResponseDto })
+  createResource(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateAppointmentResourceDto,
+  ) {
+    return this.appointmentBookingService.createResource(user, body);
+  }
+
+  @Patch('resources/:id')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  updateResource(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: UpdateAppointmentResourceDto,
+  ) {
+    return this.appointmentBookingService.updateResource(user, id, body);
+  }
+
+  @Post('resources/:id/time-off')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  createResourceTimeOff(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: CreateStaffTimeOffDto,
+  ) {
+    return this.appointmentBookingService.createResourceTimeOff(user, id, body);
+  }
+
+  @Get('resources/:id/time-off')
+  listResourceTimeOff(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.appointmentBookingService.listResourceTimeOff(user, id);
+  }
+
+  @Delete('resources/:resourceId/time-off/:timeOffId')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  deleteResourceTimeOff(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('resourceId') resourceId: string,
+    @Param('timeOffId') timeOffId: string,
+  ) {
+    return this.appointmentBookingService.deleteResourceTimeOff(
+      user,
+      resourceId,
+      timeOffId,
+    );
   }
 
   @Get('staff')
@@ -154,6 +279,21 @@ export class AppointmentBookingController {
     );
   }
 
+  @Delete('staff/:staffId/availability/:availabilityId')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  deleteStaffAvailability(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('staffId') staffId: string,
+    @Param('availabilityId') availabilityId: string,
+  ) {
+    return this.appointmentBookingService.deleteStaffAvailability(
+      user,
+      staffId,
+      availabilityId,
+    );
+  }
+
   @Get('staff/:id/time-off')
   @ApiOperation({ summary: 'List staff time off/blockouts' })
   @ApiOkResponse({ type: AppointmentTimeOffResponseDto, isArray: true })
@@ -175,6 +315,21 @@ export class AppointmentBookingController {
     @Body() body: CreateStaffTimeOffDto,
   ) {
     return this.appointmentBookingService.createStaffTimeOff(user, id, body);
+  }
+
+  @Delete('staff/:staffId/time-off/:timeOffId')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  deleteStaffTimeOff(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('staffId') staffId: string,
+    @Param('timeOffId') timeOffId: string,
+  ) {
+    return this.appointmentBookingService.deleteStaffTimeOff(
+      user,
+      staffId,
+      timeOffId,
+    );
   }
 
   @Get('availability')
@@ -246,13 +401,19 @@ export class AppointmentBookingController {
 export class PublicAppointmentBookingController {
   constructor(
     private readonly appointmentBookingService: AppointmentBookingService,
+    private readonly configService: ConfigService,
+    private readonly rateLimitService: RateLimitService,
   ) {}
 
   @Public()
   @Get('services')
   @ApiOperation({ summary: 'List public appointment services' })
   @ApiOkResponse({ type: AppointmentServiceResponseDto, isArray: true })
-  listPublicServices(@Query() query: PublicListAppointmentServicesDto) {
+  async listPublicServices(
+    @Query() query: PublicListAppointmentServicesDto,
+    @Req() request: Request,
+  ) {
+    await this.limitPublicRequest(request, query.organizationId, 'read');
     return this.appointmentBookingService.listPublicServices(query);
   }
 
@@ -260,7 +421,11 @@ export class PublicAppointmentBookingController {
   @Get('availability')
   @ApiOperation({ summary: 'List public appointment availability' })
   @ApiOkResponse({ type: AppointmentSlotResponseDto, isArray: true })
-  listPublicAvailability(@Query() query: PublicListAvailabilityDto) {
+  async listPublicAvailability(
+    @Query() query: PublicListAvailabilityDto,
+    @Req() request: Request,
+  ) {
+    await this.limitPublicRequest(request, query.organizationId, 'read');
     return this.appointmentBookingService.listPublicAvailability(query);
   }
 
@@ -268,7 +433,84 @@ export class PublicAppointmentBookingController {
   @Post('bookings')
   @ApiOperation({ summary: 'Create a public appointment booking' })
   @ApiCreatedResponse({ type: AppointmentBookingResponseDto })
-  createPublicBooking(@Body() body: PublicCreateAppointmentBookingDto) {
+  async createPublicBooking(
+    @Body() body: PublicCreateAppointmentBookingDto,
+    @Req() request: Request,
+  ) {
+    await this.limitPublicRequest(request, body.organizationId, 'write');
     return this.appointmentBookingService.createPublicBooking(body);
+  }
+
+  @Public()
+  @Patch('bookings/:id/reschedule')
+  @ApiOperation({
+    summary: 'Reschedule a public booking using its management token',
+  })
+  @ApiOkResponse({ type: AppointmentBookingResponseDto })
+  reschedulePublicBooking(
+    @Param('id') id: string,
+    @Body() body: PublicRescheduleAppointmentBookingDto,
+    @Req() request: Request,
+  ) {
+    return this.limitAndReschedule(request, id, body);
+  }
+
+  @Public()
+  @Patch('bookings/:id/cancel')
+  @ApiOperation({
+    summary: 'Cancel a public booking using its management token',
+  })
+  @ApiOkResponse({ type: AppointmentBookingResponseDto })
+  cancelPublicBooking(
+    @Param('id') id: string,
+    @Body() body: PublicCancelAppointmentBookingDto,
+    @Req() request: Request,
+  ) {
+    return this.limitAndCancel(request, id, body);
+  }
+
+  private async limitAndReschedule(
+    request: Request,
+    id: string,
+    body: PublicRescheduleAppointmentBookingDto,
+  ) {
+    await this.limitPublicRequest(request, body.organizationId, 'write');
+    return this.appointmentBookingService.reschedulePublicBooking(id, body);
+  }
+
+  private async limitAndCancel(
+    request: Request,
+    id: string,
+    body: PublicCancelAppointmentBookingDto,
+  ) {
+    await this.limitPublicRequest(request, body.organizationId, 'write');
+    return this.appointmentBookingService.cancelPublicBooking(id, body);
+  }
+
+  private async limitPublicRequest(
+    request: Request,
+    organizationId: string,
+    action: 'read' | 'write',
+  ) {
+    const windowSeconds = this.configService.get<number>(
+      'PUBLIC_APPOINTMENT_RATE_LIMIT_WINDOW_SECONDS',
+      60,
+    );
+    const limit = this.configService.get<number>(
+      action === 'read'
+        ? 'PUBLIC_APPOINTMENT_MAX_READS_PER_WINDOW'
+        : 'PUBLIC_APPOINTMENT_MAX_WRITES_PER_WINDOW',
+      action === 'read' ? 120 : 10,
+    );
+    await this.rateLimitService.consume(
+      `public-appointment:${action}:ip:${request.ip ?? 'unknown'}`,
+      limit,
+      windowSeconds,
+    );
+    await this.rateLimitService.consume(
+      `public-appointment:${action}:org:${organizationId}`,
+      limit * 10,
+      windowSeconds,
+    );
   }
 }

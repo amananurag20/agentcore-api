@@ -66,8 +66,6 @@ export class AppointmentReminderWorker
     }
 
     await this.reminderService.processReminder(job.data);
-    this.logger.log(
-      `Processed appointment reminder ${job.data.reminderType} for booking ${job.data.bookingId}`,
-    );
+    this.logger.log(`Processed appointment reminder ${job.data.reminderId}`);
   }
 }

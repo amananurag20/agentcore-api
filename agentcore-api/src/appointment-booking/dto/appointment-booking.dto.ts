@@ -29,6 +29,11 @@ export enum AppointmentStaffStatusDto {
   inactive = 'inactive',
 }
 
+export enum AppointmentResourceStatusDto {
+  active = 'active',
+  inactive = 'inactive',
+}
+
 export enum AppointmentBookingStatusDto {
   pending = 'pending',
   confirmed = 'confirmed',
@@ -198,6 +203,12 @@ export class CreateAppointmentStaffDto {
   @IsOptional()
   serviceIds?: string[];
 
+  @ApiPropertyOptional({ type: String, isArray: true })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  @IsOptional()
+  resourceIds?: string[];
+
   @ApiPropertyOptional({ example: { room: 'A1' } })
   @IsObject()
   @IsOptional()
@@ -244,10 +255,93 @@ export class UpdateAppointmentStaffDto {
   @IsOptional()
   serviceIds?: string[];
 
+  @ApiPropertyOptional({ type: String, isArray: true })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  @IsOptional()
+  resourceIds?: string[];
+
   @ApiPropertyOptional({ example: { room: 'A1' } })
   @IsObject()
   @IsOptional()
   metadata?: Record<string, unknown>;
+}
+
+export class CreateAppointmentResourceDto {
+  @ApiPropertyOptional({ example: 'org_demo' })
+  @IsString()
+  @IsOptional()
+  organizationId?: string;
+
+  @ApiProperty({ example: 'Consultation Room A' })
+  @IsString()
+  @MinLength(2)
+  name: string;
+
+  @ApiPropertyOptional({ example: 'room' })
+  @IsString()
+  @IsOptional()
+  type?: string;
+
+  @ApiPropertyOptional({ minimum: 1, maximum: 100, example: 1 })
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  capacity?: number;
+
+  @ApiPropertyOptional({ enum: AppointmentResourceStatusDto })
+  @IsEnum(AppointmentResourceStatusDto)
+  @IsOptional()
+  status?: AppointmentResourceStatusDto;
+
+  @ApiPropertyOptional()
+  @IsObject()
+  @IsOptional()
+  metadata?: Record<string, unknown>;
+}
+
+export class UpdateAppointmentResourceDto {
+  @ApiPropertyOptional()
+  @IsString()
+  @MinLength(2)
+  @IsOptional()
+  name?: string;
+
+  @ApiPropertyOptional()
+  @IsString()
+  @IsOptional()
+  type?: string;
+
+  @ApiPropertyOptional({ minimum: 1, maximum: 100 })
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  capacity?: number;
+
+  @ApiPropertyOptional({ enum: AppointmentResourceStatusDto })
+  @IsEnum(AppointmentResourceStatusDto)
+  @IsOptional()
+  status?: AppointmentResourceStatusDto;
+
+  @ApiPropertyOptional()
+  @IsObject()
+  @IsOptional()
+  metadata?: Record<string, unknown>;
+}
+
+export class SetServiceResourceDto {
+  @ApiProperty()
+  @IsUUID()
+  resourceId: string;
+
+  @ApiPropertyOptional({ minimum: 1, maximum: 100, default: 1 })
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  quantity?: number;
 }
 
 export class SetStaffAvailabilityDto {
@@ -304,6 +398,15 @@ export class ListAvailabilityDto {
   @IsUUID()
   @IsOptional()
   staffId?: string;
+
+  @ApiPropertyOptional({
+    example: 'Asia/Kolkata',
+    description:
+      'Timezone in which the requested calendar date is interpreted.',
+  })
+  @IsString()
+  @IsOptional()
+  timezone?: string;
 }
 
 export class PublicListAppointmentServicesDto {
@@ -329,6 +432,15 @@ export class PublicListAvailabilityDto {
   @IsUUID()
   @IsOptional()
   staffId?: string;
+
+  @ApiPropertyOptional({
+    example: 'Asia/Kolkata',
+    description:
+      'Timezone in which the requested calendar date is interpreted.',
+  })
+  @IsString()
+  @IsOptional()
+  timezone?: string;
 }
 
 export class CreateAppointmentBookingDto {
@@ -498,6 +610,32 @@ export class CancelAppointmentBookingDto {
   @IsString()
   @IsOptional()
   reason?: string;
+}
+
+export class PublicRescheduleAppointmentBookingDto extends RescheduleAppointmentBookingDto {
+  @ApiProperty({ example: 'org_demo' })
+  @IsString()
+  organizationId: string;
+
+  @ApiProperty({
+    description: 'One-time management secret returned at booking creation.',
+  })
+  @IsString()
+  @MinLength(32)
+  manageToken: string;
+}
+
+export class PublicCancelAppointmentBookingDto extends CancelAppointmentBookingDto {
+  @ApiProperty({ example: 'org_demo' })
+  @IsString()
+  organizationId: string;
+
+  @ApiProperty({
+    description: 'One-time management secret returned at booking creation.',
+  })
+  @IsString()
+  @MinLength(32)
+  manageToken: string;
 }
 
 export class UpdateAppointmentBookingStatusDto {

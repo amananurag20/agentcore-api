@@ -10,6 +10,7 @@ import { Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 import { ChatService } from '../ai/chat.service';
 import { AuditService } from '../audit/audit.service';
+import { AppointmentBookingService } from '../appointment-booking/appointment-booking.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import {
   KnowledgeSearchRow,
@@ -60,6 +61,7 @@ type ConversationWithMessages = Prisma.CustomerChatConversationGetPayload<{
 export class CustomerChatService {
   constructor(
     private readonly auditService: AuditService,
+    private readonly appointmentBookingService: AppointmentBookingService,
     private readonly chatService: ChatService,
     private readonly configService: ConfigService,
     private readonly knowledgeService: KnowledgeService,
@@ -166,6 +168,37 @@ export class CustomerChatService {
         },
       },
     });
+
+    if (input.appointmentAction) {
+      const result = await this.appointmentBookingService.executeAction(
+        conversation.organizationId,
+        input.appointmentAction,
+      );
+      const answer = this.appointmentBookingService.formatActionResult(result);
+      const assistantMessage = await this.prisma.customerChatMessage.create({
+        data: {
+          organizationId: conversation.organizationId,
+          conversationId: conversation.id,
+          role: 'assistant',
+          content: answer,
+          metadata: this.toJsonObject({
+            appointmentAction: input.appointmentAction,
+          }),
+        },
+        include: {
+          citations: { include: { chunk: true } },
+        },
+      });
+      const updatedConversation = await this.findConversationForActor(
+        currentUser,
+        id,
+      );
+      return {
+        conversation: this.toConversationResponse(updatedConversation),
+        visitorMessage: this.toMessageResponse(visitorMessage),
+        assistantMessage: this.toMessageResponse(assistantMessage),
+      };
+    }
 
     const searchUser: AuthenticatedUser = {
       ...currentUser,

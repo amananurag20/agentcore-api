@@ -2,9 +2,13 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AuditModule } from '../audit/audit.module';
 import { validateEnv } from '../config/env.validation';
+import { CryptoModule } from '../crypto/crypto.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { QueueModule } from '../queue/queue.module';
 import { AppointmentReminderService } from './appointment-reminder.service';
+import { AppointmentReminderDeliveryService } from './appointment-reminder-delivery.service';
 import { AppointmentReminderWorker } from './appointment-reminder.worker';
+import { AppointmentReminderRecoveryService } from './appointment-reminder-recovery.service';
 
 @Module({
   imports: [
@@ -14,8 +18,15 @@ import { AppointmentReminderWorker } from './appointment-reminder.worker';
       validate: validateEnv,
     }),
     AuditModule,
+    CryptoModule,
     PrismaModule,
+    QueueModule,
   ],
-  providers: [AppointmentReminderService, AppointmentReminderWorker],
+  providers: [
+    AppointmentReminderDeliveryService,
+    AppointmentReminderService,
+    AppointmentReminderRecoveryService,
+    AppointmentReminderWorker,
+  ],
 })
 export class AppointmentBookingWorkerModule {}

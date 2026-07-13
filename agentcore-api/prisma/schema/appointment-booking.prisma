@@ -12,6 +12,7 @@ model AppointmentService {
   status              AppointmentServiceStatus  @default(active)
   metadata            Json                      @default("{}")
   staffServices       AppointmentStaffService[]
+  resourceRequirements AppointmentServiceResource[]
   bookings            AppointmentBooking[]
   createdAt           DateTime                  @default(now()) @map("created_at")
   updatedAt           DateTime                  @updatedAt @map("updated_at")
@@ -33,6 +34,7 @@ model AppointmentStaff {
   status         AppointmentStaffStatus         @default(active)
   metadata       Json                           @default("{}")
   services       AppointmentStaffService[]
+  resources      AppointmentStaffResource[]
   availability   AppointmentStaffAvailability[]
   timeOff        AppointmentStaffTimeOff[]
   bookings       AppointmentBooking[]
@@ -55,6 +57,68 @@ model AppointmentStaffService {
   @@unique([staffId, serviceId])
   @@index([serviceId])
   @@map("appointment_staff_services")
+}
+
+model AppointmentResource {
+  id             String                    @id @default(uuid())
+  organizationId String                    @map("organization_id")
+  organization   Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  type           String                    @default("generic")
+  capacity       Int                       @default(1)
+  status         AppointmentResourceStatus @default(active)
+  metadata       Json                      @default("{}")
+  services       AppointmentServiceResource[]
+  staff          AppointmentStaffResource[]
+  timeOff        AppointmentResourceTimeOff[]
+  allocations    AppointmentBookingResource[]
+  createdAt      DateTime                  @default(now()) @map("created_at")
+  updatedAt      DateTime                  @updatedAt @map("updated_at")
+
+  @@index([organizationId, status])
+  @@map("appointment_resources")
+}
+
+model AppointmentServiceResource {
+  serviceId String              @map("service_id")
+  service   AppointmentService  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  resourceId String             @map("resource_id")
+  resource   AppointmentResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  quantity   Int                @default(1)
+  createdAt  DateTime           @default(now()) @map("created_at")
+
+  @@id([serviceId, resourceId])
+  @@index([resourceId])
+  @@map("appointment_service_resources")
+}
+
+model AppointmentStaffResource {
+  staffId    String              @map("staff_id")
+  staff      AppointmentStaff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  resourceId String              @map("resource_id")
+  resource   AppointmentResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  createdAt  DateTime            @default(now()) @map("created_at")
+
+  @@id([staffId, resourceId])
+  @@index([resourceId])
+  @@map("appointment_staff_resources")
+}
+
+model AppointmentResourceTimeOff {
+  id             String              @id @default(uuid())
+  organizationId String              @map("organization_id")
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  resourceId     String              @map("resource_id")
+  resource       AppointmentResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  startAt        DateTime            @map("start_at")
+  endAt          DateTime            @map("end_at")
+  reason         String?
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+
+  @@index([organizationId])
+  @@index([resourceId, startAt, endAt])
+  @@map("appointment_resource_time_off")
 }
 
 model AppointmentStaffAvailability {
@@ -110,7 +174,10 @@ model AppointmentBooking {
   notes              String?
   cancellationReason String?                  @map("cancellation_reason")
   rescheduledFromId  String?                  @map("rescheduled_from_id")
+  manageTokenHash    String?                  @map("manage_token_hash")
   metadata           Json                     @default("{}")
+  reminders          AppointmentReminder[]
+  resourceAllocations AppointmentBookingResource[]
   createdAt          DateTime                 @default(now()) @map("created_at")
   updatedAt          DateTime                 @updatedAt @map("updated_at")
 
@@ -119,4 +186,41 @@ model AppointmentBooking {
   @@index([staffId, startAt, endAt])
   @@index([customerEmail])
   @@map("appointment_bookings")
+}
+
+model AppointmentBookingResource {
+  bookingId String              @map("booking_id")
+  booking   AppointmentBooking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  resourceId String             @map("resource_id")
+  resource   AppointmentResource @relation(fields: [resourceId], references: [id], onDelete: Restrict)
+  quantity   Int                @default(1)
+  createdAt  DateTime           @default(now()) @map("created_at")
+
+  @@id([bookingId, resourceId])
+  @@index([resourceId])
+  @@map("appointment_booking_resources")
+}
+
+model AppointmentReminder {
+  id                String                    @id @default(uuid())
+  organizationId    String                    @map("organization_id")
+  organization      Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bookingId         String                    @map("booking_id")
+  booking           AppointmentBooking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  offsetMinutes     Int                       @map("offset_minutes")
+  reminderType      String                    @map("reminder_type")
+  dueAt             DateTime                  @map("due_at")
+  status            AppointmentReminderStatus @default(pending)
+  attempts          Int                       @default(0)
+  channels          String[]                  @default([])
+  providerMessageIds Json                     @default("{}") @map("provider_message_ids")
+  lastError         String?                   @map("last_error")
+  sentAt            DateTime?                 @map("sent_at")
+  createdAt         DateTime                  @default(now()) @map("created_at")
+  updatedAt         DateTime                  @updatedAt @map("updated_at")
+
+  @@unique([bookingId, offsetMinutes])
+  @@index([organizationId, status, dueAt])
+  @@index([bookingId, status])
+  @@map("appointment_reminders")
 }

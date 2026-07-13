@@ -96,12 +96,26 @@ enum AppointmentStaffStatus {
   inactive
 }
 
+enum AppointmentResourceStatus {
+  active
+  inactive
+}
+
 enum AppointmentBookingStatus {
   pending
   confirmed
   cancelled
   completed
   no_show
+}
+
+enum AppointmentReminderStatus {
+  pending
+  processing
+  sent
+  failed
+  cancelled
+  skipped
 }
 
 enum WhatsAppProviderType {

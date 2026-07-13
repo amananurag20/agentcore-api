@@ -5,7 +5,10 @@ import {
   IsOptional,
   IsString,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+import { AppointmentActionDto } from '../../appointment-booking/dto/appointment-action.dto';
 
 export class CreatePublicCustomerChatConversationDto {
   @ApiPropertyOptional({ example: 'visitor_123' })
@@ -34,4 +37,10 @@ export class SendPublicCustomerChatMessageDto {
   @IsString()
   @MinLength(1)
   content: string;
+
+  @ApiPropertyOptional({ type: AppointmentActionDto })
+  @ValidateNested()
+  @Type(() => AppointmentActionDto)
+  @IsOptional()
+  appointmentAction?: AppointmentActionDto;
 }

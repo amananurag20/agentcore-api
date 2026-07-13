@@ -3,6 +3,7 @@ import {
   AppointmentBookingStatusDto,
   AppointmentServiceStatusDto,
   AppointmentStaffStatusDto,
+  AppointmentResourceStatusDto,
 } from './appointment-booking.dto';
 
 export class AppointmentServiceResponseDto {
@@ -67,6 +68,32 @@ export class AppointmentStaffResponseDto {
 
   @ApiProperty({ type: AppointmentServiceResponseDto, isArray: true })
   services: AppointmentServiceResponseDto[];
+
+  @ApiProperty()
+  metadata: Record<string, unknown>;
+
+  @ApiProperty({ type: () => AppointmentResourceResponseDto, isArray: true })
+  resources: AppointmentResourceResponseDto[];
+}
+
+export class AppointmentResourceResponseDto {
+  @ApiProperty()
+  id: string;
+
+  @ApiProperty()
+  organizationId: string;
+
+  @ApiProperty()
+  name: string;
+
+  @ApiProperty()
+  type: string;
+
+  @ApiProperty()
+  capacity: number;
+
+  @ApiProperty({ enum: AppointmentResourceStatusDto })
+  status: AppointmentResourceStatusDto;
 
   @ApiProperty()
   metadata: Record<string, unknown>;
@@ -168,6 +195,12 @@ export class AppointmentBookingResponseDto {
 
   @ApiProperty()
   metadata: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    description:
+      'Returned only when a booking is created. Store it securely for customer self-service.',
+  })
+  manageToken?: string;
 }
 
 export class AppointmentBookingListResponseDto {

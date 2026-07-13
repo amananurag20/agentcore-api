@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AIModule } from '../ai/ai.module';
+import { AppointmentBookingModule } from '../appointment-booking/appointment-booking.module';
 import { AuditModule } from '../audit/audit.module';
 import { KnowledgeModule } from '../knowledge/knowledge.module';
 import { PrismaModule } from '../prisma/prisma.module';
@@ -13,6 +14,7 @@ import { CustomerChatService } from './customer-chat.service';
 @Module({
   imports: [
     AIModule,
+    AppointmentBookingModule,
     AuditModule,
     KnowledgeModule,
     PrismaModule,

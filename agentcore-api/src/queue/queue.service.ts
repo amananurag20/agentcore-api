@@ -52,6 +52,12 @@ export class QueueService implements OnModuleDestroy {
     await Promise.all([...this.queues.values()].map((queue) => queue.close()));
   }
 
+  async remove(queueName: string, jobId: string): Promise<void> {
+    if (!this.connection) return;
+    const job = await this.getQueue(queueName).getJob(jobId);
+    await job?.remove();
+  }
+
   async getStats(queueName: string) {
     if (!this.connection) return { status: 'disabled' as const };
     const counts = await this.getQueue(queueName).getJobCounts(

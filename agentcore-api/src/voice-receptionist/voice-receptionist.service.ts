@@ -8,6 +8,8 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import { Prisma, VoiceReceptionistConfig } from '@prisma/client';
 import { ChatService } from '../ai/chat.service';
 import { AuditService } from '../audit/audit.service';
+import { AppointmentBookingService } from '../appointment-booking/appointment-booking.service';
+import { AppointmentActionDto } from '../appointment-booking/dto/appointment-action.dto';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
@@ -39,6 +41,7 @@ type VoiceCallWithEvents = Prisma.VoiceCallGetPayload<{
 export class VoiceReceptionistService {
   constructor(
     private readonly auditService: AuditService,
+    private readonly appointmentBookingService: AppointmentBookingService,
     private readonly chatService: ChatService,
     private readonly configService: ConfigService,
     private readonly cryptoService: CryptoService,
@@ -526,6 +529,7 @@ export class VoiceReceptionistService {
         config,
         call,
         input.content,
+        this.readAppointmentAction(input.metadata),
       );
       assistantEvent = assistantReply.event;
       action = assistantReply.action;
@@ -589,10 +593,35 @@ export class VoiceReceptionistService {
     config: VoiceReceptionistConfig,
     call: VoiceCallWithEvents,
     content: string,
+    appointmentAction?: AppointmentActionDto,
   ): Promise<{
     event: Prisma.VoiceCallEventGetPayload<object>;
     action: VoiceProviderActionResult;
   }> {
+    if (appointmentAction) {
+      const result = await this.appointmentBookingService.executeAction(
+        config.organizationId,
+        appointmentAction,
+      );
+      const answer = this.appointmentBookingService.formatActionResult(result);
+      const action = await this.outboundService.speakText({
+        config,
+        providerCallId: call.providerCallId,
+        content: answer,
+      });
+      const event = await this.prisma.voiceCallEvent.create({
+        data: {
+          organizationId: config.organizationId,
+          callId: call.id,
+          type: 'assistant_response',
+          role: 'assistant',
+          content: answer,
+          metadata: this.toJsonObject({ appointmentAction, action }),
+        },
+      });
+      return { event, action };
+    }
+
     const systemUser = this.createSystemUser(config.organizationId);
     const searchResults = await this.knowledgeService.search(systemUser, {
       query: content,
@@ -636,6 +665,15 @@ export class VoiceReceptionistService {
     });
 
     return { event, action };
+  }
+
+  private readAppointmentAction(
+    metadata?: Record<string, unknown>,
+  ): AppointmentActionDto | undefined {
+    const value = metadata?.appointmentAction;
+    return value && !Array.isArray(value) && typeof value === 'object'
+      ? (value as AppointmentActionDto)
+      : undefined;
   }
 
   private async upsertCall(
