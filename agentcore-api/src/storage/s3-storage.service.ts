@@ -7,6 +7,7 @@ import {
 import {
   BadRequestException,
   Injectable,
+  Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -28,6 +29,7 @@ type S3Body = {
 
 @Injectable()
 export class S3StorageService {
+  private readonly logger = new Logger(S3StorageService.name);
   private readonly client: S3Client | null;
   private readonly bucket?: string;
   private readonly provider: 's3' | 'r2' | 'minio';
@@ -80,19 +82,31 @@ export class S3StorageService {
       .digest('hex');
     const key = this.buildObjectKey(input.organizationId, input.file);
 
-    await this.client!.send(
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: key,
-        Body: input.file.buffer,
-        ContentType: input.file.mimetype,
-        Metadata: {
-          organizationId: input.organizationId,
-          originalName: input.file.originalname,
-          checksumSha256,
-        },
-      }),
-    );
+    try {
+      await this.client!.send(
+        new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+          Body: input.file.buffer,
+          ContentType: input.file.mimetype,
+          Metadata: {
+            organizationId: input.organizationId,
+            originalNameEncoded: this.encodeMetadataValue(
+              input.file.originalname,
+            ),
+            checksumSha256,
+          },
+        }),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Knowledge file upload failed for bucket ${this.bucket} and key ${key}: ${this.toErrorMessage(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      throw new ServiceUnavailableException(
+        'File storage upload failed. Verify the object-storage configuration and try again.',
+      );
+    }
 
     return {
       provider: this.provider,
@@ -209,5 +223,13 @@ export class S3StorageService {
       organizationId,
       `${randomUUID()}-${baseName || 'upload'}${extension}`,
     ].join('/');
+  }
+
+  private encodeMetadataValue(value: string): string {
+    return encodeURIComponent(value).slice(0, 1024);
+  }
+
+  private toErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 }
