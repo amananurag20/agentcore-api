@@ -16,7 +16,7 @@ export class KnowledgeIngestionQueueService {
       KNOWLEDGE_INGESTION_JOB,
       data,
       {
-        jobId: `${data.sourceId}-${data.reason}`,
+        jobId: `${data.sourceId}-${data.reason.replace(/[^a-zA-Z0-9_-]/g, '-')}-${Date.now()}`,
       },
     );
   }

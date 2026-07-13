@@ -1,10 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { QueueService } from '../queue/queue.service';
+import { KNOWLEDGE_INGESTION_QUEUE } from '../queue/queue.constants';
 
 @Injectable()
 export class ObservabilityService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly queueService: QueueService,
+  ) {}
 
   async getSummary() {
     const since = new Date(Date.now() - 24 * 60 * 60_000);
@@ -20,6 +25,12 @@ export class ObservabilityService {
       appointmentCancelled24h,
       knowledgeReady,
       knowledgeFailed,
+      knowledgePending,
+      knowledgeProcessing,
+      knowledgeQuarantined,
+      knowledgeStale,
+      knowledgeVersions,
+      knowledgeQueue,
       activeSessions,
       pendingInvites,
       passwordResetTokens24h,
@@ -56,6 +67,14 @@ export class ObservabilityService {
       }),
       this.prisma.knowledgeSource.count({ where: { status: 'ready' } }),
       this.prisma.knowledgeSource.count({ where: { status: 'failed' } }),
+      this.prisma.knowledgeSource.count({ where: { status: 'pending' } }),
+      this.prisma.knowledgeSource.count({ where: { status: 'processing' } }),
+      this.prisma.knowledgeSource.count({ where: { isQuarantined: true } }),
+      this.prisma.knowledgeSource.count({
+        where: { staleAfterAt: { lt: new Date() } },
+      }),
+      this.prisma.knowledgeSourceVersion.count(),
+      this.queueService.getStats(KNOWLEDGE_INGESTION_QUEUE),
       this.prisma.authSession.count({
         where: {
           revokedAt: null,
@@ -156,6 +175,12 @@ export class ObservabilityService {
       knowledge: {
         readySources: knowledgeReady,
         failedSources: knowledgeFailed,
+        pendingSources: knowledgePending,
+        processingSources: knowledgeProcessing,
+        quarantinedSources: knowledgeQuarantined,
+        staleSources: knowledgeStale,
+        storedVersions: knowledgeVersions,
+        queue: knowledgeQueue,
       },
     };
   }

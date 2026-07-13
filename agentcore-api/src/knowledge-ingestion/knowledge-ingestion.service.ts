@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { KnowledgeDocument, KnowledgeSource, Prisma } from '@prisma/client';
+import { createHash } from 'crypto';
 import { EmbeddingsService } from '../ai/embeddings.service';
 import { AuditService } from '../audit/audit.service';
 import { toPgVector } from '../ai/vector-sql';
@@ -61,6 +62,26 @@ export class KnowledgeIngestionService {
       }
 
       const documents = await this.prepareDocuments(source);
+      const contentText = documents
+        .map((document) => `${document.title}\n${document.contentText ?? ''}`)
+        .join('\n\n');
+      const contentFingerprint = createHash('sha256')
+        .update(contentText.replace(/\s+/g, ' ').trim())
+        .digest('hex');
+      const duplicate = await this.prisma.knowledgeSource.findFirst({
+        where: {
+          organizationId: source.organizationId,
+          contentFingerprint,
+          id: { not: source.id },
+          status: 'ready',
+        },
+        select: { id: true, name: true },
+      });
+      if (duplicate) {
+        throw new Error(
+          `Duplicate content already exists in source “${duplicate.name}” (${duplicate.id})`,
+        );
+      }
       const effectiveSource = await this.classifyIfNeeded(source, documents);
       let totalChunks = 0;
 
@@ -110,20 +131,60 @@ export class KnowledgeIngestionService {
         totalChunks += chunks.length;
       }
 
-      await this.prisma.knowledgeSource.update({
-        where: { id: source.id },
-        data: {
-          status: 'ready',
-          errorMessage: null,
-          lastIngestedAt: new Date(),
-          metadata: this.mergeMetadata(effectiveSource.metadata, {
-            chunkCount: totalChunks,
-            documentCount: documents.length,
-            ingestionCompletedAt: new Date().toISOString(),
-            ingestionReason: data.reason,
-          }),
-        },
+      const now = new Date();
+      const changed = source.contentFingerprint !== contentFingerprint;
+      const version = changed ? source.version + 1 : source.version;
+      const staleHours =
+        this.configService.get<number>('KNOWLEDGE_STALE_AFTER_HOURS') ?? 720;
+      await this.prisma.$transaction(async (tx) => {
+        if (changed) {
+          await tx.knowledgeSourceVersion.create({
+            data: {
+              organizationId: source.organizationId,
+              sourceId: source.id,
+              version,
+              contentFingerprint,
+              contentText,
+              documentCount: documents.length,
+              chunkCount: totalChunks,
+              metadata: this.toJsonObject({
+                ingestionReason: data.reason,
+                capturedAt: now.toISOString(),
+              }),
+            },
+          });
+        }
+        await tx.knowledgeSource.update({
+          where: { id: source.id },
+          data: {
+            status: 'ready',
+            errorMessage: null,
+            lastIngestedAt: now,
+            contentFingerprint,
+            version,
+            lastCrawledAt: source.type === 'website_url' ? now : undefined,
+            nextCrawlAt:
+              source.type === 'website_url' && source.recrawlIntervalHours
+                ? new Date(
+                    now.getTime() + source.recrawlIntervalHours * 60 * 60_000,
+                  )
+                : undefined,
+            staleAfterAt:
+              source.type === 'website_url'
+                ? new Date(now.getTime() + staleHours * 60 * 60_000)
+                : undefined,
+            metadata: this.mergeMetadata(effectiveSource.metadata, {
+              chunkCount: totalChunks,
+              documentCount: documents.length,
+              sourceVersion: version,
+              contentChanged: changed,
+              ingestionCompletedAt: now.toISOString(),
+              ingestionReason: data.reason,
+            }),
+          },
+        });
       });
+      await this.trimVersionHistory(source.id);
     } catch (error) {
       await this.prisma.knowledgeSource.update({
         where: { id: data.sourceId },
@@ -229,6 +290,31 @@ export class KnowledgeIngestionService {
         errorMessage: `${sourceType} ingestion is not implemented yet`,
       },
     });
+  }
+
+  private async trimVersionHistory(sourceId: string) {
+    const retain =
+      this.configService.get<number>('KNOWLEDGE_SOURCE_VERSION_RETENTION') ??
+      20;
+    const retentionDays =
+      this.configService.get<number>(
+        'KNOWLEDGE_SOURCE_VERSION_RETENTION_DAYS',
+      ) ?? 365;
+    const versions = await this.prisma.knowledgeSourceVersion.findMany({
+      where: { sourceId },
+      orderBy: { version: 'desc' },
+      select: { id: true, createdAt: true },
+    });
+    const cutoff = Date.now() - retentionDays * 24 * 60 * 60_000;
+    const obsolete = versions.filter(
+      (entry, index) =>
+        index > 0 && (index >= retain || entry.createdAt.getTime() < cutoff),
+    );
+    if (obsolete.length) {
+      await this.prisma.knowledgeSourceVersion.deleteMany({
+        where: { id: { in: obsolete.map((entry) => entry.id) } },
+      });
+    }
   }
 
   private async prepareDocuments(

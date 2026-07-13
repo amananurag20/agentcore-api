@@ -31,3 +31,25 @@ export class CreateKnowledgeFolderDto {
   @IsOptional()
   organizationId?: string;
 }
+
+export class UpdateKnowledgeCategoryDto {
+  @ApiProperty({ minLength: 2 })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(80)
+  name: string;
+}
+
+export class UpdateKnowledgeFolderDto {
+  @ApiPropertyOptional({ minLength: 2 })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  @IsOptional()
+  name?: string;
+
+  @ApiPropertyOptional({ nullable: true })
+  @IsString()
+  @IsOptional()
+  parentId?: string | null;
+}

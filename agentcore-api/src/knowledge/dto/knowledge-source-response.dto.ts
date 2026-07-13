@@ -50,6 +50,30 @@ export class KnowledgeSourceResponseDto {
   })
   checksumSha256?: string | null;
 
+  @ApiPropertyOptional()
+  contentFingerprint?: string | null;
+
+  @ApiProperty({ example: 2 })
+  version: number;
+
+  @ApiProperty({ example: 'clean' })
+  malwareScanStatus: string;
+
+  @ApiPropertyOptional()
+  malwareScanMessage?: string | null;
+
+  @ApiPropertyOptional({ example: 24 })
+  recrawlIntervalHours?: number | null;
+
+  @ApiPropertyOptional()
+  lastCrawledAt?: Date | null;
+
+  @ApiPropertyOptional()
+  nextCrawlAt?: Date | null;
+
+  @ApiPropertyOptional()
+  staleAfterAt?: Date | null;
+
   @ApiPropertyOptional({ example: 'Business hours are 9am to 6pm.' })
   rawText?: string | null;
 

@@ -17,6 +17,7 @@ model Organization {
   products       OrganizationProduct[]
   aiProviders    AIProviderConfig[]
   knowledgeSources KnowledgeSource[]
+  knowledgeSourceVersions KnowledgeSourceVersion[]
   knowledgeDocuments KnowledgeDocument[]
   knowledgeChunks KnowledgeChunk[]
   customerChatConversations CustomerChatConversation[]

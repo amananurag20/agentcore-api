@@ -71,7 +71,7 @@ export class CreateKnowledgeSourceDto {
   @ApiPropertyOptional()
   @IsString()
   @IsOptional()
-  folderId?: string;
+  folderId?: string | null;
 
   @ApiPropertyOptional({ default: false })
   @IsBoolean()
@@ -108,4 +108,15 @@ export class CreateKnowledgeSourceDto {
   @IsObject()
   @IsOptional()
   metadata?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    description: 'Automatic website recrawl interval in hours.',
+    minimum: 1,
+    maximum: 8760,
+  })
+  @IsInt()
+  @Min(1)
+  @Max(8760)
+  @IsOptional()
+  recrawlIntervalHours?: number | null;
 }

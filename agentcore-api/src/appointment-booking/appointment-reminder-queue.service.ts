@@ -37,7 +37,7 @@ export class AppointmentReminderQueueService {
         reminderType: 'confirmation',
       } satisfies AppointmentReminderJobData,
       {
-        jobId: `${input.bookingId}:confirmation`,
+        jobId: `${input.bookingId}-confirmation`,
       },
     );
 
@@ -60,7 +60,7 @@ export class AppointmentReminderQueueService {
           } satisfies AppointmentReminderJobData,
           {
             delay,
-            jobId: `${input.bookingId}:${reminderType}`,
+            jobId: `${input.bookingId}-${reminderType}`,
           },
         );
       }),

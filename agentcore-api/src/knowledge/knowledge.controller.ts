@@ -38,7 +38,10 @@ import { InternalMemoryRetrieveDto } from './dto/internal-memory-retrieve.dto';
 import {
   CreateKnowledgeCategoryDto,
   CreateKnowledgeFolderDto,
+  UpdateKnowledgeCategoryDto,
+  UpdateKnowledgeFolderDto,
 } from './dto/knowledge-taxonomy.dto';
+import { ListKnowledgeSourcesDto } from './dto/list-knowledge-sources.dto';
 import { PolicyService } from '../policy/policy.service';
 
 @ApiTags('Knowledge')
@@ -55,9 +58,9 @@ export class KnowledgeController {
   @ApiOkResponse({ type: KnowledgeSourceResponseDto, isArray: true })
   listSources(
     @CurrentUser() user: AuthenticatedUser,
-    @Query('organizationId') organizationId?: string,
+    @Query() query: ListKnowledgeSourcesDto,
   ) {
-    return this.knowledgeService.listSources(user, organizationId);
+    return this.knowledgeService.listSources(user, query);
   }
 
   @Post('sources')
@@ -81,7 +84,11 @@ export class KnowledgeController {
   }
 
   @Post('sources/upload')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 25 * 1024 * 1024, files: 1, fields: 20 },
+    }),
+  )
   @ApiOperation({ summary: 'Upload a file knowledge source to object storage' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -186,6 +193,15 @@ export class KnowledgeController {
     return this.knowledgeService.deleteCategory(user, id);
   }
 
+  @Patch('taxonomy/categories/:id')
+  updateCategory(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: UpdateKnowledgeCategoryDto,
+  ) {
+    return this.knowledgeService.updateCategory(user, id, body);
+  }
+
   @Get('taxonomy/folders')
   listFolders(
     @CurrentUser() user: AuthenticatedUser,
@@ -208,6 +224,23 @@ export class KnowledgeController {
     @Param('id') id: string,
   ) {
     return this.knowledgeService.deleteFolder(user, id);
+  }
+
+  @Patch('taxonomy/folders/:id')
+  updateFolder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: UpdateKnowledgeFolderDto,
+  ) {
+    return this.knowledgeService.updateFolder(user, id, body);
+  }
+
+  @Get('sources/:id/versions')
+  listSourceVersions(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.knowledgeService.listSourceVersions(user, id);
   }
 
   @Get('documents')

@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PDFParse } from 'pdf-parse';
 import * as mammoth from 'mammoth';
 import * as ExcelJS from 'exceljs';
@@ -10,6 +11,14 @@ export interface ExtractedKnowledgeFile {
 
 @Injectable()
 export class KnowledgeFileExtractorService {
+  private readonly maxCharacters: number;
+
+  constructor(@Optional() private readonly configService?: ConfigService) {
+    this.maxCharacters =
+      this.configService?.get<number>('KNOWLEDGE_MAX_EXTRACTED_CHARACTERS') ??
+      5_000_000;
+  }
+
   async extract(input: {
     buffer: Buffer;
     fileName?: string | null;
@@ -31,7 +40,9 @@ export class KnowledgeFileExtractorService {
       )
     ) {
       return {
-        text: this.cleanText(input.buffer.toString('utf8')),
+        text: this.assertWithinLimit(
+          this.cleanText(input.buffer.toString('utf8')),
+        ),
         metadata: { extractor: 'text' },
       };
     }
@@ -66,12 +77,12 @@ export class KnowledgeFileExtractorService {
       });
       const text = this.cleanText(result.text);
 
-      if (!text) {
-        throw new BadRequestException('PDF contains no extractable text');
+      if (text.length < 10) {
+        return this.extractPdfWithOcr(buffer, result.total);
       }
 
       return {
-        text,
+        text: this.assertWithinLimit(text),
         metadata: {
           extractor: 'pdf-parse',
           pageCount: result.total,
@@ -89,7 +100,7 @@ export class KnowledgeFileExtractorService {
       throw new BadRequestException('DOCX contains no extractable text');
     }
     return {
-      text,
+      text: this.assertWithinLimit(text),
       metadata: {
         extractor: 'mammoth',
         warnings: result.messages.map((message) => message.message),
@@ -129,7 +140,7 @@ export class KnowledgeFileExtractorService {
       );
     }
     return {
-      text,
+      text: this.assertWithinLimit(text),
       metadata: {
         extractor: 'exceljs',
         sheetCount: workbook.worksheets.length,
@@ -146,6 +157,62 @@ export class KnowledgeFileExtractorService {
       .replace(/ *\n */g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
+  }
+
+  private async extractPdfWithOcr(
+    buffer: Buffer,
+    parsedPageCount: number,
+  ): Promise<ExtractedKnowledgeFile> {
+    const endpoint = this.configService?.get<string>('KNOWLEDGE_OCR_ENDPOINT');
+    if (!endpoint) {
+      throw new BadRequestException(
+        'PDF appears to be scanned. Configure KNOWLEDGE_OCR_ENDPOINT to enable OCR.',
+      );
+    }
+    const form = new FormData();
+    form.set(
+      'file',
+      new Blob([Uint8Array.from(buffer)], { type: 'application/pdf' }),
+      'scan.pdf',
+    );
+    const apiKey = this.configService?.get<string>('KNOWLEDGE_OCR_API_KEY');
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      body: form,
+      signal: AbortSignal.timeout(
+        this.configService?.get<number>('KNOWLEDGE_OCR_TIMEOUT_MS') ?? 60_000,
+      ),
+    });
+    if (!response.ok) {
+      throw new BadRequestException(
+        `OCR service returned HTTP ${response.status}`,
+      );
+    }
+    const result = (await response.json()) as {
+      text?: string;
+      pageCount?: number;
+    };
+    const text = this.assertWithinLimit(this.cleanText(result.text ?? ''));
+    if (!text) {
+      throw new BadRequestException('OCR service returned no readable text');
+    }
+    return {
+      text,
+      metadata: {
+        extractor: 'ocr',
+        pageCount: result.pageCount ?? parsedPageCount,
+      },
+    };
+  }
+
+  private assertWithinLimit(text: string): string {
+    if (text.length > this.maxCharacters) {
+      throw new BadRequestException(
+        `Extracted content exceeds the ${this.maxCharacters} character limit`,
+      );
+    }
+    return text;
   }
 
   private hasExtension(fileName: string | null | undefined, extension: string) {

@@ -7,6 +7,7 @@ import { KnowledgeIngestionQueueService } from './knowledge-ingestion-queue.serv
 
 describe('KnowledgeIngestionQueueService', () => {
   it('uses a BullMQ-safe custom job id', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(123456789);
     const add = jest.fn().mockResolvedValue({ id: 'job' });
     const queueService = {
       add,
@@ -29,8 +30,9 @@ describe('KnowledgeIngestionQueueService', () => {
         reason: 'source_created',
       },
       {
-        jobId: '7628083b-69a1-4886-a186-54b9a65c6f32-source_created',
+        jobId: '7628083b-69a1-4886-a186-54b9a65c6f32-source_created-123456789',
       },
     );
+    jest.restoreAllMocks();
   });
 });

@@ -20,20 +20,52 @@ model KnowledgeSource {
   storageKey     String?               @map("storage_key")
   fileSizeBytes  BigInt?               @map("file_size_bytes")
   checksumSha256 String?               @map("checksum_sha256")
+  contentFingerprint String?           @map("content_fingerprint")
+  version        Int                   @default(0)
+  malwareScanStatus String             @default("not_required") @map("malware_scan_status")
+  malwareScanMessage String?           @map("malware_scan_message")
+  recrawlIntervalHours Int?            @map("recrawl_interval_hours")
+  lastCrawledAt  DateTime?             @map("last_crawled_at")
+  nextCrawlAt    DateTime?             @map("next_crawl_at")
+  staleAfterAt   DateTime?             @map("stale_after_at")
   rawText        String?               @map("raw_text")
   metadata       Json                  @default("{}")
   errorMessage   String?               @map("error_message")
   lastIngestedAt DateTime?             @map("last_ingested_at")
   documents      KnowledgeDocument[]
   chunks         KnowledgeChunk[]
+  versions       KnowledgeSourceVersion[]
   createdAt      DateTime              @default(now()) @map("created_at")
   updatedAt      DateTime              @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@index([folderId])
   @@index([type])
+  @@unique([organizationId, contentFingerprint])
+  @@index([type, nextCrawlAt])
+  @@index([staleAfterAt])
   @@index([storageProvider, storageBucket])
   @@map("knowledge_sources")
+}
+
+model KnowledgeSourceVersion {
+  id                 String          @id @default(uuid())
+  organizationId     String          @map("organization_id")
+  organization       Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceId           String          @map("source_id")
+  source             KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  version            Int
+  contentFingerprint String          @map("content_fingerprint")
+  contentText        String          @map("content_text")
+  documentCount      Int             @map("document_count")
+  chunkCount         Int             @map("chunk_count")
+  metadata           Json            @default("{}")
+  createdAt          DateTime        @default(now()) @map("created_at")
+
+  @@unique([sourceId, version])
+  @@index([organizationId, createdAt])
+  @@index([sourceId, createdAt])
+  @@map("knowledge_source_versions")
 }
 
 model KnowledgeCategory {

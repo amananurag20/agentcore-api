@@ -1,4 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AIProviderConfig, AIProviderType } from '@prisma/client';
 import { createHash } from 'crypto';
@@ -17,6 +21,7 @@ export class EmbeddingsService {
   private readonly logger = new Logger(EmbeddingsService.name);
   private readonly defaultDimensions: number;
   private readonly defaultModel: string;
+  private readonly allowLocalFallback: boolean;
 
   constructor(
     private readonly configService: ConfigService,
@@ -29,6 +34,9 @@ export class EmbeddingsService {
     this.defaultModel =
       this.configService.get<string>('DEFAULT_EMBEDDING_MODEL') ??
       'text-embedding-3-small';
+    this.allowLocalFallback =
+      this.configService.get<boolean>('ALLOW_LOCAL_EMBEDDINGS') ??
+      this.configService.get<string>('NODE_ENV') !== 'production';
   }
 
   async embedText(input: {
@@ -41,11 +49,12 @@ export class EmbeddingsService {
       return this.embedWithProvider(providerConfig, input.text);
     }
 
-    return {
-      vector: this.createDeterministicVector(input.text),
-      model: providerConfig?.embeddingModel ?? this.defaultModel,
-      provider: providerConfig?.provider ?? 'local',
-    };
+    if (!this.allowLocalFallback) {
+      throw new ServiceUnavailableException(
+        'No active embedding provider is configured for this organization',
+      );
+    }
+    return this.localEmbedding(input.text, providerConfig);
   }
 
   private async findProviderConfig(
@@ -68,11 +77,12 @@ export class EmbeddingsService {
     const adapter = this.adapterRegistry.getAdapter(providerConfig);
 
     if (!adapter.createEmbedding) {
-      return {
-        vector: this.createDeterministicVector(text),
-        model: providerConfig.embeddingModel ?? this.defaultModel,
-        provider: providerConfig.provider,
-      };
+      if (!this.allowLocalFallback) {
+        throw new ServiceUnavailableException(
+          `Provider ${providerConfig.provider} does not support embeddings`,
+        );
+      }
+      return this.localEmbedding(text, providerConfig);
     }
 
     const apiKey = this.cryptoService.decrypt(providerConfig.apiKeyEncrypted!);
@@ -87,20 +97,20 @@ export class EmbeddingsService {
       });
 
       return {
-        vector: result.vector,
+        vector: this.assertVectorDimensions(result.vector),
         model: result.model,
         provider: providerConfig.provider,
       };
     } catch (error) {
+      if (!this.allowLocalFallback) {
+        throw new ServiceUnavailableException(
+          `Embedding provider failed: ${this.toErrorMessage(error)}`,
+        );
+      }
       this.logger.warn(
         `AI embedding adapter failed for provider ${providerConfig.id}; using local deterministic vector. ${this.toErrorMessage(error)}`,
       );
-
-      return {
-        vector: this.createDeterministicVector(text),
-        model: providerConfig.embeddingModel ?? this.defaultModel,
-        provider: providerConfig.provider,
-      };
+      return this.localEmbedding(text, providerConfig);
     }
   }
 
@@ -119,6 +129,29 @@ export class EmbeddingsService {
       Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
 
     return vector.map((value) => Number((value / magnitude).toFixed(8)));
+  }
+
+  private localEmbedding(
+    text: string,
+    providerConfig: AIProviderConfig | null,
+  ): EmbeddingResult {
+    return {
+      vector: this.createDeterministicVector(text),
+      model: providerConfig?.embeddingModel ?? this.defaultModel,
+      provider: 'local',
+    };
+  }
+
+  private assertVectorDimensions(vector: number[]): number[] {
+    if (vector.length !== this.defaultDimensions) {
+      throw new Error(
+        `Embedding dimension mismatch: expected ${this.defaultDimensions}, received ${vector.length}`,
+      );
+    }
+    if (vector.some((value) => !Number.isFinite(value))) {
+      throw new Error('Embedding provider returned non-finite values');
+    }
+    return vector;
   }
 
   private toErrorMessage(error: unknown): string {

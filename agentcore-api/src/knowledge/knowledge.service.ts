@@ -21,6 +21,7 @@ import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-inge
 import { PrismaService } from '../prisma/prisma.service';
 import { PolicyService } from '../policy/policy.service';
 import { S3StorageService } from '../storage/s3-storage.service';
+import { FileSecurityService } from '../storage/file-security.service';
 import { CreateKnowledgeSourceDto } from './dto/create-knowledge-source.dto';
 import { SearchKnowledgeDto } from './dto/search-knowledge.dto';
 import { UpdateKnowledgeSourceDto } from './dto/update-knowledge-source.dto';
@@ -28,7 +29,10 @@ import { UploadKnowledgeFileDto } from './dto/upload-knowledge-file.dto';
 import {
   CreateKnowledgeCategoryDto,
   CreateKnowledgeFolderDto,
+  UpdateKnowledgeCategoryDto,
+  UpdateKnowledgeFolderDto,
 } from './dto/knowledge-taxonomy.dto';
+import { ListKnowledgeSourcesDto } from './dto/list-knowledge-sources.dto';
 
 type SafeKnowledgeSource = Omit<
   KnowledgeSource,
@@ -67,24 +71,61 @@ export class KnowledgeService {
     private readonly ingestionQueueService: KnowledgeIngestionQueueService,
     private readonly policyService: PolicyService,
     private readonly prisma: PrismaService,
+    private readonly fileSecurityService: FileSecurityService,
     private readonly storageService: S3StorageService,
   ) {}
 
   async listSources(
     currentUser: AuthenticatedUser,
-    organizationId?: string,
-  ): Promise<SafeKnowledgeSource[]> {
-    const requestedOrgId = organizationId
-      ? this.resolveOrganizationId(currentUser, organizationId)
+    query: ListKnowledgeSourcesDto,
+  ) {
+    const requestedOrgId = query.organizationId
+      ? this.resolveOrganizationId(currentUser, query.organizationId)
       : undefined;
-    const sources = await this.prisma.knowledgeSource.findMany({
-      where: requestedOrgId
-        ? { organizationId: requestedOrgId }
-        : this.scopedKnowledgeWhere(currentUser),
-      orderBy: { createdAt: 'desc' },
-    });
-
-    return sources.map((source) => this.toSafeSource(source));
+    const scope = requestedOrgId
+      ? { organizationId: requestedOrgId }
+      : this.scopedKnowledgeWhere(currentUser);
+    const where: Prisma.KnowledgeSourceWhereInput = {
+      ...scope,
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.type ? { type: query.type } : {}),
+      ...(query.quarantined !== undefined
+        ? { isQuarantined: query.quarantined }
+        : {}),
+      ...(query.folderId
+        ? { folderId: query.folderId === 'unfiled' ? null : query.folderId }
+        : {}),
+      ...(query.search
+        ? {
+            OR: [
+              { name: { contains: query.search, mode: 'insensitive' } },
+              { fileName: { contains: query.search, mode: 'insensitive' } },
+              { url: { contains: query.search, mode: 'insensitive' } },
+              { categories: { has: query.search.toLowerCase() } },
+            ],
+          }
+        : {}),
+    };
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 25;
+    const [sources, total] = await Promise.all([
+      this.prisma.knowledgeSource.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.knowledgeSource.count({ where }),
+    ]);
+    return {
+      data: sources.map((source) => this.toSafeSource(source)),
+      pageInfo: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    };
   }
 
   async createSource(
@@ -119,6 +160,12 @@ export class KnowledgeService {
           mimeType: input.mimeType,
           rawText: input.rawText,
           metadata: this.toJsonObject(input.metadata),
+          recrawlIntervalHours:
+            input.type === 'website_url' ? input.recrawlIntervalHours : null,
+          nextCrawlAt:
+            input.type === 'website_url' && input.recrawlIntervalHours
+              ? new Date(Date.now() + input.recrawlIntervalHours * 60 * 60_000)
+              : null,
         },
       });
 
@@ -176,6 +223,7 @@ export class KnowledgeService {
       throw new BadRequestException('File is required');
     }
     this.assertSupportedUploadFile(file);
+    const malwareScan = await this.fileSecurityService.scan(file.buffer);
 
     const organizationId = this.resolveOrganizationId(
       currentUser,
@@ -210,7 +258,16 @@ export class KnowledgeService {
         storageKey: storedObject.key,
         fileSizeBytes: storedObject.sizeBytes,
         checksumSha256: storedObject.checksumSha256,
-        metadata: this.toJsonObject(metadata),
+        malwareScanStatus: malwareScan.status,
+        malwareScanMessage: malwareScan.message,
+        metadata: this.toJsonObject({
+          ...metadata,
+          malwareScan: {
+            status: malwareScan.status,
+            message: malwareScan.message,
+            scannedAt: new Date().toISOString(),
+          },
+        }),
       },
     });
 
@@ -258,11 +315,23 @@ export class KnowledgeService {
     const source = await this.findSourceForActor(currentUser, id);
     await this.assertCanManageProducts(currentUser, source.productVisibility);
 
-    await this.ingestionService.ingestSource({
-      organizationId: source.organizationId,
-      sourceId: source.id,
-      reason: 'manual_retry',
-    });
+    if (this.ingestionQueueService.isEnabled()) {
+      await this.prisma.knowledgeSource.update({
+        where: { id: source.id },
+        data: { status: 'pending', errorMessage: null },
+      });
+      await this.ingestionQueueService.enqueue({
+        organizationId: source.organizationId,
+        sourceId: source.id,
+        reason: 'manual_retry',
+      });
+    } else {
+      await this.ingestionService.ingestSource({
+        organizationId: source.organizationId,
+        sourceId: source.id,
+        reason: 'manual_retry',
+      });
+    }
 
     await this.auditService.record({
       actor: currentUser,
@@ -326,6 +395,15 @@ export class KnowledgeService {
           fileName: input.fileName,
           mimeType: input.mimeType,
           rawText: input.rawText,
+          recrawlIntervalHours: input.recrawlIntervalHours,
+          nextCrawlAt:
+            input.recrawlIntervalHours === undefined
+              ? undefined
+              : input.recrawlIntervalHours
+                ? new Date(
+                    Date.now() + input.recrawlIntervalHours * 60 * 60_000,
+                  )
+                : null,
           metadata:
             input.metadata || releasesQuarantine
               ? this.toJsonObject(metadata)
@@ -375,6 +453,7 @@ export class KnowledgeService {
         sensitivityLevel: input.sensitivityLevel,
         productVisibility: input.productVisibility,
         isQuarantined: input.isQuarantined,
+        recrawlIntervalHours: input.recrawlIntervalHours,
       }),
     });
     if (releasesQuarantine) {
@@ -460,7 +539,64 @@ export class KnowledgeService {
       throw new NotFoundException('Knowledge category not found');
     }
     this.assertCanManageAnyKnowledge(currentUser);
-    await this.prisma.knowledgeCategory.delete({ where: { id } });
+    await this.prisma.$transaction(async (tx) => {
+      const [sources, documents, chunks] = await Promise.all([
+        tx.knowledgeSource.findMany({
+          where: {
+            organizationId: category.organizationId,
+            categories: { has: category.name },
+          },
+          select: { id: true, categories: true },
+        }),
+        tx.knowledgeDocument.findMany({
+          where: {
+            organizationId: category.organizationId,
+            categories: { has: category.name },
+          },
+          select: { id: true, categories: true },
+        }),
+        tx.knowledgeChunk.findMany({
+          where: {
+            organizationId: category.organizationId,
+            categories: { has: category.name },
+          },
+          select: { id: true, categories: true },
+        }),
+      ]);
+      await Promise.all([
+        ...sources.map((entry) =>
+          tx.knowledgeSource.update({
+            where: { id: entry.id },
+            data: {
+              categories: entry.categories.filter(
+                (value) => value !== category.name,
+              ),
+            },
+          }),
+        ),
+        ...documents.map((entry) =>
+          tx.knowledgeDocument.update({
+            where: { id: entry.id },
+            data: {
+              categories: entry.categories.filter(
+                (value) => value !== category.name,
+              ),
+            },
+          }),
+        ),
+        ...chunks.map((entry) =>
+          tx.knowledgeChunk.update({
+            where: { id: entry.id },
+            data: {
+              categories: entry.categories.filter(
+                (value) => value !== category.name,
+              ),
+            },
+          }),
+        ),
+      ]);
+      await tx.knowledgeCategory.delete({ where: { id } });
+    });
     await this.auditService.record({
       actor: currentUser,
       organizationId: category.organizationId,
@@ -470,6 +606,88 @@ export class KnowledgeService {
       metadata: { name: category.name },
     });
     return { deleted: true };
+  }
+
+  async updateCategory(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: UpdateKnowledgeCategoryDto,
+  ) {
+    const category = await this.findCategoryForActor(currentUser, id);
+    this.assertCanManageAnyKnowledge(currentUser);
+    const name = input.name.trim();
+    const slug = this.slugify(name);
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.knowledgeCategory.update({
+        where: { id },
+        data: { name, slug },
+      });
+      const [sources, documents, chunks] = await Promise.all([
+        tx.knowledgeSource.findMany({
+          where: {
+            organizationId: category.organizationId,
+            categories: { has: category.name },
+          },
+          select: { id: true, categories: true },
+        }),
+        tx.knowledgeDocument.findMany({
+          where: {
+            organizationId: category.organizationId,
+            categories: { has: category.name },
+          },
+          select: { id: true, categories: true },
+        }),
+        tx.knowledgeChunk.findMany({
+          where: {
+            organizationId: category.organizationId,
+            categories: { has: category.name },
+          },
+          select: { id: true, categories: true },
+        }),
+      ]);
+      await Promise.all([
+        ...sources.map((entry) =>
+          tx.knowledgeSource.update({
+            where: { id: entry.id },
+            data: {
+              categories: entry.categories.map((value) =>
+                value === category.name ? name : value,
+              ),
+            },
+          }),
+        ),
+        ...documents.map((entry) =>
+          tx.knowledgeDocument.update({
+            where: { id: entry.id },
+            data: {
+              categories: entry.categories.map((value) =>
+                value === category.name ? name : value,
+              ),
+            },
+          }),
+        ),
+        ...chunks.map((entry) =>
+          tx.knowledgeChunk.update({
+            where: { id: entry.id },
+            data: {
+              categories: entry.categories.map((value) =>
+                value === category.name ? name : value,
+              ),
+            },
+          }),
+        ),
+      ]);
+      return result;
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: category.organizationId,
+      action: 'knowledge_category.updated',
+      entityType: 'knowledge_category',
+      entityId: id,
+      metadata: { previousName: category.name, name },
+    });
+    return updated;
   }
 
   async listFolders(currentUser: AuthenticatedUser, organizationId?: string) {
@@ -534,6 +752,59 @@ export class KnowledgeService {
       metadata: { name: folder.name },
     });
     return { deleted: true };
+  }
+
+  async updateFolder(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: UpdateKnowledgeFolderDto,
+  ) {
+    const folder = await this.findFolderForActor(currentUser, id);
+    this.assertCanManageAnyKnowledge(currentUser);
+    if (input.parentId === id)
+      throw new BadRequestException('Folder cannot be its own parent');
+    await this.assertFolderBelongsToOrganization(
+      input.parentId ?? undefined,
+      folder.organizationId,
+    );
+    await this.assertFolderMoveDoesNotCycle(id, input.parentId);
+    const updated = await this.prisma.knowledgeFolder.update({
+      where: { id },
+      data: {
+        ...(input.name !== undefined ? { name: input.name.trim() } : {}),
+        ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+      },
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: folder.organizationId,
+      action: 'knowledge_folder.updated',
+      entityType: 'knowledge_folder',
+      entityId: id,
+      metadata: { name: updated.name, parentId: updated.parentId },
+    });
+    return updated;
+  }
+
+  async listSourceVersions(currentUser: AuthenticatedUser, id: string) {
+    await this.findSourceForActor(currentUser, id);
+    const versions = await this.prisma.knowledgeSourceVersion.findMany({
+      where: { sourceId: id },
+      orderBy: { version: 'desc' },
+      select: {
+        id: true,
+        version: true,
+        contentFingerprint: true,
+        documentCount: true,
+        chunkCount: true,
+        metadata: true,
+        createdAt: true,
+      },
+    });
+    return versions.map((version) => ({
+      ...version,
+      metadata: this.toRecord(version.metadata),
+    }));
   }
 
   async listDocuments(
@@ -903,7 +1174,7 @@ export class KnowledgeService {
   }
 
   private async assertFolderBelongsToOrganization(
-    folderId: string | undefined,
+    folderId: string | null | undefined,
     organizationId: string,
   ) {
     if (!folderId) return;
@@ -912,6 +1183,62 @@ export class KnowledgeService {
       select: { id: true },
     });
     if (!folder) throw new BadRequestException('Knowledge folder is invalid');
+  }
+
+  private async findCategoryForActor(
+    currentUser: AuthenticatedUser,
+    id: string,
+  ) {
+    const category = await this.prisma.knowledgeCategory.findUnique({
+      where: { id },
+    });
+    if (
+      !category ||
+      (!this.isSuperAdmin(currentUser) &&
+        category.organizationId !== currentUser.orgId)
+    ) {
+      throw new NotFoundException('Knowledge category not found');
+    }
+    return category;
+  }
+
+  private async assertFolderMoveDoesNotCycle(
+    folderId: string,
+    parentId: string | null | undefined,
+  ) {
+    let cursor = parentId;
+    for (let depth = 0; cursor && depth < 100; depth += 1) {
+      if (cursor === folderId) {
+        throw new BadRequestException('Folder move would create a cycle');
+      }
+      const parent = await this.prisma.knowledgeFolder.findUnique({
+        where: { id: cursor },
+        select: { parentId: true },
+      });
+      cursor = parent?.parentId;
+    }
+    if (cursor) throw new BadRequestException('Folder hierarchy is too deep');
+  }
+
+  private async findFolderForActor(currentUser: AuthenticatedUser, id: string) {
+    const folder = await this.prisma.knowledgeFolder.findUnique({
+      where: { id },
+    });
+    if (
+      !folder ||
+      (!this.isSuperAdmin(currentUser) &&
+        folder.organizationId !== currentUser.orgId)
+    ) {
+      throw new NotFoundException('Knowledge folder not found');
+    }
+    return folder;
+  }
+
+  private slugify(name: string) {
+    return name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '');
   }
 
   private async registerCategories(
@@ -928,10 +1255,7 @@ export class KnowledgeService {
       data: normalized.map((name) => ({
         organizationId,
         name,
-        slug: name
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/(^-|-$)/g, ''),
+        slug: this.slugify(name),
         isSystem,
       })),
       skipDuplicates: true,
@@ -940,12 +1264,7 @@ export class KnowledgeService {
       where: {
         organizationId,
         slug: {
-          in: normalized.map((name) =>
-            name
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, '-')
-              .replace(/(^-|-$)/g, ''),
-          ),
+          in: normalized.map((name) => this.slugify(name)),
         },
       },
       orderBy: { name: 'asc' },

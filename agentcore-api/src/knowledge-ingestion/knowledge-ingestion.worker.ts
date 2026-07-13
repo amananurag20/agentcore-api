@@ -13,6 +13,7 @@ import {
 import { parseRedisConnection } from '../queue/redis-connection';
 import { KnowledgeIngestionService } from './knowledge-ingestion.service';
 import { KnowledgeIngestionJobData } from './knowledge-ingestion.types';
+import { KnowledgeAlertService } from './knowledge-alert.service';
 
 @Injectable()
 export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
@@ -23,6 +24,7 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly configService: ConfigService,
     private readonly ingestionService: KnowledgeIngestionService,
+    private readonly alertService: KnowledgeAlertService,
   ) {}
 
   onModuleInit() {
@@ -51,6 +53,7 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
         `Knowledge ingestion job failed: ${job?.id ?? 'unknown'}`,
         error.stack,
       );
+      if (job?.data) void this.alertService.ingestionFailed(job.data, error);
     });
   }
 

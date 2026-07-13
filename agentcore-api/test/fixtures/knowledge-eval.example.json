@@ -1,0 +1,7 @@
+[
+  {
+    "query": "What is the refund policy?",
+    "expectedSourceIds": ["replace-with-refund-source-id"],
+    "productKey": "customer_chat"
+  }
+]

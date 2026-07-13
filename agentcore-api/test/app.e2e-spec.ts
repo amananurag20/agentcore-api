@@ -686,6 +686,11 @@ describe('AppController (e2e)', () => {
         slug: `e2e-organization-${suffix}`,
         plan: 'starter',
         deploymentMode: 'saas',
+        firstAdmin: {
+          name: 'E2E Organization Admin',
+          email: `e2e-org-admin-${suffix}@agentcore.local`,
+          password: 'E2E-Admin@12345',
+        },
       })
       .expect(201);
 
@@ -1596,8 +1601,10 @@ describe('AppController (e2e)', () => {
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .expect(200)
       .expect((response) => {
-        const body = response.body as KnowledgeSourceResponseBody[];
-        expect(body.some((source) => source.id === createdBody.id)).toBe(true);
+        const body = response.body as { data: KnowledgeSourceResponseBody[] };
+        expect(body.data.some((source) => source.id === createdBody.id)).toBe(
+          true,
+        );
       });
 
     await request(app.getHttpServer())
@@ -1636,15 +1643,20 @@ describe('AppController (e2e)', () => {
         expect(body[0].chunkIndex).toBe(0);
       });
 
-    await request(app.getHttpServer())
+    const filteredChunksResponse = await request(app.getHttpServer())
       .get(`/api/v1/knowledge/chunks?sourceId=${createdBody.id}&q=business`)
-      .set('Authorization', `Bearer ${loginBody.accessToken}`)
-      .expect(200)
-      .expect((response) => {
-        const body = response.body as KnowledgeChunkResponseBody[];
+      .set('Authorization', `Bearer ${loginBody.accessToken}`);
 
-        expect(body.length).toBeGreaterThanOrEqual(1);
-      });
+    expect({
+      status: filteredChunksResponse.status,
+      body: filteredChunksResponse.body as unknown,
+    }).toEqual({
+      status: 200,
+      body: expect.any(Array) as unknown,
+    });
+    expect(
+      (filteredChunksResponse.body as KnowledgeChunkResponseBody[]).length,
+    ).toBeGreaterThanOrEqual(1);
 
     await request(app.getHttpServer())
       .post('/api/v1/knowledge/search')

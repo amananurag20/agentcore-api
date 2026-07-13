@@ -134,6 +134,38 @@ class EnvironmentVariables {
   @IsOptional()
   KNOWLEDGE_INGESTION_QUEUE_CONCURRENCY = 2;
 
+  @Transform(({ value }) => Number(value ?? 720))
+  @IsInt()
+  @Min(1)
+  @Max(8760)
+  @IsOptional()
+  KNOWLEDGE_STALE_AFTER_HOURS = 720;
+
+  @Transform(({ value }) => Number(value ?? 20))
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  KNOWLEDGE_SOURCE_VERSION_RETENTION = 20;
+
+  @Transform(({ value }) => Number(value ?? 365))
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  @IsOptional()
+  KNOWLEDGE_SOURCE_VERSION_RETENTION_DAYS = 365;
+
+  @Transform(({ value }) => Number(value ?? 60000))
+  @IsInt()
+  @Min(10000)
+  @Max(3600000)
+  @IsOptional()
+  KNOWLEDGE_LIFECYCLE_INTERVAL_MS = 60000;
+
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_ALERT_WEBHOOK_URL?: string;
+
   @Transform(({ value }) => Number(value ?? 5))
   @IsInt()
   @Min(1)
@@ -197,6 +229,56 @@ class EnvironmentVariables {
   @Max(4096)
   @IsOptional()
   DEFAULT_EMBEDDING_DIMENSIONS = 1536;
+
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  @IsOptional()
+  ALLOW_LOCAL_EMBEDDINGS?: boolean;
+
+  @Transform(({ value }) => Number(value ?? 5000000))
+  @IsInt()
+  @Min(1000)
+  @Max(50000000)
+  @IsOptional()
+  KNOWLEDGE_MAX_EXTRACTED_CHARACTERS = 5000000;
+
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_OCR_ENDPOINT?: string;
+
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_OCR_API_KEY?: string;
+
+  @Transform(({ value }) => Number(value ?? 60000))
+  @IsInt()
+  @Min(1000)
+  @Max(300000)
+  @IsOptional()
+  KNOWLEDGE_OCR_TIMEOUT_MS = 60000;
+
+  @IsString()
+  @IsOptional()
+  CLAMAV_HOST?: string;
+
+  @Transform(({ value }) => Number(value ?? 3310))
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  @IsOptional()
+  CLAMAV_PORT = 3310;
+
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  @IsOptional()
+  MALWARE_SCAN_REQUIRED = false;
+
+  @Transform(({ value }) => Number(value ?? 15000))
+  @IsInt()
+  @Min(1000)
+  @Max(120000)
+  @IsOptional()
+  MALWARE_SCAN_TIMEOUT_MS = 15000;
 
   @IsString()
   @IsOptional()
