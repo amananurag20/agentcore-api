@@ -2,10 +2,12 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   Param,
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -26,7 +28,6 @@ import {
   SendWhatsAppAgentMessageDto,
   UpdateWhatsAppConfigDto,
   UpdateWhatsAppConversationStatusDto,
-  WhatsAppInboundWebhookDto,
 } from './dto/whatsapp-assistant.dto';
 import {
   WhatsAppConfigResponseDto,
@@ -35,6 +36,11 @@ import {
   WhatsAppInboundWebhookResponseDto,
 } from './dto/whatsapp-assistant-response.dto';
 import { WhatsAppAssistantService } from './whatsapp-assistant.service';
+
+type RawBodyRequest = {
+  rawBody?: Buffer;
+  headers: Record<string, string | string[] | undefined>;
+};
 
 @ApiTags('WhatsApp Assistant')
 @ApiBearerAuth('bearer')
@@ -173,12 +179,21 @@ export class WhatsAppAssistantWebhookController {
 
   @Public()
   @Post(':configId/inbound')
+  @HttpCode(200)
   @ApiOperation({ summary: 'Receive inbound WhatsApp webhook message' })
-  @ApiCreatedResponse({ type: WhatsAppInboundWebhookResponseDto })
+  @ApiOkResponse({
+    description: 'Webhook accepted for asynchronous processing',
+  })
   handleInboundWebhook(
     @Param('configId') configId: string,
-    @Body() body: WhatsAppInboundWebhookDto,
+    @Body() body: unknown,
+    @Req() request: RawBodyRequest,
   ) {
-    return this.whatsAppAssistantService.handleInboundWebhook(configId, body);
+    return this.whatsAppAssistantService.receiveInboundWebhook(
+      configId,
+      body,
+      request.rawBody,
+      request.headers,
+    );
   }
 }

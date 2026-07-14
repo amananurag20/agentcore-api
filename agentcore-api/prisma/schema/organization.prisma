@@ -1,54 +1,54 @@
 model Organization {
-  id                        String                         @id @default(uuid())
-  name                      String
-  slug                      String                         @unique
-  contactEmail              String?                        @map("contact_email")
-  contactPhone              String?                        @map("contact_phone")
-  status                    OrganizationStatus             @default(active)
-  plan                      OrganizationPlan               @default(free)
-  deploymentMode            DeploymentMode                 @default(saas) @map("deployment_mode")
-  isSystem                  Boolean                        @default(false) @map("is_system")
-  users                     User[]
-  customRoles               CustomRole[]
-  customRoleAssignments     UserCustomRole[]
-  servicePrincipals         ServicePrincipal[]
-  knowledgeCategories       KnowledgeCategory[]
-  knowledgeFolders          KnowledgeFolder[]
-  userProductAccess         UserProductAccess[]
-  products                  OrganizationProduct[]
-  aiProviders               AIProviderConfig[]
-  knowledgeSources          KnowledgeSource[]
-  knowledgeSourceVersions   KnowledgeSourceVersion[]
-  knowledgeDocuments        KnowledgeDocument[]
-  knowledgeChunks           KnowledgeChunk[]
-  customerChatConversations CustomerChatConversation[]
-  customerChatMessages      CustomerChatMessage[]
-  customerChatWidgetConfigs CustomerChatWidgetConfig[]
-  appointmentServices       AppointmentService[]
-  appointmentStaff          AppointmentStaff[]
-  appointmentBookings       AppointmentBooking[]
-  appointmentAvailability   AppointmentStaffAvailability[]
-  appointmentTimeOff        AppointmentStaffTimeOff[]
-  appointmentReminders      AppointmentReminder[]
-  appointmentResources      AppointmentResource[]
-  appointmentResourceTimeOff AppointmentResourceTimeOff[]
-  appointmentCalendarConnections AppointmentCalendarConnection[]
-  appointmentCalendarEvents AppointmentCalendarEvent[]
-  appointmentBookingPolicy AppointmentBookingPolicy?
-  appointmentBlackouts AppointmentBlackout[]
-  appointmentRecurrenceSeries AppointmentRecurrenceSeries[]
-  appointmentWaitlistEntries AppointmentWaitlistEntry[]
+  id                              String                           @id @default(uuid())
+  name                            String
+  slug                            String                           @unique
+  contactEmail                    String?                          @map("contact_email")
+  contactPhone                    String?                          @map("contact_phone")
+  status                          OrganizationStatus               @default(active)
+  plan                            OrganizationPlan                 @default(free)
+  deploymentMode                  DeploymentMode                   @default(saas) @map("deployment_mode")
+  isSystem                        Boolean                          @default(false) @map("is_system")
+  users                           User[]
+  customRoles                     CustomRole[]
+  customRoleAssignments           UserCustomRole[]
+  servicePrincipals               ServicePrincipal[]
+  knowledgeCategories             KnowledgeCategory[]
+  knowledgeFolders                KnowledgeFolder[]
+  userProductAccess               UserProductAccess[]
+  products                        OrganizationProduct[]
+  aiProviders                     AIProviderConfig[]
+  knowledgeSources                KnowledgeSource[]
+  knowledgeSourceVersions         KnowledgeSourceVersion[]
+  knowledgeDocuments              KnowledgeDocument[]
+  knowledgeChunks                 KnowledgeChunk[]
+  customerChatConversations       CustomerChatConversation[]
+  customerChatMessages            CustomerChatMessage[]
+  customerChatWidgetConfigs       CustomerChatWidgetConfig[]
+  appointmentServices             AppointmentService[]
+  appointmentStaff                AppointmentStaff[]
+  appointmentBookings             AppointmentBooking[]
+  appointmentAvailability         AppointmentStaffAvailability[]
+  appointmentTimeOff              AppointmentStaffTimeOff[]
+  appointmentReminders            AppointmentReminder[]
+  appointmentResources            AppointmentResource[]
+  appointmentResourceTimeOff      AppointmentResourceTimeOff[]
+  appointmentCalendarConnections  AppointmentCalendarConnection[]
+  appointmentCalendarEvents       AppointmentCalendarEvent[]
+  appointmentBookingPolicy        AppointmentBookingPolicy?
+  appointmentBlackouts            AppointmentBlackout[]
+  appointmentRecurrenceSeries     AppointmentRecurrenceSeries[]
+  appointmentWaitlistEntries      AppointmentWaitlistEntry[]
   appointmentReminderSuppressions AppointmentReminderSuppression[]
-  whatsAppConfigs           WhatsAppAssistantConfig[]
-  whatsAppConversations     WhatsAppConversation[]
-  whatsAppMessages          WhatsAppMessage[]
-  voiceReceptionistConfigs  VoiceReceptionistConfig[]
-  voiceCalls                VoiceCall[]
-  voiceCallEvents           VoiceCallEvent[]
-  authSessions              AuthSession[]
-  authOneTimeTokens         AuthOneTimeToken[]
-  createdAt                 DateTime                       @default(now()) @map("created_at")
-  updatedAt                 DateTime                       @updatedAt @map("updated_at")
+  whatsAppConfigs                 WhatsAppAssistantConfig[]
+  whatsAppConversations           WhatsAppConversation[]
+  whatsAppMessages                WhatsAppMessage[]
+  voiceReceptionistConfigs        VoiceReceptionistConfig[]
+  voiceCalls                      VoiceCall[]
+  voiceCallEvents                 VoiceCallEvent[]
+  authSessions                    AuthSession[]
+  authOneTimeTokens               AuthOneTimeToken[]
+  createdAt                       DateTime                         @default(now()) @map("created_at")
+  updatedAt                       DateTime                         @updatedAt @map("updated_at")
 
   @@index([status])
   @@index([isSystem])

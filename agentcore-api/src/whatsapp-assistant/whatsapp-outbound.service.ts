@@ -1,4 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WhatsAppAssistantConfig } from '@prisma/client';
 import { CryptoService } from '../crypto/crypto.service';
@@ -23,6 +28,7 @@ export class WhatsAppOutboundService {
     to: string;
     content: string;
   }): Promise<WhatsAppOutboundResult> {
+    this.assertWhatsAppRecipient(input.to);
     const mode =
       this.configService.get<'mock' | 'live'>('WHATSAPP_OUTBOUND_MODE') ??
       'mock';
@@ -35,6 +41,10 @@ export class WhatsAppOutboundService {
       if (input.config.provider === 'twilio') {
         return this.sendTwilioText(input);
       }
+
+      throw new ServiceUnavailableException(
+        `Live outbound delivery is not implemented for provider ${input.config.provider}`,
+      );
     }
 
     return this.sendMockText(input);
@@ -67,10 +77,9 @@ export class WhatsAppOutboundService {
     content: string;
   }): Promise<WhatsAppOutboundResult> {
     if (!input.config.accessTokenEncrypted || !input.config.phoneNumberId) {
-      this.logger.warn(
-        `Meta WhatsApp credentials missing for config=${input.config.id}; falling back to mock`,
+      throw new ServiceUnavailableException(
+        `Meta WhatsApp credentials are missing for config ${input.config.id}`,
       );
-      return this.sendMockText(input);
     }
 
     const accessToken = this.cryptoService.decrypt(
@@ -127,10 +136,9 @@ export class WhatsAppOutboundService {
       !input.config.businessAccountId ||
       !input.config.phoneNumberId
     ) {
-      this.logger.warn(
-        `Twilio WhatsApp credentials missing for config=${input.config.id}; falling back to mock`,
+      throw new ServiceUnavailableException(
+        `Twilio WhatsApp credentials are missing for config ${input.config.id}`,
       );
-      return this.sendMockText(input);
     }
 
     const authToken = this.cryptoService.decrypt(
@@ -176,7 +184,18 @@ export class WhatsAppOutboundService {
 
   private providerTimeoutSignal(): AbortSignal {
     return AbortSignal.timeout(
-      this.configService.get<number>('APPOINTMENT_PROVIDER_TIMEOUT_MS', 10_000),
+      this.configService.get<number>('WHATSAPP_PROVIDER_TIMEOUT_MS', 10_000),
     );
+  }
+
+  private assertWhatsAppRecipient(value: string) {
+    const normalized = value.startsWith('whatsapp:')
+      ? value.slice('whatsapp:'.length)
+      : value;
+    if (!/^\+?[1-9]\d{7,14}$/.test(normalized)) {
+      throw new BadRequestException(
+        'WhatsApp recipient must be a valid E.164 phone number',
+      );
+    }
   }
 }

@@ -4,6 +4,7 @@ import {
   IsBoolean,
   IsEnum,
   IsInt,
+  Matches,
   IsNumber,
   IsObject,
   IsOptional,
@@ -79,6 +80,7 @@ export class CreateVoiceConfigDto {
 
   @ApiPropertyOptional({ example: '+15551234567' })
   @IsString()
+  @Matches(/^\+[1-9]\d{7,14}$/)
   @IsOptional()
   phoneNumber?: string;
 
@@ -124,6 +126,7 @@ export class CreateVoiceConfigDto {
 
   @ApiPropertyOptional({ example: '+15559876543' })
   @IsString()
+  @Matches(/^\+[1-9]\d{7,14}$/)
   @IsOptional()
   transferPhoneNumber?: string;
 
@@ -168,6 +171,7 @@ export class UpdateVoiceConfigDto {
   @ApiPropertyOptional({ example: '+15551234567', nullable: true })
   @ValidateIf((_, value) => value !== null && value !== undefined)
   @IsString()
+  @Matches(/^\+[1-9]\d{7,14}$/)
   phoneNumber?: string | null;
 
   @ApiPropertyOptional({ example: 'sip.agentcore.example.com', nullable: true })
@@ -213,6 +217,7 @@ export class UpdateVoiceConfigDto {
   @ApiPropertyOptional({ example: '+15559876543', nullable: true })
   @ValidateIf((_, value) => value !== null && value !== undefined)
   @IsString()
+  @Matches(/^\+[1-9]\d{7,14}$/)
   transferPhoneNumber?: string | null;
 
   @ApiPropertyOptional({ example: true })
@@ -259,10 +264,10 @@ export class ListVoiceCallsDto {
 }
 
 export class VoiceWebhookEventDto {
-  @ApiPropertyOptional({ example: 'CA123456789' })
+  @ApiProperty({ example: 'CA123456789' })
   @IsString()
-  @IsOptional()
-  providerCallId?: string;
+  @MinLength(1)
+  providerCallId: string;
 
   @ApiPropertyOptional({ example: '+15551234567' })
   @IsString()
@@ -339,6 +344,7 @@ export class RouteVoiceCallDto {
 
   @ApiPropertyOptional({ example: '+15559876543' })
   @IsString()
+  @Matches(/^\+[1-9]\d{7,14}$/)
   @IsOptional()
   transferTo?: string;
 

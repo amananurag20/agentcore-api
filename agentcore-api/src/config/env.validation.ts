@@ -579,14 +579,48 @@ class EnvironmentVariables {
   @IsOptional()
   CUSTOMER_CHAT_AUTO_HANDOFF_ON_FAILURE = true;
 
-  @Transform(({ value }) => value === 'true' || value === true)
+  @Transform(
+    ({ value }) => value === undefined || value === 'true' || value === true,
+  )
   @IsBoolean()
   @IsOptional()
-  VOICE_WEBHOOK_SIGNATURE_REQUIRED = false;
+  VOICE_WEBHOOK_SIGNATURE_REQUIRED = true;
+
+  @IsString()
+  @IsOptional()
+  VOICE_WEBHOOK_PUBLIC_BASE_URL?: string;
+
+  @Transform(({ value }) => Number(value ?? 5000))
+  @IsInt()
+  @Min(1000)
+  @Max(30000)
+  @IsOptional()
+  VOICE_PROVIDER_TIMEOUT_MS = 5000;
+
+  @Transform(({ value }) => Number(value ?? 8000))
+  @IsInt()
+  @Min(1000)
+  @Max(30000)
+  @IsOptional()
+  VOICE_AI_TIMEOUT_MS = 8000;
 
   @IsString()
   @IsOptional()
   WHATSAPP_OUTBOUND_MODE?: 'mock' | 'live';
+
+  @Transform(({ value }) => Number(value ?? 10000))
+  @IsInt()
+  @Min(1000)
+  @Max(120000)
+  @IsOptional()
+  WHATSAPP_PROVIDER_TIMEOUT_MS = 10000;
+
+  @Transform(({ value }) => Number(value ?? 5))
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  @IsOptional()
+  WHATSAPP_INBOUND_QUEUE_CONCURRENCY = 5;
 
   @IsString()
   @IsOptional()

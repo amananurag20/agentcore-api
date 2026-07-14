@@ -41,6 +41,9 @@ import { VoiceReceptionistService } from './voice-receptionist.service';
 type RawBodyRequest = {
   rawBody?: Buffer;
   headers: Record<string, string | string[] | undefined>;
+  protocol?: string;
+  originalUrl?: string;
+  get?: (name: string) => string | undefined;
 };
 
 @ApiTags('Voice Receptionist')
@@ -195,6 +198,11 @@ export class VoiceReceptionistWebhookController {
       body,
       request.rawBody,
       request.headers,
+      {
+        protocol: request.protocol,
+        host: request.get?.('host'),
+        originalUrl: request.originalUrl,
+      },
     );
   }
 }

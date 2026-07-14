@@ -300,13 +300,9 @@ interface WhatsAppConversationListResponseBody {
 }
 
 interface WhatsAppInboundWebhookResponseBody {
-  conversation: WhatsAppConversationResponseBody;
-  inboundMessage: WhatsAppMessageResponseBody;
-  assistantMessage?: WhatsAppMessageResponseBody | null;
-  delivery: {
-    provider: string;
-    status: string;
-  };
+  received: boolean;
+  accepted: number;
+  duplicates: number;
 }
 
 interface VoiceConfigResponseBody {
@@ -1286,7 +1282,8 @@ describe('AppController (e2e)', () => {
   it('/whatsapp-assistant handles inbound RAG, handoff, transcript, and agent replies', async () => {
     const loginBody = await loginAsAdmin();
     const suffix = Date.now();
-    const contactWaId = `1555${suffix}`;
+    const contactWaId = `1555${String(suffix).slice(-10)}`;
+    const appSecret = `app-secret-${suffix}`;
     const allowedAnswer = `E2E WhatsApp support ${suffix}: WhatsApp customers can book appointments from 9am to 3pm.`;
 
     await request(app.getHttpServer())
@@ -1320,6 +1317,7 @@ describe('AppController (e2e)', () => {
         phoneNumberId: `phone-${suffix}`,
         accessToken: 'test-access-token',
         webhookVerifyToken: `verify-${suffix}`,
+        appSecret,
         defaultLocale: 'en',
       })
       .expect(201);
@@ -1346,29 +1344,72 @@ describe('AppController (e2e)', () => {
       })
       .expect(403);
 
+    const inboundPayload = {
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          changes: [
+            {
+              field: 'messages',
+              value: {
+                metadata: { phone_number_id: `phone-${suffix}` },
+                contacts: [
+                  {
+                    wa_id: contactWaId,
+                    profile: { name: 'WhatsApp Customer' },
+                  },
+                ],
+                messages: [
+                  {
+                    from: contactWaId,
+                    id: `wamid-${suffix}`,
+                    timestamp: String(Math.floor(Date.now() / 1000)),
+                    type: 'text',
+                    text: {
+                      body: 'When can WhatsApp customers book appointments?',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const inboundSignature = createHmac('sha256', appSecret)
+      .update(JSON.stringify(inboundPayload))
+      .digest('hex');
     const inbound = await request(app.getHttpServer())
       .post(`/api/v1/whatsapp-assistant/webhook/${configBody.id}/inbound`)
-      .send({
-        contactWaId,
-        contactName: 'WhatsApp Customer',
-        contactPhone: `+${contactWaId}`,
-        providerMessageId: `wamid-${suffix}`,
-        type: 'text',
-        content: 'When can WhatsApp customers book appointments?',
-      })
-      .expect(201);
+      .set('X-Hub-Signature-256', `sha256=${inboundSignature}`)
+      .send(inboundPayload)
+      .expect(200);
     const inboundBody = inbound.body as WhatsAppInboundWebhookResponseBody;
 
-    expect(inboundBody.conversation.status).toBe('open');
-    expect(inboundBody.inboundMessage.role).toBe('contact');
-    expect(inboundBody.assistantMessage?.role).toBe('assistant');
-    expect(inboundBody.assistantMessage?.content).toContain(
+    expect(inboundBody).toEqual({ received: true, accepted: 1, duplicates: 0 });
+
+    let processedConversation: WhatsAppConversationResponseBody | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/whatsapp-assistant/conversations')
+        .query({ search: contactWaId, limit: 10 })
+        .set('Authorization', `Bearer ${loginBody.accessToken}`)
+        .expect(200);
+      const body = response.body as WhatsAppConversationListResponseBody;
+      processedConversation = body.data.find(
+        (item) => item.contactWaId === contactWaId,
+      );
+      if ((processedConversation?.messages.length ?? 0) >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    expect(processedConversation?.status).toBe('open');
+    expect(processedConversation?.messages[0]?.role).toBe('contact');
+    expect(processedConversation?.messages[1]?.role).toBe('assistant');
+    expect(processedConversation?.messages[1]?.content).toContain(
       'WhatsApp customers can book appointments',
     );
-    expect(inboundBody.delivery).toMatchObject({
-      provider: 'mock',
-      status: 'queued',
-    });
+    const conversationId = processedConversation!.id;
 
     await request(app.getHttpServer())
       .get('/api/v1/whatsapp-assistant/conversations')
@@ -1379,15 +1420,11 @@ describe('AppController (e2e)', () => {
         const body = response.body as WhatsAppConversationListResponseBody;
 
         expect(body.total).toBeGreaterThanOrEqual(1);
-        expect(
-          body.data.some((item) => item.id === inboundBody.conversation.id),
-        ).toBe(true);
+        expect(body.data.some((item) => item.id === conversationId)).toBe(true);
       });
 
     await request(app.getHttpServer())
-      .get(
-        `/api/v1/whatsapp-assistant/conversations/${inboundBody.conversation.id}`,
-      )
+      .get(`/api/v1/whatsapp-assistant/conversations/${conversationId}`)
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .expect(200)
       .expect((response) => {
@@ -1402,7 +1439,7 @@ describe('AppController (e2e)', () => {
 
     await request(app.getHttpServer())
       .patch(
-        `/api/v1/whatsapp-assistant/conversations/${inboundBody.conversation.id}/handoff`,
+        `/api/v1/whatsapp-assistant/conversations/${conversationId}/handoff`,
       )
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .expect(200)
@@ -1412,24 +1449,46 @@ describe('AppController (e2e)', () => {
         expect(body.status).toBe('waiting_for_agent');
       });
 
+    const handoffPayload = {
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          changes: [
+            {
+              field: 'messages',
+              value: {
+                metadata: { phone_number_id: `phone-${suffix}` },
+                messages: [
+                  {
+                    from: contactWaId,
+                    id: `wamid-handoff-${suffix}`,
+                    timestamp: String(Math.floor(Date.now() / 1000)),
+                    type: 'text',
+                    text: { body: 'I still need a human.' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const handoffSignature = createHmac('sha256', appSecret)
+      .update(JSON.stringify(handoffPayload))
+      .digest('hex');
     await request(app.getHttpServer())
       .post(`/api/v1/whatsapp-assistant/webhook/${configBody.id}/inbound`)
-      .send({
-        contactWaId,
-        type: 'text',
-        content: 'I still need a human.',
-      })
-      .expect(201)
+      .set('X-Hub-Signature-256', `sha256=${handoffSignature}`)
+      .send(handoffPayload)
+      .expect(200)
       .expect((response) => {
         const body = response.body as WhatsAppInboundWebhookResponseBody;
-
-        expect(body.assistantMessage).toBeNull();
-        expect(body.delivery.status).toBe('handoff_waiting');
+        expect(body.accepted).toBe(1);
       });
 
     await request(app.getHttpServer())
       .post(
-        `/api/v1/whatsapp-assistant/conversations/${inboundBody.conversation.id}/agent-messages`,
+        `/api/v1/whatsapp-assistant/conversations/${conversationId}/agent-messages`,
       )
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .send({ content: 'A human agent is joining this WhatsApp chat.' })
@@ -1451,7 +1510,7 @@ describe('AppController (e2e)', () => {
 
     await request(app.getHttpServer())
       .patch(
-        `/api/v1/whatsapp-assistant/conversations/${inboundBody.conversation.id}/status`,
+        `/api/v1/whatsapp-assistant/conversations/${conversationId}/status`,
       )
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .send({ status: 'closed' })
@@ -1513,6 +1572,18 @@ describe('AppController (e2e)', () => {
     expect(configBody.hasApiKey).toBe(true);
     expect(configBody.hasWebhookVerifyToken).toBe(true);
 
+    const postVoiceEvent = (payload: Record<string, unknown>) => {
+      const json = JSON.stringify(payload);
+      const eventSignature = createHmac('sha256', 'test-voice-api-key')
+        .update(Buffer.from(json))
+        .digest('hex');
+      return request(app.getHttpServer())
+        .post(`/api/v1/voice-receptionist/webhook/${configBody.id}/events`)
+        .set('Content-Type', 'application/json')
+        .set('x-agentcore-signature', `sha256=${eventSignature}`)
+        .send(json);
+    };
+
     await request(app.getHttpServer())
       .get(`/api/v1/voice-receptionist/webhook/${configBody.id}`)
       .query({
@@ -1530,16 +1601,13 @@ describe('AppController (e2e)', () => {
       })
       .expect(403);
 
-    await request(app.getHttpServer())
-      .post(`/api/v1/voice-receptionist/webhook/${configBody.id}/events`)
-      .send({
-        providerCallId,
-        fromNumber: '+15551230000',
-        toNumber: `+1555${suffix}`,
-        callerName: 'Voice Customer',
-        eventType: 'call_started',
-      })
-      .expect(201);
+    await postVoiceEvent({
+      providerCallId,
+      fromNumber: '+15551230000',
+      toNumber: `+1555${suffix}`,
+      callerName: 'Voice Customer',
+      eventType: 'call_started',
+    }).expect(201);
 
     const signedPayload = {
       providerCallId,
@@ -1559,15 +1627,12 @@ describe('AppController (e2e)', () => {
       .send(signedJson)
       .expect(201);
 
-    const transcript = await request(app.getHttpServer())
-      .post(`/api/v1/voice-receptionist/webhook/${configBody.id}/events`)
-      .send({
-        providerCallId,
-        eventType: 'transcript',
-        content: 'When can voice callers reach reception?',
-        confidence: 0.96,
-      })
-      .expect(201);
+    const transcript = await postVoiceEvent({
+      providerCallId,
+      eventType: 'transcript',
+      content: 'When can voice callers reach reception?',
+      confidence: 0.96,
+    }).expect(201);
     const transcriptBody = transcript.body as VoiceWebhookResponseBody;
 
     expect(transcriptBody.call.status).toBe('in_progress');
@@ -1581,14 +1646,11 @@ describe('AppController (e2e)', () => {
       status: 'queued',
     });
 
-    await request(app.getHttpServer())
-      .post(`/api/v1/voice-receptionist/webhook/${configBody.id}/events`)
-      .send({
-        providerCallId,
-        eventType: 'barge_in',
-        content: 'Actually I need a human.',
-      })
-      .expect(201);
+    await postVoiceEvent({
+      providerCallId,
+      eventType: 'barge_in',
+      content: 'Actually I need a human.',
+    }).expect(201);
 
     await request(app.getHttpServer())
       .get('/api/v1/voice-receptionist/calls')

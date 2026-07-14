@@ -1,12 +1,18 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, VoiceReceptionistConfig } from '@prisma/client';
 import { CryptoService } from '../crypto/crypto.service';
 
 export type VoiceProviderActionResult = {
   provider: 'mock' | 'twilio' | 'sip' | 'custom';
-  status: 'queued' | 'sent';
+  status: 'queued' | 'sent' | 'failed';
   providerActionId: string;
+  error?: string;
 };
 
 @Injectable()
@@ -24,10 +30,19 @@ export class VoiceOutboundService {
     content: string;
   }): Promise<VoiceProviderActionResult> {
     if (this.shouldUseLiveTwilio(input.config)) {
+      const gatherUrl = this.getTwilioCallbackUrl(
+        input.config,
+        'twilioGatherUrl',
+      );
+      if (!gatherUrl) {
+        throw new ServiceUnavailableException(
+          'settings.twilioGatherUrl is required for an interactive Twilio call',
+        );
+      }
       return this.updateTwilioCall({
         config: input.config,
         providerCallId: input.providerCallId,
-        twiml: `<Response><Say>${this.escapeTwiml(input.content)}</Say></Response>`,
+        twiml: this.gatherTwiml(input.content, gatherUrl),
         actionPrefix: 'twilio-tts',
       });
     }
@@ -35,16 +50,48 @@ export class VoiceOutboundService {
     return this.mockSpeakText(input);
   }
 
+  async interruptCall(input: {
+    config: VoiceReceptionistConfig;
+    providerCallId?: string | null;
+  }): Promise<VoiceProviderActionResult> {
+    if (this.shouldUseLiveTwilio(input.config)) {
+      const gatherUrl = this.getTwilioCallbackUrl(
+        input.config,
+        'twilioGatherUrl',
+      );
+      if (!gatherUrl) {
+        throw new ServiceUnavailableException(
+          'settings.twilioGatherUrl is required to interrupt Twilio playback',
+        );
+      }
+      return this.updateTwilioCall({
+        config: input.config,
+        providerCallId: input.providerCallId,
+        twiml: this.gatherTwiml('', gatherUrl),
+        actionPrefix: 'twilio-interrupt',
+      });
+    }
+
+    return {
+      provider: 'mock',
+      status: 'queued',
+      providerActionId: `mock-interrupt-${Date.now()}`,
+    };
+  }
+
   async transferCall(input: {
     config: VoiceReceptionistConfig;
     providerCallId?: string | null;
     transferTo?: string | null;
   }): Promise<VoiceProviderActionResult> {
+    if (!input.transferTo) {
+      throw new BadRequestException('A transfer phone number is required');
+    }
     if (this.shouldUseLiveTwilio(input.config) && input.transferTo) {
       return this.updateTwilioCall({
         config: input.config,
         providerCallId: input.providerCallId,
-        twiml: `<Response><Dial>${this.escapeTwiml(input.transferTo)}</Dial></Response>`,
+        twiml: `<Response><Dial timeout="20">${this.escapeTwiml(input.transferTo)}</Dial></Response>`,
         actionPrefix: 'twilio-transfer',
       });
     }
@@ -57,11 +104,19 @@ export class VoiceOutboundService {
     providerCallId?: string | null;
   }): Promise<VoiceProviderActionResult> {
     if (this.shouldUseLiveTwilio(input.config)) {
+      const settings = this.toRecord(input.config.settings);
+      const prompt =
+        typeof settings.voicemailPrompt === 'string'
+          ? settings.voicemailPrompt
+          : 'Please leave a voicemail after the tone.';
+      const maxLength =
+        typeof settings.voicemailMaxLengthSeconds === 'number'
+          ? Math.min(600, Math.max(10, settings.voicemailMaxLengthSeconds))
+          : 120;
       return this.updateTwilioCall({
         config: input.config,
         providerCallId: input.providerCallId,
-        twiml:
-          '<Response><Say>Please leave a voicemail after the tone.</Say><Record maxLength="120" /></Response>',
+        twiml: `<Response><Say>${this.escapeTwiml(prompt)}</Say><Record maxLength="${maxLength}" playBeep="true" /></Response>`,
         actionPrefix: 'twilio-voicemail',
       });
     }
@@ -143,14 +198,9 @@ export class VoiceOutboundService {
       : undefined;
 
     if (!accountSid || !authToken || !input.providerCallId) {
-      this.logger.warn(
-        `Twilio Voice credentials/call id missing for config=${input.config.id}; falling back to mock`,
+      throw new ServiceUnavailableException(
+        `Twilio Voice credentials or call id are missing for config=${input.config.id}`,
       );
-      return {
-        provider: 'mock',
-        status: 'queued',
-        providerActionId: `mock-${input.actionPrefix}-${Date.now()}`,
-      };
     }
 
     const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
@@ -165,10 +215,7 @@ export class VoiceOutboundService {
         },
         body: form,
         signal: AbortSignal.timeout(
-          this.configService.get<number>(
-            'APPOINTMENT_PROVIDER_TIMEOUT_MS',
-            10_000,
-          ),
+          this.configService.get<number>('VOICE_PROVIDER_TIMEOUT_MS', 5_000),
         ),
       },
     );
@@ -208,6 +255,21 @@ export class VoiceOutboundService {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&apos;');
+  }
+
+  private gatherTwiml(content: string, gatherUrl: string): string {
+    const prompt = content ? `<Say>${this.escapeTwiml(content)}</Say>` : '';
+    return `<Response><Gather input="speech dtmf" action="${this.escapeTwiml(gatherUrl)}" method="POST" speechTimeout="auto" actionOnEmptyResult="true">${prompt}</Gather></Response>`;
+  }
+
+  private getTwilioCallbackUrl(
+    config: VoiceReceptionistConfig,
+    key: string,
+  ): string | undefined {
+    const value = this.toRecord(config.settings)[key];
+    return typeof value === 'string' && /^https:\/\//.test(value)
+      ? value
+      : undefined;
   }
 
   private toRecord(value: Prisma.JsonValue): Record<string, unknown> {

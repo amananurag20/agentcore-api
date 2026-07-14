@@ -1,54 +1,54 @@
 model AppointmentService {
-  id                  String                    @id @default(uuid())
-  organizationId      String                    @map("organization_id")
-  organization        Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  name                String
-  description         String?
-  durationMinutes     Int                       @map("duration_minutes")
-  bufferBeforeMinutes Int                       @default(0) @map("buffer_before_minutes")
-  bufferAfterMinutes  Int                       @default(0) @map("buffer_after_minutes")
-  priceCents          Int?                      @map("price_cents")
-  currency            String                    @default("USD")
-  maxAttendees        Int                       @default(1) @map("max_attendees")
-  cancellationWindowMinutes Int?                @map("cancellation_window_minutes")
-  rescheduleWindowMinutes Int?                  @map("reschedule_window_minutes")
-  waitlistEnabled     Boolean                   @default(true) @map("waitlist_enabled")
-  status              AppointmentServiceStatus  @default(active)
-  metadata            Json                      @default("{}")
-  staffServices       AppointmentStaffService[]
-  resourceRequirements AppointmentServiceResource[]
-  bookings            AppointmentBooking[]
-  recurrenceSeries    AppointmentRecurrenceSeries[]
-  waitlistEntries     AppointmentWaitlistEntry[]
-  createdAt           DateTime                  @default(now()) @map("created_at")
-  updatedAt           DateTime                  @updatedAt @map("updated_at")
+  id                        String                        @id @default(uuid())
+  organizationId            String                        @map("organization_id")
+  organization              Organization                  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name                      String
+  description               String?
+  durationMinutes           Int                           @map("duration_minutes")
+  bufferBeforeMinutes       Int                           @default(0) @map("buffer_before_minutes")
+  bufferAfterMinutes        Int                           @default(0) @map("buffer_after_minutes")
+  priceCents                Int?                          @map("price_cents")
+  currency                  String                        @default("USD")
+  maxAttendees              Int                           @default(1) @map("max_attendees")
+  cancellationWindowMinutes Int?                          @map("cancellation_window_minutes")
+  rescheduleWindowMinutes   Int?                          @map("reschedule_window_minutes")
+  waitlistEnabled           Boolean                       @default(true) @map("waitlist_enabled")
+  status                    AppointmentServiceStatus      @default(active)
+  metadata                  Json                          @default("{}")
+  staffServices             AppointmentStaffService[]
+  resourceRequirements      AppointmentServiceResource[]
+  bookings                  AppointmentBooking[]
+  recurrenceSeries          AppointmentRecurrenceSeries[]
+  waitlistEntries           AppointmentWaitlistEntry[]
+  createdAt                 DateTime                      @default(now()) @map("created_at")
+  updatedAt                 DateTime                      @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@map("appointment_services")
 }
 
 model AppointmentStaff {
-  id             String                         @id @default(uuid())
-  organizationId String                         @map("organization_id")
-  organization   Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  userId         String?                        @map("user_id")
-  user           User?                          @relation(fields: [userId], references: [id], onDelete: SetNull)
-  name           String
-  email          String?
-  phone          String?
-  timezone       String                         @default("UTC")
-  status         AppointmentStaffStatus         @default(active)
-  metadata       Json                           @default("{}")
-  services       AppointmentStaffService[]
-  resources      AppointmentStaffResource[]
-  availability   AppointmentStaffAvailability[]
-  timeOff        AppointmentStaffTimeOff[]
-  bookings       AppointmentBooking[]
-  recurrenceSeries AppointmentRecurrenceSeries[]
-  waitlistEntries AppointmentWaitlistEntry[]
+  id                  String                          @id @default(uuid())
+  organizationId      String                          @map("organization_id")
+  organization        Organization                    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId              String?                         @map("user_id")
+  user                User?                           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name                String
+  email               String?
+  phone               String?
+  timezone            String                          @default("UTC")
+  status              AppointmentStaffStatus          @default(active)
+  metadata            Json                            @default("{}")
+  services            AppointmentStaffService[]
+  resources           AppointmentStaffResource[]
+  availability        AppointmentStaffAvailability[]
+  timeOff             AppointmentStaffTimeOff[]
+  bookings            AppointmentBooking[]
+  recurrenceSeries    AppointmentRecurrenceSeries[]
+  waitlistEntries     AppointmentWaitlistEntry[]
   calendarConnections AppointmentCalendarConnection[]
-  createdAt      DateTime                       @default(now()) @map("created_at")
-  updatedAt      DateTime                       @updatedAt @map("updated_at")
+  createdAt           DateTime                        @default(now()) @map("created_at")
+  updatedAt           DateTime                        @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@index([userId])
@@ -69,32 +69,32 @@ model AppointmentStaffService {
 }
 
 model AppointmentResource {
-  id             String                    @id @default(uuid())
-  organizationId String                    @map("organization_id")
-  organization   Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  id             String                       @id @default(uuid())
+  organizationId String                       @map("organization_id")
+  organization   Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name           String
-  type           String                    @default("generic")
-  capacity       Int                       @default(1)
-  status         AppointmentResourceStatus @default(active)
-  metadata       Json                      @default("{}")
+  type           String                       @default("generic")
+  capacity       Int                          @default(1)
+  status         AppointmentResourceStatus    @default(active)
+  metadata       Json                         @default("{}")
   services       AppointmentServiceResource[]
   staff          AppointmentStaffResource[]
   timeOff        AppointmentResourceTimeOff[]
   allocations    AppointmentBookingResource[]
-  createdAt      DateTime                  @default(now()) @map("created_at")
-  updatedAt      DateTime                  @updatedAt @map("updated_at")
+  createdAt      DateTime                     @default(now()) @map("created_at")
+  updatedAt      DateTime                     @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@map("appointment_resources")
 }
 
 model AppointmentServiceResource {
-  serviceId String              @map("service_id")
-  service   AppointmentService  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
-  resourceId String             @map("resource_id")
+  serviceId  String              @map("service_id")
+  service    AppointmentService  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  resourceId String              @map("resource_id")
   resource   AppointmentResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
-  quantity   Int                @default(1)
-  createdAt  DateTime           @default(now()) @map("created_at")
+  quantity   Int                 @default(1)
+  createdAt  DateTime            @default(now()) @map("created_at")
 
   @@id([serviceId, resourceId])
   @@index([resourceId])
@@ -166,37 +166,37 @@ model AppointmentStaffTimeOff {
 }
 
 model AppointmentBooking {
-  id                 String                   @id @default(uuid())
-  organizationId     String                   @map("organization_id")
-  organization       Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  serviceId          String                   @map("service_id")
-  service            AppointmentService       @relation(fields: [serviceId], references: [id], onDelete: Restrict)
-  staffId            String                   @map("staff_id")
-  staff              AppointmentStaff         @relation(fields: [staffId], references: [id], onDelete: Restrict)
-  status             AppointmentBookingStatus @default(confirmed)
-  customerName       String                   @map("customer_name")
-  customerEmail      String?                  @map("customer_email")
-  customerPhone      String?                  @map("customer_phone")
-  startAt            DateTime                 @map("start_at")
-  endAt              DateTime                 @map("end_at")
-  timezone           String                   @default("UTC")
-  notes              String?
-  cancellationReason String?                  @map("cancellation_reason")
-  rescheduledFromId  String?                  @map("rescheduled_from_id")
-  manageTokenHash    String?                  @map("manage_token_hash")
-  partySize          Int                      @default(1) @map("party_size")
-  isGroupBooking     Boolean                  @default(false) @map("is_group_booking")
-  checkedInAt        DateTime?                @map("checked_in_at")
-  seriesId           String?                  @map("series_id")
-  series             AppointmentRecurrenceSeries? @relation(fields: [seriesId], references: [id], onDelete: SetNull)
-  occurrenceIndex    Int?                     @map("occurrence_index")
-  metadata           Json                     @default("{}")
-  reminders          AppointmentReminder[]
-  resourceAllocations AppointmentBookingResource[]
-  calendarEvents      AppointmentCalendarEvent[]
-  claimedWaitlistEntry AppointmentWaitlistEntry? @relation("ClaimedWaitlistBooking")
-  createdAt          DateTime                 @default(now()) @map("created_at")
-  updatedAt          DateTime                 @updatedAt @map("updated_at")
+  id                   String                       @id @default(uuid())
+  organizationId       String                       @map("organization_id")
+  organization         Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  serviceId            String                       @map("service_id")
+  service              AppointmentService           @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  staffId              String                       @map("staff_id")
+  staff                AppointmentStaff             @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  status               AppointmentBookingStatus     @default(confirmed)
+  customerName         String                       @map("customer_name")
+  customerEmail        String?                      @map("customer_email")
+  customerPhone        String?                      @map("customer_phone")
+  startAt              DateTime                     @map("start_at")
+  endAt                DateTime                     @map("end_at")
+  timezone             String                       @default("UTC")
+  notes                String?
+  cancellationReason   String?                      @map("cancellation_reason")
+  rescheduledFromId    String?                      @map("rescheduled_from_id")
+  manageTokenHash      String?                      @map("manage_token_hash")
+  partySize            Int                          @default(1) @map("party_size")
+  isGroupBooking       Boolean                      @default(false) @map("is_group_booking")
+  checkedInAt          DateTime?                    @map("checked_in_at")
+  seriesId             String?                      @map("series_id")
+  series               AppointmentRecurrenceSeries? @relation(fields: [seriesId], references: [id], onDelete: SetNull)
+  occurrenceIndex      Int?                         @map("occurrence_index")
+  metadata             Json                         @default("{}")
+  reminders            AppointmentReminder[]
+  resourceAllocations  AppointmentBookingResource[]
+  calendarEvents       AppointmentCalendarEvent[]
+  claimedWaitlistEntry AppointmentWaitlistEntry?    @relation("ClaimedWaitlistBooking")
+  createdAt            DateTime                     @default(now()) @map("created_at")
+  updatedAt            DateTime                     @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@index([serviceId])
@@ -260,12 +260,12 @@ model AppointmentCalendarEvent {
 }
 
 model AppointmentBookingResource {
-  bookingId String              @map("booking_id")
-  booking   AppointmentBooking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  resourceId String             @map("resource_id")
+  bookingId  String              @map("booking_id")
+  booking    AppointmentBooking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  resourceId String              @map("resource_id")
   resource   AppointmentResource @relation(fields: [resourceId], references: [id], onDelete: Restrict)
-  quantity   Int                @default(1)
-  createdAt  DateTime           @default(now()) @map("created_at")
+  quantity   Int                 @default(1)
+  createdAt  DateTime            @default(now()) @map("created_at")
 
   @@id([bookingId, resourceId])
   @@index([resourceId])
@@ -273,22 +273,22 @@ model AppointmentBookingResource {
 }
 
 model AppointmentReminder {
-  id                String                    @id @default(uuid())
-  organizationId    String                    @map("organization_id")
-  organization      Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  bookingId         String                    @map("booking_id")
-  booking           AppointmentBooking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  offsetMinutes     Int                       @map("offset_minutes")
-  reminderType      String                    @map("reminder_type")
-  dueAt             DateTime                  @map("due_at")
-  status            AppointmentReminderStatus @default(pending)
-  attempts          Int                       @default(0)
-  channels          String[]                  @default([])
-  providerMessageIds Json                     @default("{}") @map("provider_message_ids")
-  lastError         String?                   @map("last_error")
-  sentAt            DateTime?                 @map("sent_at")
-  createdAt         DateTime                  @default(now()) @map("created_at")
-  updatedAt         DateTime                  @updatedAt @map("updated_at")
+  id                 String                    @id @default(uuid())
+  organizationId     String                    @map("organization_id")
+  organization       Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bookingId          String                    @map("booking_id")
+  booking            AppointmentBooking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  offsetMinutes      Int                       @map("offset_minutes")
+  reminderType       String                    @map("reminder_type")
+  dueAt              DateTime                  @map("due_at")
+  status             AppointmentReminderStatus @default(pending)
+  attempts           Int                       @default(0)
+  channels           String[]                  @default([])
+  providerMessageIds Json                      @default("{}") @map("provider_message_ids")
+  lastError          String?                   @map("last_error")
+  sentAt             DateTime?                 @map("sent_at")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
 
   @@unique([bookingId, offsetMinutes])
   @@index([organizationId, status, dueAt])
@@ -297,18 +297,18 @@ model AppointmentReminder {
 }
 
 model AppointmentBookingPolicy {
-  organizationId             String       @id @map("organization_id")
-  organization               Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  cancellationWindowMinutes  Int          @default(0) @map("cancellation_window_minutes")
-  rescheduleWindowMinutes    Int          @default(0) @map("reschedule_window_minutes")
-  noShowGraceMinutes         Int          @default(30) @map("no_show_grace_minutes")
-  waitlistOfferMinutes       Int          @default(15) @map("waitlist_offer_minutes")
-  quietHoursEnabled          Boolean      @default(false) @map("quiet_hours_enabled")
-  quietHoursStart            String       @default("21:00") @map("quiet_hours_start")
-  quietHoursEnd              String       @default("08:00") @map("quiet_hours_end")
-  quietHoursTimezone         String       @default("UTC") @map("quiet_hours_timezone")
-  createdAt                  DateTime     @default(now()) @map("created_at")
-  updatedAt                  DateTime     @updatedAt @map("updated_at")
+  organizationId            String       @id @map("organization_id")
+  organization              Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  cancellationWindowMinutes Int          @default(0) @map("cancellation_window_minutes")
+  rescheduleWindowMinutes   Int          @default(0) @map("reschedule_window_minutes")
+  noShowGraceMinutes        Int          @default(30) @map("no_show_grace_minutes")
+  waitlistOfferMinutes      Int          @default(15) @map("waitlist_offer_minutes")
+  quietHoursEnabled         Boolean      @default(false) @map("quiet_hours_enabled")
+  quietHoursStart           String       @default("21:00") @map("quiet_hours_start")
+  quietHoursEnd             String       @default("08:00") @map("quiet_hours_end")
+  quietHoursTimezone        String       @default("UTC") @map("quiet_hours_timezone")
+  createdAt                 DateTime     @default(now()) @map("created_at")
+  updatedAt                 DateTime     @updatedAt @map("updated_at")
 
   @@map("appointment_booking_policies")
 }
@@ -329,29 +329,29 @@ model AppointmentBlackout {
 }
 
 model AppointmentRecurrenceSeries {
-  id                  String                            @id @default(uuid())
-  organizationId      String                            @map("organization_id")
-  organization        Organization                      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  serviceId           String                            @map("service_id")
-  service             AppointmentService                @relation(fields: [serviceId], references: [id], onDelete: Restrict)
-  staffId             String                            @map("staff_id")
-  staff               AppointmentStaff                  @relation(fields: [staffId], references: [id], onDelete: Restrict)
-  frequency           AppointmentRecurrenceFrequency
-  interval            Int                               @default(1)
-  occurrenceCount     Int                               @map("occurrence_count")
-  initialStartAt      DateTime                          @map("initial_start_at")
-  timezone            String                            @default("UTC")
-  customerName        String                            @map("customer_name")
-  customerEmail       String?                           @map("customer_email")
-  customerPhone       String?                           @map("customer_phone")
-  partySize           Int                               @default(1) @map("party_size")
-  notes               String?
-  status              AppointmentRecurrenceSeriesStatus @default(active)
-  manageTokenHash     String                            @map("manage_token_hash")
-  metadata            Json                              @default("{}")
-  bookings            AppointmentBooking[]
-  createdAt           DateTime                          @default(now()) @map("created_at")
-  updatedAt           DateTime                          @updatedAt @map("updated_at")
+  id              String                            @id @default(uuid())
+  organizationId  String                            @map("organization_id")
+  organization    Organization                      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  serviceId       String                            @map("service_id")
+  service         AppointmentService                @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  staffId         String                            @map("staff_id")
+  staff           AppointmentStaff                  @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  frequency       AppointmentRecurrenceFrequency
+  interval        Int                               @default(1)
+  occurrenceCount Int                               @map("occurrence_count")
+  initialStartAt  DateTime                          @map("initial_start_at")
+  timezone        String                            @default("UTC")
+  customerName    String                            @map("customer_name")
+  customerEmail   String?                           @map("customer_email")
+  customerPhone   String?                           @map("customer_phone")
+  partySize       Int                               @default(1) @map("party_size")
+  notes           String?
+  status          AppointmentRecurrenceSeriesStatus @default(active)
+  manageTokenHash String                            @map("manage_token_hash")
+  metadata        Json                              @default("{}")
+  bookings        AppointmentBooking[]
+  createdAt       DateTime                          @default(now()) @map("created_at")
+  updatedAt       DateTime                          @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@index([staffId, initialStartAt])
@@ -359,28 +359,28 @@ model AppointmentRecurrenceSeries {
 }
 
 model AppointmentWaitlistEntry {
-  id                String                    @id @default(uuid())
-  organizationId    String                    @map("organization_id")
-  organization      Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  serviceId         String                    @map("service_id")
-  service           AppointmentService        @relation(fields: [serviceId], references: [id], onDelete: Cascade)
-  staffId           String                    @map("staff_id")
-  staff             AppointmentStaff          @relation(fields: [staffId], references: [id], onDelete: Cascade)
-  startAt           DateTime                  @map("start_at")
-  endAt             DateTime                  @map("end_at")
-  timezone          String                    @default("UTC")
-  customerName      String                    @map("customer_name")
-  customerEmail     String?                   @map("customer_email")
-  customerPhone     String?                   @map("customer_phone")
-  partySize         Int                       @default(1) @map("party_size")
-  status            AppointmentWaitlistStatus @default(waiting)
-  position          Int
-  offerTokenHash    String?                   @unique @map("offer_token_hash")
-  offerExpiresAt    DateTime?                 @map("offer_expires_at")
-  claimedBookingId  String?                   @unique @map("claimed_booking_id")
-  claimedBooking    AppointmentBooking?       @relation("ClaimedWaitlistBooking", fields: [claimedBookingId], references: [id], onDelete: SetNull)
-  createdAt         DateTime                  @default(now()) @map("created_at")
-  updatedAt         DateTime                  @updatedAt @map("updated_at")
+  id               String                    @id @default(uuid())
+  organizationId   String                    @map("organization_id")
+  organization     Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  serviceId        String                    @map("service_id")
+  service          AppointmentService        @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  staffId          String                    @map("staff_id")
+  staff            AppointmentStaff          @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  startAt          DateTime                  @map("start_at")
+  endAt            DateTime                  @map("end_at")
+  timezone         String                    @default("UTC")
+  customerName     String                    @map("customer_name")
+  customerEmail    String?                   @map("customer_email")
+  customerPhone    String?                   @map("customer_phone")
+  partySize        Int                       @default(1) @map("party_size")
+  status           AppointmentWaitlistStatus @default(waiting)
+  position         Int
+  offerTokenHash   String?                   @unique @map("offer_token_hash")
+  offerExpiresAt   DateTime?                 @map("offer_expires_at")
+  claimedBookingId String?                   @unique @map("claimed_booking_id")
+  claimedBooking   AppointmentBooking?       @relation("ClaimedWaitlistBooking", fields: [claimedBookingId], references: [id], onDelete: SetNull)
+  createdAt        DateTime                  @default(now()) @map("created_at")
+  updatedAt        DateTime                  @updatedAt @map("updated_at")
 
   @@unique([serviceId, staffId, startAt, customerEmail, customerPhone])
   @@index([organizationId, status, startAt])
