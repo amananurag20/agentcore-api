@@ -41,6 +41,9 @@ export class CustomerChatConversationDto {
   @ApiProperty({ enum: ['open', 'waiting_for_agent', 'closed'] })
   status: 'open' | 'waiting_for_agent' | 'closed';
 
+  @ApiProperty({ example: 3, minimum: 0 })
+  version: number;
+
   @ApiPropertyOptional({ example: 'visitor_123' })
   visitorId?: string | null;
 

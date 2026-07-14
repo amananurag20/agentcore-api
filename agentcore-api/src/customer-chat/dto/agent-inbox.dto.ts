@@ -6,6 +6,7 @@ import {
   IsString,
   IsUUID,
   Max,
+  MaxLength,
   MinLength,
   Min,
   ValidateIf,
@@ -56,9 +57,14 @@ export class ListCustomerChatConversationsDto {
 }
 
 export class SendAgentCustomerChatMessageDto {
-  @ApiProperty({ example: 'Thanks for waiting. I can help with that.' })
+  @ApiProperty({
+    example: 'Thanks for waiting. I can help with that.',
+    minLength: 1,
+    maxLength: 2000,
+  })
   @IsString()
   @MinLength(1)
+  @MaxLength(2000)
   content: string;
 }
 
@@ -70,10 +76,22 @@ export class AssignCustomerChatConversationDto {
   @ValidateIf((_, value) => value !== null && value !== undefined)
   @IsUUID()
   assignedAgentId?: string | null;
+
+  @ApiPropertyOptional({ example: 3, minimum: 0 })
+  @IsInt()
+  @Min(0)
+  @IsOptional()
+  expectedVersion?: number;
 }
 
 export class UpdateCustomerChatConversationStatusDto {
   @ApiProperty({ enum: CustomerChatConversationStatusDto })
   @IsEnum(CustomerChatConversationStatusDto)
   status: CustomerChatConversationStatusDto;
+
+  @ApiPropertyOptional({ example: 3, minimum: 0 })
+  @IsInt()
+  @Min(0)
+  @IsOptional()
+  expectedVersion?: number;
 }

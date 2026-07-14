@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -23,6 +24,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
 import {
   AssignCustomerChatConversationDto,
+  CustomerChatConversationStatusDto,
   ListCustomerChatConversationsDto,
   SendAgentCustomerChatMessageDto,
   UpdateCustomerChatConversationStatusDto,
@@ -56,6 +58,14 @@ type ConversationWithMessages = Prisma.CustomerChatConversationGetPayload<{
         };
       };
     };
+    widgetConfig: {
+      include: { folderScopes: true };
+    };
+  };
+}>;
+
+type ConversationContext = Prisma.CustomerChatConversationGetPayload<{
+  include: {
     widgetConfig: {
       include: { folderScopes: true };
     };
@@ -180,7 +190,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     id: string,
     input: SendCustomerChatMessageDto,
   ) {
-    const conversation = await this.findConversationForActor(currentUser, id);
+    const conversation = await this.findConversationContextForActor(
+      currentUser,
+      id,
+    );
     await this.assertCustomerChatEnabled(conversation.organizationId);
     return this.processVisitorMessage(currentUser, conversation, input, false);
   }
@@ -190,7 +203,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     conversationId: string,
     input: ListCustomerChatMessagesDto,
   ) {
-    const conversation = await this.findConversationForActor(
+    const conversation = await this.findConversationContextForActor(
       currentUser,
       conversationId,
     );
@@ -198,7 +211,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
   }
 
   async requestHandoff(currentUser: AuthenticatedUser, id: string) {
-    const conversation = await this.findConversationForActor(currentUser, id);
+    const conversation = await this.findConversationContextForActor(
+      currentUser,
+      id,
+    );
     const updatedConversation = await this.markConversationWaiting(
       conversation.id,
       conversation.organizationId,
@@ -225,7 +241,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     id: string,
     input: SendAgentCustomerChatMessageDto,
   ) {
-    const conversation = await this.findConversationForActor(currentUser, id);
+    const conversation = await this.findConversationContextForActor(
+      currentUser,
+      id,
+    );
     await this.assertCustomerChatEnabled(conversation.organizationId);
     if (
       conversation.assignedAgentId &&
@@ -242,14 +261,18 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     const now = new Date();
     const { agentMessage, updatedConversation } =
       await this.prisma.$transaction(async (transaction) => {
-        await transaction.customerChatConversation.update({
-          where: { id: conversation.id },
+        const claimed = await transaction.customerChatConversation.updateMany({
+          where: { id: conversation.id, version: conversation.version },
           data: {
             status: 'open',
             assignedAgentId: conversation.assignedAgentId ?? currentUser.sub,
             lastMessageAt: now,
+            version: { increment: 1 },
           },
         });
+        if (claimed.count === 0) {
+          throw this.conversationConflict();
+        }
         const message = await transaction.customerChatMessage.create({
           data: {
             organizationId: conversation.organizationId,
@@ -297,7 +320,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     id: string,
     input: AssignCustomerChatConversationDto,
   ) {
-    const conversation = await this.findConversationForActor(currentUser, id);
+    const conversation = await this.findConversationContextForActor(
+      currentUser,
+      id,
+    );
     const assignedAgentId = input.assignedAgentId ?? null;
 
     if (assignedAgentId) {
@@ -307,13 +333,25 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    const expectedVersion = input.expectedVersion ?? conversation.version;
     const updatedConversation = await this.prisma.$transaction(
-      async (transaction) =>
-        transaction.customerChatConversation.update({
+      async (transaction) => {
+        const changed = await transaction.customerChatConversation.updateMany({
+          where: { id: conversation.id, version: expectedVersion },
+          data: { assignedAgentId, version: { increment: 1 } },
+        });
+        if (changed.count === 0) {
+          throw this.conversationConflict();
+        }
+        const updated = await transaction.customerChatConversation.findUnique({
           where: { id: conversation.id },
-          data: { assignedAgentId },
           include: this.conversationInclude(),
-        }),
+        });
+        if (!updated) {
+          throw new NotFoundException('Customer chat conversation not found');
+        }
+        return updated;
+      },
     );
 
     await this.auditService.record({
@@ -340,21 +378,38 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     id: string,
     input: UpdateCustomerChatConversationStatusDto,
   ) {
-    const conversation = await this.findConversationForActor(currentUser, id);
+    const conversation = await this.findConversationContextForActor(
+      currentUser,
+      id,
+    );
 
+    const expectedVersion = input.expectedVersion ?? conversation.version;
     const updatedConversation = await this.prisma.$transaction(
-      async (transaction) =>
-        transaction.customerChatConversation.update({
-          where: { id: conversation.id },
+      async (transaction) => {
+        const changed = await transaction.customerChatConversation.updateMany({
+          where: { id: conversation.id, version: expectedVersion },
           data: {
             status: input.status,
             handoffRequestedAt:
-              input.status === 'waiting_for_agent'
+              input.status ===
+              CustomerChatConversationStatusDto.waiting_for_agent
                 ? (conversation.handoffRequestedAt ?? new Date())
                 : conversation.handoffRequestedAt,
+            version: { increment: 1 },
           },
+        });
+        if (changed.count === 0) {
+          throw this.conversationConflict();
+        }
+        const updated = await transaction.customerChatConversation.findUnique({
+          where: { id: conversation.id },
           include: this.conversationInclude(),
-        }),
+        });
+        if (!updated) {
+          throw new NotFoundException('Customer chat conversation not found');
+        }
+        return updated;
+      },
     );
 
     await this.auditService.record({
@@ -631,7 +686,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
   ) {
     this.assertPublicMessageLength(input.content);
 
-    const conversation = await this.findConversationForVisitor(
+    const conversation = await this.findConversationContextForVisitor(
       conversationId,
       visitorToken,
       origin,
@@ -649,7 +704,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     visitorToken?: string,
     origin?: string,
   ) {
-    const conversation = await this.findConversationForVisitor(
+    const conversation = await this.findConversationContextForVisitor(
       conversationId,
       visitorToken,
       origin,
@@ -662,7 +717,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     visitorToken?: string,
     origin?: string,
   ) {
-    const conversation = await this.findConversationForVisitor(
+    const conversation = await this.findConversationContextForVisitor(
       conversationId,
       visitorToken,
       origin,
@@ -690,7 +745,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     currentUser: AuthenticatedUser,
     conversationId: string,
   ) {
-    await this.findConversationForActor(currentUser, conversationId);
+    await this.findConversationContextForActor(currentUser, conversationId);
     return this.realtimeService.streamConversation(conversationId);
   }
 
@@ -705,13 +760,17 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     visitorToken?: string,
     origin?: string,
   ) {
-    await this.findConversationForVisitor(conversationId, visitorToken, origin);
+    await this.findConversationContextForVisitor(
+      conversationId,
+      visitorToken,
+      origin,
+    );
     return this.realtimeService.streamConversation(conversationId);
   }
 
   private async processVisitorMessage(
     currentUser: AuthenticatedUser,
-    conversation: ConversationWithMessages,
+    conversation: ConversationContext,
     input: SendCustomerChatMessageDto,
     publicResponse: boolean,
   ) {
@@ -738,6 +797,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
           where: { id: conversation.id },
           data: {
             lastMessageAt: now,
+            version: { increment: 1 },
             expiresAt: this.addDays(
               now,
               this.configService.get<number>(
@@ -855,6 +915,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             status: shouldAutoHandoff ? 'waiting_for_agent' : 'open',
             handoffRequestedAt: shouldAutoHandoff ? new Date() : undefined,
             lastMessageAt: new Date(),
+            version: { increment: 1 },
           },
         });
         if (claimed.count === 0) {
@@ -932,6 +993,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         data: {
           status: 'waiting_for_agent',
           handoffRequestedAt: new Date(),
+          version: { increment: 1 },
         },
       });
       if (changed.count > 0) {
@@ -1056,21 +1118,77 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     return conversation;
   }
 
+  private async findConversationContextForActor(
+    currentUser: AuthenticatedUser,
+    id: string,
+  ): Promise<ConversationContext> {
+    const conversation = await this.prisma.customerChatConversation.findUnique({
+      where: { id },
+      include: { widgetConfig: { include: { folderScopes: true } } },
+    });
+
+    if (!conversation) {
+      throw new NotFoundException('Customer chat conversation not found');
+    }
+
+    if (
+      !this.isSuperAdmin(currentUser) &&
+      conversation.organizationId !== currentUser.orgId
+    ) {
+      throw new NotFoundException('Customer chat conversation not found');
+    }
+
+    return conversation;
+  }
+
   private async findConversationForVisitor(
     id: string,
     visitorToken?: string,
     origin?: string,
   ): Promise<ConversationWithMessages> {
-    if (!visitorToken) {
-      throw new UnauthorizedException('Visitor token is required');
-    }
-
     const conversation = await this.prisma.customerChatConversation.findUnique({
       where: { id },
       include: this.conversationInclude(),
     });
 
-    if (!conversation?.visitorTokenHash) {
+    if (!conversation) {
+      throw new NotFoundException('Customer chat conversation not found');
+    }
+
+    this.assertVisitorConversationAccess(conversation, visitorToken, origin);
+
+    return conversation;
+  }
+
+  private async findConversationContextForVisitor(
+    id: string,
+    visitorToken?: string,
+    origin?: string,
+  ): Promise<ConversationContext> {
+    const conversation = await this.prisma.customerChatConversation.findUnique({
+      where: { id },
+      include: { widgetConfig: { include: { folderScopes: true } } },
+    });
+
+    if (!conversation) {
+      throw new NotFoundException('Customer chat conversation not found');
+    }
+
+    this.assertVisitorConversationAccess(conversation, visitorToken, origin);
+
+    return conversation;
+  }
+
+  private assertVisitorConversationAccess(
+    conversation: ConversationContext,
+    visitorToken?: string,
+    origin?: string,
+  ) {
+    if (!visitorToken) {
+      throw new UnauthorizedException('Visitor token is required');
+    }
+
+    if (!conversation.visitorTokenHash) {
       throw new NotFoundException('Customer chat conversation not found');
     }
 
@@ -1098,8 +1216,12 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException('Customer chat widget not found');
     }
     this.assertOriginAllowed(conversation.widgetConfig.allowedDomains, origin);
+  }
 
-    return conversation;
+  private conversationConflict() {
+    return new ConflictException(
+      'Conversation was updated by another request. Refresh and try again.',
+    );
   }
 
   private async loadConversation(
@@ -1287,6 +1409,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     const base = {
       id: conversation.id,
       status: conversation.status,
+      version: conversation.version,
       assignedAgentId:
         visibility === 'internal' ? conversation.assignedAgentId : null,
       messages: [...conversation.messages]

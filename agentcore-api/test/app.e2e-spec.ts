@@ -131,6 +131,7 @@ interface CustomerChatConversationResponseBody {
   id: string;
   organizationId: string;
   status: string;
+  version: number;
   assignedAgentId?: string | null;
   visitorId?: string | null;
   visitorName?: string | null;
@@ -2185,6 +2186,7 @@ describe('AppController (e2e)', () => {
         expect(body.status).toBe('waiting_for_agent');
       });
 
+    let assignedVersion = 0;
     await request(app.getHttpServer())
       .patch(
         `/api/v1/customer-chat/conversations/${conversationBody.id}/assignment`,
@@ -2196,6 +2198,8 @@ describe('AppController (e2e)', () => {
         const body = response.body as CustomerChatConversationResponseBody;
 
         expect(body.assignedAgentId).toBe(agentBody.id);
+        expect(body.version).toBeGreaterThan(conversationBody.version);
+        assignedVersion = body.version;
       });
 
     await request(app.getHttpServer())
@@ -2215,6 +2219,14 @@ describe('AppController (e2e)', () => {
           true,
         );
       });
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/customer-chat/conversations/${conversationBody.id}/agent-messages`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ content: 'x'.repeat(2001) })
+      .expect(400);
 
     await request(app.getHttpServer())
       .post(
@@ -2266,12 +2278,31 @@ describe('AppController (e2e)', () => {
         `/api/v1/customer-chat/conversations/${conversationBody.id}/status`,
       )
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
-      .send({ status: 'closed' })
+      .send({ status: 'closed', expectedVersion: assignedVersion })
+      .expect(409);
+
+    const latestConversation = await request(app.getHttpServer())
+      .get(`/api/v1/customer-chat/conversations/${conversationBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+    const latestConversationBody =
+      latestConversation.body as CustomerChatConversationResponseBody;
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/customer-chat/conversations/${conversationBody.id}/status`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        status: 'closed',
+        expectedVersion: latestConversationBody.version,
+      })
       .expect(200)
       .expect((response) => {
         const body = response.body as CustomerChatConversationResponseBody;
 
         expect(body.status).toBe('closed');
+        expect(body.version).toBe(latestConversationBody.version + 1);
       });
   });
 

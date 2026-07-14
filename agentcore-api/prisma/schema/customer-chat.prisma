@@ -15,6 +15,7 @@ model CustomerChatConversation {
   handoffRequestedAt    DateTime?                      @map("handoff_requested_at")
   lastMessageAt         DateTime                       @default(now()) @map("last_message_at")
   expiresAt             DateTime?                      @map("expires_at")
+  version               Int                            @default(0)
   metadata              Json                           @default("{}")
   messages              CustomerChatMessage[]
   createdAt             DateTime                       @default(now()) @map("created_at")
