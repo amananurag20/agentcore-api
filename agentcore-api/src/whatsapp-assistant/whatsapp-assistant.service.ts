@@ -512,6 +512,7 @@ export class WhatsAppAssistantService {
     const chatResult = await this.chatService.answerWithContext({
       organizationId,
       question: content,
+      safeFallback: true,
       context: searchResults.map((result) => ({
         content: result.content,
         score: result.score,

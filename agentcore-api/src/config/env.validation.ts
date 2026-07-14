@@ -446,6 +446,20 @@ class EnvironmentVariables {
   @IsOptional()
   PUBLIC_CHAT_MAX_MESSAGE_LENGTH = 2000;
 
+  @Transform(({ value }) => Number(value ?? 1000))
+  @IsInt()
+  @Min(1)
+  @Max(100000)
+  @IsOptional()
+  CUSTOMER_CHAT_SSE_MAX_CONNECTIONS = 1000;
+
+  @Transform(({ value }) => Number(value ?? 25))
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  @IsOptional()
+  CUSTOMER_CHAT_SSE_MAX_CONNECTIONS_PER_SCOPE = 25;
+
   @Transform(({ value }) => Number(value ?? 0))
   @IsInt()
   @Min(0)

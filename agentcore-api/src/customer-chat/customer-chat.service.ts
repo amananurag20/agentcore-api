@@ -769,7 +769,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       visitorToken,
       origin,
     );
-    return this.realtimeService.streamConversation(conversationId);
+    return this.realtimeService.streamPublicConversation(conversationId);
   }
 
   private async processVisitorMessage(

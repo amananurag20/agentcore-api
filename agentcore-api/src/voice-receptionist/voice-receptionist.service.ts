@@ -631,6 +631,7 @@ export class VoiceReceptionistService {
     const chatResult = await this.chatService.answerWithContext({
       organizationId: config.organizationId,
       question: content,
+      safeFallback: true,
       context: searchResults.map((result) => ({
         content: result.content,
         score: result.score,

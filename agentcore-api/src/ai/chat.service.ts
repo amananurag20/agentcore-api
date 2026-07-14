@@ -102,7 +102,7 @@ export class ChatService {
     providerConfig: AIProviderConfig,
     question: string,
     context: ChatContextChunk[],
-    safeFallback = false,
+    safeFallback = true,
   ): Promise<ChatResult> {
     const adapter = this.adapterRegistry.getAdapter(providerConfig);
 
@@ -168,17 +168,24 @@ export class ChatService {
     const contextText = context
       .map(
         (chunk, index) =>
-          `<knowledge_chunk index="${index + 1}" score="${chunk.score.toFixed(4)}">\n${chunk.content}\n</knowledge_chunk>`,
+          `<knowledge_chunk index="${index + 1}" score="${chunk.score.toFixed(4)}">\n${this.escapePromptData(chunk.content)}\n</knowledge_chunk>`,
       )
       .join('\n\n');
 
-    return `<business_knowledge>\n${contextText || 'No relevant knowledge was found.'}\n</business_knowledge>\n\n<customer_question>\n${question}\n</customer_question>`;
+    return `<business_knowledge>\n${contextText || 'No relevant knowledge was found.'}\n</business_knowledge>\n\n<customer_question>\n${this.escapePromptData(question)}\n</customer_question>`;
+  }
+
+  private escapePromptData(value: string): string {
+    return value
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
   }
 
   private createFallbackAnswer(
     question: string,
     context: ChatContextChunk[],
-    safeFallback = false,
+    safeFallback = true,
   ): string {
     void question;
     if (safeFallback || !context.length) {
