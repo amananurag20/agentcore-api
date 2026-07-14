@@ -2,12 +2,15 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { ChatService } from '../ai/chat.service';
 import { AuditService } from '../audit/audit.service';
 import { AppointmentBookingService } from '../appointment-booking/appointment-booking.service';
@@ -35,6 +38,8 @@ import {
   UpdateCustomerChatWidgetConfigDto,
 } from './dto/update-widget-config.dto';
 import { ListCustomerChatWidgetConfigsDto } from './dto/list-widget-configs.dto';
+import { ListCustomerChatMessagesDto } from './dto/list-messages.dto';
+import { CustomerChatRealtimeService } from './customer-chat-realtime.service';
 
 type WidgetConfigWithFolders = Prisma.CustomerChatWidgetConfigGetPayload<{
   include: { folderScopes: true };
@@ -58,7 +63,10 @@ type ConversationWithMessages = Prisma.CustomerChatConversationGetPayload<{
 }>;
 
 @Injectable()
-export class CustomerChatService {
+export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(CustomerChatService.name);
+  private retentionTimer?: NodeJS.Timeout;
+
   constructor(
     private readonly auditService: AuditService,
     private readonly appointmentBookingService: AppointmentBookingService,
@@ -67,7 +75,24 @@ export class CustomerChatService {
     private readonly knowledgeService: KnowledgeService,
     private readonly prisma: PrismaService,
     private readonly rateLimitService: RateLimitService,
+    private readonly realtimeService: CustomerChatRealtimeService,
   ) {}
+
+  onModuleInit() {
+    const intervalMs = this.configService.get<number>(
+      'CUSTOMER_CHAT_RETENTION_SWEEP_INTERVAL_MS',
+      60 * 60 * 1000,
+    );
+    this.retentionTimer = setInterval(() => {
+      void this.purgeExpiredConversations();
+    }, intervalMs);
+    this.retentionTimer.unref();
+    void this.purgeExpiredConversations();
+  }
+
+  onModuleDestroy() {
+    if (this.retentionTimer) clearInterval(this.retentionTimer);
+  }
 
   async createConversation(
     currentUser: AuthenticatedUser,
@@ -85,11 +110,16 @@ export class CustomerChatService {
         visitorId: input.visitorId,
         visitorName: input.visitorName,
         visitorEmail: input.visitorEmail,
+        expiresAt: this.addDays(
+          new Date(),
+          this.configService.get<number>('CUSTOMER_CHAT_RETENTION_DAYS', 90),
+        ),
         metadata: this.toJsonObject(input.metadata),
       },
       include: this.conversationInclude(),
     });
 
+    await this.publishConversationEvent(conversation, 'conversation.created');
     return this.toConversationResponse(conversation);
   }
 
@@ -128,7 +158,7 @@ export class CustomerChatService {
       this.prisma.customerChatConversation.count({ where }),
       this.prisma.customerChatConversation.findMany({
         where,
-        include: this.conversationInclude(),
+        include: this.conversationInclude(1),
         orderBy: { updatedAt: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
@@ -152,128 +182,27 @@ export class CustomerChatService {
   ) {
     const conversation = await this.findConversationForActor(currentUser, id);
     await this.assertCustomerChatEnabled(conversation.organizationId);
+    return this.processVisitorMessage(currentUser, conversation, input, false);
+  }
 
-    const visitorMessage = await this.prisma.customerChatMessage.create({
-      data: {
-        organizationId: conversation.organizationId,
-        conversationId: conversation.id,
-        role: 'visitor',
-        content: input.content,
-      },
-      include: {
-        citations: {
-          include: {
-            chunk: true,
-          },
-        },
-      },
-    });
-
-    if (input.appointmentAction) {
-      const result = await this.appointmentBookingService.executeAction(
-        conversation.organizationId,
-        input.appointmentAction,
-      );
-      const answer = this.appointmentBookingService.formatActionResult(result);
-      const assistantMessage = await this.prisma.customerChatMessage.create({
-        data: {
-          organizationId: conversation.organizationId,
-          conversationId: conversation.id,
-          role: 'assistant',
-          content: answer,
-          metadata: this.toJsonObject({
-            appointmentAction: input.appointmentAction,
-          }),
-        },
-        include: {
-          citations: { include: { chunk: true } },
-        },
-      });
-      const updatedConversation = await this.findConversationForActor(
-        currentUser,
-        id,
-      );
-      return {
-        conversation: this.toConversationResponse(updatedConversation),
-        visitorMessage: this.toMessageResponse(visitorMessage),
-        assistantMessage: this.toMessageResponse(assistantMessage),
-      };
-    }
-
-    const searchUser: AuthenticatedUser = {
-      ...currentUser,
-      orgId: conversation.organizationId,
-    };
-    const searchResults = await this.knowledgeService.search(searchUser, {
-      query: input.content,
-      limit: 5,
-      productKey: 'customer_chat',
-      folderIds:
-        conversation.widgetConfig?.knowledgeScope === 'folders'
-          ? conversation.widgetConfig.folderScopes.map(
-              (scope) => scope.folderId,
-            )
-          : undefined,
-    });
-    const chatResult = await this.chatService.answerWithContext({
-      organizationId: conversation.organizationId,
-      question: input.content,
-      context: searchResults.map((result) => ({
-        content: result.content,
-        score: result.score,
-      })),
-    });
-
-    const assistantMessage = await this.prisma.customerChatMessage.create({
-      data: {
-        organizationId: conversation.organizationId,
-        conversationId: conversation.id,
-        role: 'assistant',
-        content: chatResult.answer,
-        metadata: this.toJsonObject({
-          model: chatResult.model,
-          provider: chatResult.provider,
-          adapter: chatResult.adapter,
-          usedFallback: chatResult.usedFallback,
-          error: chatResult.error,
-        }),
-        citations: {
-          create: searchResults.map((result) => ({
-            chunkId: result.id,
-            score: result.score,
-          })),
-        },
-      },
-      include: {
-        citations: {
-          include: {
-            chunk: true,
-          },
-        },
-      },
-    });
-
-    const updatedConversation = await this.findConversationForActor(
+  async listMessages(
+    currentUser: AuthenticatedUser,
+    conversationId: string,
+    input: ListCustomerChatMessagesDto,
+  ) {
+    const conversation = await this.findConversationForActor(
       currentUser,
-      id,
+      conversationId,
     );
-
-    return {
-      conversation: this.toConversationResponse(updatedConversation),
-      visitorMessage: this.toMessageResponse(visitorMessage),
-      assistantMessage: this.toMessageResponse(assistantMessage, searchResults),
-    };
+    return this.loadMessagePage(conversation.id, input, false);
   }
 
   async requestHandoff(currentUser: AuthenticatedUser, id: string) {
     const conversation = await this.findConversationForActor(currentUser, id);
-
-    const updatedConversation =
-      await this.prisma.customerChatConversation.update({
-        where: { id: conversation.id },
-        data: { status: 'waiting_for_agent' },
-        include: this.conversationInclude(),
-      });
+    const updatedConversation = await this.markConversationWaiting(
+      conversation.id,
+      conversation.organizationId,
+    );
 
     await this.auditService.record({
       actor: currentUser,
@@ -282,6 +211,11 @@ export class CustomerChatService {
       entityType: 'customer_chat_conversation',
       entityId: conversation.id,
     });
+
+    await this.publishConversationEvent(
+      updatedConversation,
+      'handoff.requested',
+    );
 
     return this.toConversationResponse(updatedConversation);
   }
@@ -293,36 +227,50 @@ export class CustomerChatService {
   ) {
     const conversation = await this.findConversationForActor(currentUser, id);
     await this.assertCustomerChatEnabled(conversation.organizationId);
+    if (
+      conversation.assignedAgentId &&
+      conversation.assignedAgentId !== currentUser.sub &&
+      !currentUser.roles.some((role) =>
+        ['super_admin', 'org_admin', 'product_admin'].includes(role),
+      )
+    ) {
+      throw new ForbiddenException(
+        'This conversation is assigned to another agent',
+      );
+    }
 
-    const agentMessage = await this.prisma.customerChatMessage.create({
-      data: {
-        organizationId: conversation.organizationId,
-        conversationId: conversation.id,
-        role: 'agent',
-        content: input.content,
-        metadata: this.toJsonObject({
-          agentId: currentUser.sub,
-          agentEmail: currentUser.email,
-        }),
-      },
-      include: {
-        citations: {
-          include: {
-            chunk: true,
+    const now = new Date();
+    const { agentMessage, updatedConversation } =
+      await this.prisma.$transaction(async (transaction) => {
+        await transaction.customerChatConversation.update({
+          where: { id: conversation.id },
+          data: {
+            status: 'open',
+            assignedAgentId: conversation.assignedAgentId ?? currentUser.sub,
+            lastMessageAt: now,
           },
-        },
-      },
-    });
-
-    const updatedConversation =
-      await this.prisma.customerChatConversation.update({
-        where: { id: conversation.id },
-        data: {
-          status:
-            conversation.status === 'closed' ? 'open' : conversation.status,
-          assignedAgentId: conversation.assignedAgentId ?? currentUser.sub,
-        },
-        include: this.conversationInclude(),
+        });
+        const message = await transaction.customerChatMessage.create({
+          data: {
+            organizationId: conversation.organizationId,
+            conversationId: conversation.id,
+            role: 'agent',
+            content: input.content,
+            metadata: this.toJsonObject({
+              agentId: currentUser.sub,
+              agentEmail: currentUser.email,
+            }),
+          },
+          include: { citations: { include: { chunk: true } } },
+        });
+        const updated = await transaction.customerChatConversation.findUnique({
+          where: { id: conversation.id },
+          include: this.conversationInclude(),
+        });
+        if (!updated) {
+          throw new NotFoundException('Customer chat conversation not found');
+        }
+        return { agentMessage: message, updatedConversation: updated };
       });
 
     await this.auditService.record({
@@ -335,6 +283,8 @@ export class CustomerChatService {
         messageId: agentMessage.id,
       },
     });
+
+    await this.publishConversationEvent(updatedConversation, 'message.created');
 
     return {
       conversation: this.toConversationResponse(updatedConversation),
@@ -357,12 +307,14 @@ export class CustomerChatService {
       );
     }
 
-    const updatedConversation =
-      await this.prisma.customerChatConversation.update({
-        where: { id: conversation.id },
-        data: { assignedAgentId },
-        include: this.conversationInclude(),
-      });
+    const updatedConversation = await this.prisma.$transaction(
+      async (transaction) =>
+        transaction.customerChatConversation.update({
+          where: { id: conversation.id },
+          data: { assignedAgentId },
+          include: this.conversationInclude(),
+        }),
+    );
 
     await this.auditService.record({
       actor: currentUser,
@@ -375,6 +327,11 @@ export class CustomerChatService {
       },
     });
 
+    await this.publishConversationEvent(
+      updatedConversation,
+      'conversation.updated',
+    );
+
     return this.toConversationResponse(updatedConversation);
   }
 
@@ -385,12 +342,20 @@ export class CustomerChatService {
   ) {
     const conversation = await this.findConversationForActor(currentUser, id);
 
-    const updatedConversation =
-      await this.prisma.customerChatConversation.update({
-        where: { id: conversation.id },
-        data: { status: input.status },
-        include: this.conversationInclude(),
-      });
+    const updatedConversation = await this.prisma.$transaction(
+      async (transaction) =>
+        transaction.customerChatConversation.update({
+          where: { id: conversation.id },
+          data: {
+            status: input.status,
+            handoffRequestedAt:
+              input.status === 'waiting_for_agent'
+                ? (conversation.handoffRequestedAt ?? new Date())
+                : conversation.handoffRequestedAt,
+          },
+          include: this.conversationInclude(),
+        }),
+    );
 
     await this.auditService.record({
       actor: currentUser,
@@ -402,6 +367,11 @@ export class CustomerChatService {
         status: input.status,
       },
     });
+
+    await this.publishConversationEvent(
+      updatedConversation,
+      'conversation.updated',
+    );
 
     return this.toConversationResponse(updatedConversation);
   }
@@ -463,6 +433,7 @@ export class CustomerChatService {
     const folderIds =
       knowledgeScope === 'folders' ? (input.folderIds ?? []) : [];
     await this.assertWidgetFolders(organizationId, knowledgeScope, folderIds);
+    this.assertAllowedDomainsForWidget(input.allowedDomains ?? []);
 
     const config = await this.prisma.customerChatWidgetConfig.create({
       data: {
@@ -527,6 +498,9 @@ export class CustomerChatService {
       knowledgeScope,
       folderIds,
     );
+    if (input.allowedDomains !== undefined) {
+      this.assertAllowedDomainsForWidget(input.allowedDomains);
+    }
 
     const replaceFolderScopes =
       input.knowledgeScope !== undefined || input.folderIds !== undefined;
@@ -602,6 +576,7 @@ export class CustomerChatService {
     await this.assertCustomerChatEnabled(config.organizationId);
 
     const visitorToken = this.createVisitorToken();
+    const now = new Date();
     const conversation = await this.prisma.customerChatConversation.create({
       data: {
         organizationId: config.organizationId,
@@ -610,42 +585,422 @@ export class CustomerChatService {
         visitorName: input.visitorName,
         visitorEmail: input.visitorEmail,
         visitorTokenHash: this.hashVisitorToken(visitorToken),
+        visitorTokenExpiresAt: this.addHours(
+          now,
+          this.configService.get<number>(
+            'CUSTOMER_CHAT_VISITOR_SESSION_HOURS',
+            24,
+          ),
+        ),
+        lastMessageAt: now,
+        expiresAt: this.addDays(
+          now,
+          this.configService.get<number>('CUSTOMER_CHAT_RETENTION_DAYS', 90),
+        ),
         metadata: this.toJsonObject(input.metadata),
       },
       include: this.conversationInclude(),
     });
 
+    await this.publishConversationEvent(conversation, 'conversation.created');
     return {
-      conversation: this.toConversationResponse(conversation),
+      conversation: this.toConversationResponse(conversation, 'public'),
       visitorToken,
     };
   }
 
-  async getPublicConversation(conversationId: string, visitorToken?: string) {
+  async getPublicConversation(
+    conversationId: string,
+    visitorToken?: string,
+    origin?: string,
+  ) {
     const conversation = await this.findConversationForVisitor(
       conversationId,
       visitorToken,
+      origin,
     );
 
-    return this.toConversationResponse(conversation);
+    return this.toConversationResponse(conversation, 'public');
   }
 
   async sendPublicMessage(
     conversationId: string,
     input: SendPublicCustomerChatMessageDto,
     visitorToken?: string,
+    origin?: string,
   ) {
     this.assertPublicMessageLength(input.content);
 
     const conversation = await this.findConversationForVisitor(
       conversationId,
       visitorToken,
+      origin,
     );
     await this.limitPublicConversationMessages(conversation.id);
 
     const publicUser = this.createSystemUser(conversation.organizationId);
 
-    return this.sendMessage(publicUser, conversation.id, input);
+    return this.processVisitorMessage(publicUser, conversation, input, true);
+  }
+
+  async listPublicMessages(
+    conversationId: string,
+    input: ListCustomerChatMessagesDto,
+    visitorToken?: string,
+    origin?: string,
+  ) {
+    const conversation = await this.findConversationForVisitor(
+      conversationId,
+      visitorToken,
+      origin,
+    );
+    return this.loadMessagePage(conversation.id, input, true);
+  }
+
+  async requestPublicHandoff(
+    conversationId: string,
+    visitorToken?: string,
+    origin?: string,
+  ) {
+    const conversation = await this.findConversationForVisitor(
+      conversationId,
+      visitorToken,
+      origin,
+    );
+    const updatedConversation = await this.markConversationWaiting(
+      conversation.id,
+      conversation.organizationId,
+    );
+    await this.auditService.record({
+      actor: this.createSystemUser(conversation.organizationId),
+      organizationId: conversation.organizationId,
+      action: 'customer_chat.handoff_requested',
+      entityType: 'customer_chat_conversation',
+      entityId: conversation.id,
+      metadata: { source: 'public_widget' },
+    });
+    await this.publishConversationEvent(
+      updatedConversation,
+      'handoff.requested',
+    );
+    return this.toConversationResponse(updatedConversation, 'public');
+  }
+
+  async streamConversationForActor(
+    currentUser: AuthenticatedUser,
+    conversationId: string,
+  ) {
+    await this.findConversationForActor(currentUser, conversationId);
+    return this.realtimeService.streamConversation(conversationId);
+  }
+
+  streamInboxForActor(currentUser: AuthenticatedUser, organizationId?: string) {
+    return this.realtimeService.streamOrganization(
+      this.resolveOrganizationId(currentUser, organizationId),
+    );
+  }
+
+  async streamConversationForVisitor(
+    conversationId: string,
+    visitorToken?: string,
+    origin?: string,
+  ) {
+    await this.findConversationForVisitor(conversationId, visitorToken, origin);
+    return this.realtimeService.streamConversation(conversationId);
+  }
+
+  private async processVisitorMessage(
+    currentUser: AuthenticatedUser,
+    conversation: ConversationWithMessages,
+    input: SendCustomerChatMessageDto,
+    publicResponse: boolean,
+  ) {
+    const now = new Date();
+    const { visitorMessage, canAutoReply } = await this.prisma.$transaction(
+      async (transaction) => {
+        const current = await transaction.customerChatConversation.findUnique({
+          where: { id: conversation.id },
+          select: { status: true, assignedAgentId: true },
+        });
+        if (!current) {
+          throw new NotFoundException('Customer chat conversation not found');
+        }
+        const message = await transaction.customerChatMessage.create({
+          data: {
+            organizationId: conversation.organizationId,
+            conversationId: conversation.id,
+            role: 'visitor',
+            content: input.content,
+          },
+          include: { citations: { include: { chunk: true } } },
+        });
+        await transaction.customerChatConversation.update({
+          where: { id: conversation.id },
+          data: {
+            lastMessageAt: now,
+            expiresAt: this.addDays(
+              now,
+              this.configService.get<number>(
+                'CUSTOMER_CHAT_RETENTION_DAYS',
+                90,
+              ),
+            ),
+          },
+        });
+        return {
+          visitorMessage: message,
+          canAutoReply:
+            current.status === 'open' && current.assignedAgentId === null,
+        };
+      },
+    );
+
+    await this.realtimeService.publish({
+      type: 'message.created',
+      conversationId: conversation.id,
+      organizationId: conversation.organizationId,
+    });
+
+    if (!canAutoReply) {
+      const updatedConversation = await this.loadConversation(conversation.id);
+      return {
+        conversation: this.toConversationResponse(
+          updatedConversation,
+          publicResponse ? 'public' : 'internal',
+        ),
+        visitorMessage: this.toMessageResponse(
+          visitorMessage,
+          undefined,
+          publicResponse,
+        ),
+        assistantMessage: null,
+      };
+    }
+
+    let answer: string;
+    let metadata: Record<string, unknown>;
+    let searchResults: KnowledgeSearchRow[] = [];
+    let shouldAutoHandoff = false;
+
+    if (input.appointmentAction) {
+      const result = await this.appointmentBookingService.executeAction(
+        conversation.organizationId,
+        input.appointmentAction,
+      );
+      answer = this.appointmentBookingService.formatActionResult(result);
+      metadata = { appointmentAction: input.appointmentAction };
+    } else {
+      const searchUser: AuthenticatedUser = {
+        ...currentUser,
+        orgId: conversation.organizationId,
+      };
+      const candidates = await this.knowledgeService.search(searchUser, {
+        query: input.content,
+        limit: 10,
+        productKey: 'customer_chat',
+        folderIds:
+          conversation.widgetConfig?.knowledgeScope === 'folders'
+            ? conversation.widgetConfig.folderScopes.map(
+                (scope) => scope.folderId,
+              )
+            : undefined,
+      });
+      const minimumScore = this.configService.get<number>(
+        'CUSTOMER_CHAT_MIN_SIMILARITY_SCORE',
+        0.35,
+      );
+      searchResults = candidates
+        .filter((result) => result.score >= minimumScore)
+        .slice(0, 5);
+      const chatResult = await this.chatService.answerWithContext({
+        organizationId: conversation.organizationId,
+        question: input.content,
+        safeFallback: true,
+        context: searchResults.map((result) => ({
+          content: result.content,
+          score: result.score,
+        })),
+      });
+      answer = chatResult.answer;
+      metadata = {
+        model: chatResult.model,
+        provider: chatResult.provider,
+        adapter: chatResult.adapter,
+        usedFallback: chatResult.usedFallback,
+        error: chatResult.error,
+        retrieval: {
+          candidateCount: candidates.length,
+          acceptedCount: searchResults.length,
+          minimumScore,
+          topScore: candidates[0]?.score ?? null,
+        },
+      };
+      shouldAutoHandoff =
+        this.configService.get<boolean>(
+          'CUSTOMER_CHAT_AUTO_HANDOFF_ON_FAILURE',
+          true,
+        ) &&
+        (searchResults.length === 0 || chatResult.usedFallback);
+    }
+
+    const assistantMessage = await this.prisma.$transaction(
+      async (transaction) => {
+        const claimed = await transaction.customerChatConversation.updateMany({
+          where: {
+            id: conversation.id,
+            status: 'open',
+            assignedAgentId: null,
+          },
+          data: {
+            status: shouldAutoHandoff ? 'waiting_for_agent' : 'open',
+            handoffRequestedAt: shouldAutoHandoff ? new Date() : undefined,
+            lastMessageAt: new Date(),
+          },
+        });
+        if (claimed.count === 0) {
+          return null;
+        }
+        return transaction.customerChatMessage.create({
+          data: {
+            organizationId: conversation.organizationId,
+            conversationId: conversation.id,
+            role: 'assistant',
+            content: answer,
+            metadata: this.toJsonObject(metadata),
+            citations: {
+              create: searchResults.map((result) => ({
+                chunkId: result.id,
+                score: result.score,
+              })),
+            },
+          },
+          include: { citations: { include: { chunk: true } } },
+        });
+      },
+    );
+
+    const updatedConversation = await this.loadConversation(conversation.id);
+    if (assistantMessage) {
+      await this.publishConversationEvent(
+        updatedConversation,
+        shouldAutoHandoff ? 'handoff.requested' : 'message.created',
+      );
+    }
+    if (assistantMessage && shouldAutoHandoff) {
+      await this.auditService.record({
+        actor: currentUser,
+        organizationId: conversation.organizationId,
+        action: 'customer_chat.auto_handoff_requested',
+        entityType: 'customer_chat_conversation',
+        entityId: conversation.id,
+        metadata: {
+          reason:
+            searchResults.length === 0
+              ? 'low_retrieval_confidence'
+              : 'provider_failure',
+        },
+      });
+    }
+
+    return {
+      conversation: this.toConversationResponse(
+        updatedConversation,
+        publicResponse ? 'public' : 'internal',
+      ),
+      visitorMessage: this.toMessageResponse(
+        visitorMessage,
+        undefined,
+        publicResponse,
+      ),
+      assistantMessage: assistantMessage
+        ? this.toMessageResponse(
+            assistantMessage,
+            searchResults,
+            publicResponse,
+          )
+        : null,
+    };
+  }
+
+  private async markConversationWaiting(
+    conversationId: string,
+    organizationId: string,
+  ): Promise<ConversationWithMessages> {
+    return this.prisma.$transaction(async (transaction) => {
+      const changed = await transaction.customerChatConversation.updateMany({
+        where: { id: conversationId, status: { not: 'waiting_for_agent' } },
+        data: {
+          status: 'waiting_for_agent',
+          handoffRequestedAt: new Date(),
+        },
+      });
+      if (changed.count > 0) {
+        await transaction.customerChatMessage.create({
+          data: {
+            organizationId,
+            conversationId,
+            role: 'system',
+            content:
+              'A human agent has been requested and will join this conversation.',
+          },
+        });
+      }
+      const updated = await transaction.customerChatConversation.findUnique({
+        where: { id: conversationId },
+        include: this.conversationInclude(),
+      });
+      if (!updated) {
+        throw new NotFoundException('Customer chat conversation not found');
+      }
+      return updated;
+    });
+  }
+
+  private async loadMessagePage(
+    conversationId: string,
+    input: ListCustomerChatMessagesDto,
+    publicResponse: boolean,
+  ) {
+    const page = input.page ?? 1;
+    const limit = input.limit ?? 50;
+    const where = { conversationId };
+    const [total, messages] = await this.prisma.$transaction([
+      this.prisma.customerChatMessage.count({ where }),
+      this.prisma.customerChatMessage.findMany({
+        where,
+        include: { citations: { include: { chunk: true } } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+    return {
+      data: messages.map((message) =>
+        this.toMessageResponse(message, undefined, publicResponse),
+      ),
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  }
+
+  private async purgeExpiredConversations() {
+    try {
+      const result = await this.prisma.customerChatConversation.deleteMany({
+        where: { expiresAt: { lte: new Date() } },
+      });
+      if (result.count > 0) {
+        this.logger.log(
+          `Deleted ${result.count} customer chat conversations past retention`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        'Customer chat retention sweep failed',
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 
   private assertPublicMessageLength(content: string) {
@@ -704,6 +1059,7 @@ export class CustomerChatService {
   private async findConversationForVisitor(
     id: string,
     visitorToken?: string,
+    origin?: string,
   ): Promise<ConversationWithMessages> {
     if (!visitorToken) {
       throw new UnauthorizedException('Visitor token is required');
@@ -718,10 +1074,44 @@ export class CustomerChatService {
       throw new NotFoundException('Customer chat conversation not found');
     }
 
-    if (conversation.visitorTokenHash !== this.hashVisitorToken(visitorToken)) {
+    if (
+      !this.matchesVisitorTokenHash(conversation.visitorTokenHash, visitorToken)
+    ) {
       throw new UnauthorizedException('Invalid visitor token');
     }
 
+    if (
+      conversation.visitorTokenExpiresAt &&
+      conversation.visitorTokenExpiresAt.getTime() <= Date.now()
+    ) {
+      throw new UnauthorizedException('Visitor session has expired');
+    }
+
+    if (
+      conversation.expiresAt &&
+      conversation.expiresAt.getTime() <= Date.now()
+    ) {
+      throw new NotFoundException('Customer chat conversation not found');
+    }
+
+    if (!conversation.widgetConfig) {
+      throw new NotFoundException('Customer chat widget not found');
+    }
+    this.assertOriginAllowed(conversation.widgetConfig.allowedDomains, origin);
+
+    return conversation;
+  }
+
+  private async loadConversation(
+    id: string,
+  ): Promise<ConversationWithMessages> {
+    const conversation = await this.prisma.customerChatConversation.findUnique({
+      where: { id },
+      include: this.conversationInclude(),
+    });
+    if (!conversation) {
+      throw new NotFoundException('Customer chat conversation not found');
+    }
     return conversation;
   }
 
@@ -847,7 +1237,7 @@ export class CustomerChatService {
     return organizationId;
   }
 
-  private conversationInclude() {
+  private conversationInclude(messageLimit = 100) {
     return {
       widgetConfig: {
         include: { folderScopes: true },
@@ -860,7 +1250,8 @@ export class CustomerChatService {
             },
           },
         },
-        orderBy: { createdAt: 'asc' as const },
+        orderBy: [{ createdAt: 'desc' as const }, { id: 'desc' as const }],
+        take: messageLimit,
       },
     };
   }
@@ -889,21 +1280,44 @@ export class CustomerChatService {
     };
   }
 
-  private toConversationResponse(conversation: ConversationWithMessages) {
-    const { widgetConfig, ...conversationData } = conversation;
+  private toConversationResponse(
+    conversation: ConversationWithMessages,
+    visibility: 'internal' | 'public' = 'internal',
+  ) {
+    const base = {
+      id: conversation.id,
+      status: conversation.status,
+      assignedAgentId:
+        visibility === 'internal' ? conversation.assignedAgentId : null,
+      messages: [...conversation.messages]
+        .reverse()
+        .map((message) =>
+          this.toMessageResponse(message, undefined, visibility === 'public'),
+        ),
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+    };
+    if (visibility === 'public') {
+      return base;
+    }
     return {
-      ...conversationData,
-      widgetName: widgetConfig?.name ?? null,
+      ...base,
+      organizationId: conversation.organizationId,
+      visitorId: conversation.visitorId,
+      visitorName: conversation.visitorName,
+      visitorEmail: conversation.visitorEmail,
+      handoffRequestedAt: conversation.handoffRequestedAt,
+      lastMessageAt: conversation.lastMessageAt,
+      expiresAt: conversation.expiresAt,
+      widgetName: conversation.widgetConfig?.name ?? null,
       metadata: this.toRecord(conversation.metadata),
-      messages: conversation.messages.map((message) =>
-        this.toMessageResponse(message),
-      ),
     };
   }
 
   private toMessageResponse(
     message: ConversationWithMessages['messages'][number],
     searchResults?: KnowledgeSearchRow[],
+    publicResponse = false,
   ) {
     const searchResultByChunkId = new Map(
       searchResults?.map((result) => [result.id, result]) ?? [],
@@ -913,12 +1327,12 @@ export class CustomerChatService {
       id: message.id,
       role: message.role,
       content: message.content,
-      metadata: this.toRecord(message.metadata),
+      metadata: publicResponse ? {} : this.toRecord(message.metadata),
       citations: message.citations.map((citation) => ({
         chunkId: citation.chunkId,
         score:
           searchResultByChunkId.get(citation.chunkId)?.score ?? citation.score,
-        content: citation.chunk.content,
+        ...(publicResponse ? {} : { content: citation.chunk.content }),
       })),
       createdAt: message.createdAt,
     };
@@ -940,17 +1354,26 @@ export class CustomerChatService {
 
   private assertOriginAllowed(allowedDomains: string[], origin?: string) {
     if (!allowedDomains.length) {
-      return;
+      const unrestricted = this.configService.get<boolean>(
+        'ALLOW_UNRESTRICTED_WIDGET_ORIGINS',
+        this.configService.get<string>('NODE_ENV') !== 'production',
+      );
+      if (unrestricted) return;
+      throw new ForbiddenException('Widget has no allowed website origins');
     }
 
     if (!origin) {
       throw new ForbiddenException('Request origin is not allowed');
     }
 
-    const normalizedOrigin = origin.replace(/\/+$/, '').toLowerCase();
-    const isAllowed = allowedDomains.some(
-      (domain) => domain.replace(/\/+$/, '').toLowerCase() === normalizedOrigin,
-    );
+    const normalizedOrigin = this.normalizeOrigin(origin);
+    const isAllowed = allowedDomains.some((domain) => {
+      try {
+        return this.normalizeOrigin(domain) === normalizedOrigin;
+      } catch {
+        return false;
+      }
+    });
 
     if (!isAllowed) {
       throw new ForbiddenException('Request origin is not allowed');
@@ -963,6 +1386,17 @@ export class CustomerChatService {
 
   private hashVisitorToken(token: string): string {
     return createHash('sha256').update(token).digest('hex');
+  }
+
+  private matchesVisitorTokenHash(
+    expectedHash: string,
+    token: string,
+  ): boolean {
+    const actual = Buffer.from(this.hashVisitorToken(token), 'hex');
+    const expected = Buffer.from(expectedHash, 'hex');
+    return (
+      actual.length === expected.length && timingSafeEqual(actual, expected)
+    );
   }
 
   private createSystemUser(organizationId: string): AuthenticatedUser {
@@ -984,5 +1418,59 @@ export class CustomerChatService {
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {
     return user.roles.includes('super_admin');
+  }
+
+  private assertAllowedDomainsForWidget(allowedDomains: string[]) {
+    for (const domain of allowedDomains) {
+      try {
+        this.normalizeOrigin(domain);
+      } catch {
+        throw new BadRequestException(
+          `Invalid allowed website origin: ${domain}`,
+        );
+      }
+    }
+    if (
+      allowedDomains.length === 0 &&
+      !this.configService.get<boolean>(
+        'ALLOW_UNRESTRICTED_WIDGET_ORIGINS',
+        this.configService.get<string>('NODE_ENV') !== 'production',
+      )
+    ) {
+      throw new BadRequestException(
+        'At least one allowed website origin is required',
+      );
+    }
+  }
+
+  private normalizeOrigin(value: string): string {
+    const origin = new URL(value).origin.toLowerCase();
+    if (!origin.startsWith('http://') && !origin.startsWith('https://')) {
+      throw new Error('Unsupported origin protocol');
+    }
+    return origin;
+  }
+
+  private addHours(value: Date, hours: number): Date {
+    return new Date(value.getTime() + hours * 60 * 60 * 1000);
+  }
+
+  private addDays(value: Date, days: number): Date {
+    return new Date(value.getTime() + days * 24 * 60 * 60 * 1000);
+  }
+
+  private publishConversationEvent(
+    conversation: Pick<ConversationWithMessages, 'id' | 'organizationId'>,
+    type:
+      | 'conversation.created'
+      | 'conversation.updated'
+      | 'message.created'
+      | 'handoff.requested',
+  ) {
+    return this.realtimeService.publish({
+      type,
+      conversationId: conversation.id,
+      organizationId: conversation.organizationId,
+    });
   }
 }

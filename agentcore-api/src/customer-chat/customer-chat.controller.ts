@@ -9,6 +9,7 @@ import {
   Post,
   Query,
   Req,
+  Sse,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -42,6 +43,7 @@ import {
   PublicCustomerChatConversationCreatedDto,
 } from './dto/customer-chat-response.dto';
 import { ListCustomerChatWidgetConfigsDto } from './dto/list-widget-configs.dto';
+import { ListCustomerChatMessagesDto } from './dto/list-messages.dto';
 import {
   CreatePublicCustomerChatConversationDto,
   SendPublicCustomerChatMessageDto,
@@ -56,7 +58,7 @@ import { CustomerChatService } from './customer-chat.service';
 @ApiTags('Customer Chat')
 @ApiBearerAuth('bearer')
 @Controller('customer-chat')
-@Roles('super_admin', 'org_admin', 'product_admin', 'agent', 'user')
+@Roles('super_admin', 'org_admin', 'product_admin', 'agent')
 @RequireProductAccess('customer_chat')
 export class CustomerChatController {
   constructor(private readonly customerChatService: CustomerChatService) {}
@@ -173,6 +175,16 @@ export class CustomerChatController {
     return this.customerChatService.sendMessage(user, id, body);
   }
 
+  @Get('conversations/:id/messages')
+  @ApiOperation({ summary: 'List a customer chat conversation message page' })
+  listMessages(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Query() query: ListCustomerChatMessagesDto,
+  ) {
+    return this.customerChatService.listMessages(user, id, query);
+  }
+
   @Post('conversations/:id/agent-messages')
   @ApiOperation({ summary: 'Send a human agent reply' })
   @ApiCreatedResponse({ type: CustomerChatAgentMessageResponseDto })
@@ -185,6 +197,7 @@ export class CustomerChatController {
   }
 
   @Patch('conversations/:id/assignment')
+  @Roles('super_admin', 'org_admin', 'product_admin')
   @ApiOperation({ summary: 'Assign or unassign a customer chat conversation' })
   @ApiOkResponse({ type: CustomerChatConversationDto })
   assignConversation(
@@ -214,6 +227,24 @@ export class CustomerChatController {
     @Param('id') id: string,
   ) {
     return this.customerChatService.requestHandoff(user, id);
+  }
+
+  @Sse('conversations/:id/events')
+  @ApiOperation({ summary: 'Stream customer chat conversation updates' })
+  async streamConversation(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.customerChatService.streamConversationForActor(user, id);
+  }
+
+  @Sse('events')
+  @ApiOperation({ summary: 'Stream customer chat inbox updates' })
+  streamInbox(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.customerChatService.streamInboxForActor(user, organizationId);
   }
 }
 
@@ -280,11 +311,24 @@ export class CustomerChatWidgetController {
   @Get('conversations/:id')
   @ApiOperation({ summary: 'Get a public widget conversation' })
   @ApiOkResponse({ type: CustomerChatConversationDto })
-  getPublicConversation(
+  async getPublicConversation(
     @Param('id') id: string,
+    @Req() request: Request,
     @Headers('x-visitor-token') visitorToken?: string,
+    @Headers('origin') origin?: string,
+    @Headers('referer') referer?: string,
   ) {
-    return this.customerChatService.getPublicConversation(id, visitorToken);
+    await this.limitPublicRequest({
+      action: 'conversation-read',
+      clientIp: this.getClientIp(request),
+      maxEnvKey: 'PUBLIC_CHAT_MAX_CONFIG_FETCHES_PER_WINDOW',
+      defaultMax: 120,
+    });
+    return this.customerChatService.getPublicConversation(
+      id,
+      visitorToken,
+      origin ?? referer,
+    );
   }
 
   @Public()
@@ -296,6 +340,8 @@ export class CustomerChatWidgetController {
     @Body() body: SendPublicCustomerChatMessageDto,
     @Req() request: Request,
     @Headers('x-visitor-token') visitorToken?: string,
+    @Headers('origin') origin?: string,
+    @Headers('referer') referer?: string,
   ) {
     await this.limitPublicRequest({
       action: 'message',
@@ -304,7 +350,83 @@ export class CustomerChatWidgetController {
       defaultMax: 20,
     });
 
-    return this.customerChatService.sendPublicMessage(id, body, visitorToken);
+    return this.customerChatService.sendPublicMessage(
+      id,
+      body,
+      visitorToken,
+      origin ?? referer,
+    );
+  }
+
+  @Public()
+  @Get('conversations/:id/messages')
+  @ApiOperation({ summary: 'List a public widget conversation message page' })
+  async listPublicMessages(
+    @Param('id') id: string,
+    @Query() query: ListCustomerChatMessagesDto,
+    @Req() request: Request,
+    @Headers('x-visitor-token') visitorToken?: string,
+    @Headers('origin') origin?: string,
+    @Headers('referer') referer?: string,
+  ) {
+    await this.limitPublicRequest({
+      action: 'history',
+      clientIp: this.getClientIp(request),
+      maxEnvKey: 'PUBLIC_CHAT_MAX_CONFIG_FETCHES_PER_WINDOW',
+      defaultMax: 120,
+    });
+    return this.customerChatService.listPublicMessages(
+      id,
+      query,
+      visitorToken,
+      origin ?? referer,
+    );
+  }
+
+  @Public()
+  @Patch('conversations/:id/handoff')
+  @ApiOperation({ summary: 'Request a human agent from the public widget' })
+  async requestPublicHandoff(
+    @Param('id') id: string,
+    @Req() request: Request,
+    @Headers('x-visitor-token') visitorToken?: string,
+    @Headers('origin') origin?: string,
+    @Headers('referer') referer?: string,
+  ) {
+    await this.limitPublicRequest({
+      action: 'handoff',
+      clientIp: this.getClientIp(request),
+      maxEnvKey: 'PUBLIC_CHAT_MAX_MESSAGES_PER_WINDOW',
+      defaultMax: 20,
+    });
+    return this.customerChatService.requestPublicHandoff(
+      id,
+      visitorToken,
+      origin ?? referer,
+    );
+  }
+
+  @Public()
+  @Sse('conversations/:id/events')
+  @ApiOperation({ summary: 'Stream public widget conversation updates' })
+  async streamPublicConversation(
+    @Param('id') id: string,
+    @Req() request: Request,
+    @Headers('x-visitor-token') visitorToken?: string,
+    @Headers('origin') origin?: string,
+    @Headers('referer') referer?: string,
+  ) {
+    await this.limitPublicRequest({
+      action: 'stream',
+      clientIp: this.getClientIp(request),
+      maxEnvKey: 'PUBLIC_CHAT_MAX_CONFIG_FETCHES_PER_WINDOW',
+      defaultMax: 120,
+    });
+    return this.customerChatService.streamConversationForVisitor(
+      id,
+      visitorToken,
+      origin ?? referer,
+    );
   }
 
   private async limitPublicRequest(input: {
@@ -339,16 +461,8 @@ export class CustomerChatWidgetController {
   }
 
   private getClientIp(request: Request): string {
-    const forwardedFor = request.headers['x-forwarded-for'];
-
-    if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
-      return forwardedFor.split(',')[0].trim();
-    }
-
-    if (Array.isArray(forwardedFor) && forwardedFor[0]) {
-      return forwardedFor[0].split(',')[0].trim();
-    }
-
+    // Express resolves request.ip through the configured trusted proxy chain.
+    // Reading X-Forwarded-For directly would let clients forge rate-limit keys.
     return request.ip ?? request.socket.remoteAddress ?? 'unknown';
   }
 }

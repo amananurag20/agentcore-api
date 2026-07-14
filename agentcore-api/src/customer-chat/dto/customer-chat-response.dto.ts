@@ -7,8 +7,8 @@ export class CustomerChatCitationDto {
   @ApiProperty({ example: 0.82 })
   score: number;
 
-  @ApiProperty({ example: 'Business hours are 9am to 6pm.' })
-  content: string;
+  @ApiPropertyOptional({ example: 'Business hours are 9am to 6pm.' })
+  content?: string;
 }
 
 export class CustomerChatMessageDto {
@@ -75,8 +75,8 @@ export class CustomerChatSendMessageResponseDto {
   @ApiProperty({ type: CustomerChatMessageDto })
   visitorMessage: CustomerChatMessageDto;
 
-  @ApiProperty({ type: CustomerChatMessageDto })
-  assistantMessage: CustomerChatMessageDto;
+  @ApiPropertyOptional({ type: CustomerChatMessageDto, nullable: true })
+  assistantMessage: CustomerChatMessageDto | null;
 }
 
 export class CustomerChatConversationListDto {

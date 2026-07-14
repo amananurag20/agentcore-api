@@ -146,14 +146,14 @@ interface CustomerChatMessageResponseBody {
   citations: Array<{
     chunkId: string;
     score: number;
-    content: string;
+    content?: string;
   }>;
 }
 
 interface CustomerChatSendMessageResponseBody {
   conversation: CustomerChatConversationResponseBody;
   visitorMessage: CustomerChatMessageResponseBody;
-  assistantMessage: CustomerChatMessageResponseBody;
+  assistantMessage: CustomerChatMessageResponseBody | null;
 }
 
 interface CustomerChatAgentMessageResponseBody {
@@ -2085,6 +2085,27 @@ describe('AppController (e2e)', () => {
       .expect(201);
     const agentBody = agent.body as UserResponseBody;
 
+    const basicUserEmail = `chat-user-${suffix}@agentcore.local`;
+    await request(app.getHttpServer())
+      .post('/api/v1/users')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: 'E2E Basic User',
+        email: basicUserEmail,
+        password: 'StrongPassword@123',
+        orgId: 'org_demo',
+        roles: ['user'],
+      })
+      .expect(201);
+    const basicLogin = await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ email: basicUserEmail, password: 'StrongPassword@123' })
+      .expect(201);
+    await request(app.getHttpServer())
+      .get('/api/v1/customer-chat/conversations')
+      .set('Authorization', `Bearer ${basicLogin.body.accessToken as string}`)
+      .expect(403);
+
     const source = await request(app.getHttpServer())
       .post('/api/v1/knowledge/sources')
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
@@ -2129,13 +2150,17 @@ describe('AppController (e2e)', () => {
         const body = response.body as CustomerChatSendMessageResponseBody;
 
         expect(body.visitorMessage.role).toBe('visitor');
-        expect(body.assistantMessage.role).toBe('assistant');
-        expect(body.assistantMessage.content).toContain(
-          'support is available Monday through Friday',
+        expect(body.assistantMessage?.role).toBe('assistant');
+        expect(body.assistantMessage?.content).toContain(
+          'requested a human agent',
         );
-        expect(body.assistantMessage.citations.length).toBeGreaterThanOrEqual(
+        expect(body.assistantMessage?.citations.length).toBeGreaterThanOrEqual(
           1,
         );
+        expect(body.assistantMessage?.metadata).toMatchObject({
+          usedFallback: true,
+        });
+        expect(body.conversation.status).toBe('waiting_for_agent');
       });
 
     await request(app.getHttpServer())
@@ -2209,6 +2234,31 @@ describe('AppController (e2e)', () => {
             (message) => message.role === 'agent',
           ),
         ).toBe(true);
+      });
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/customer-chat/conversations/${conversationBody.id}/messages`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ content: 'Does the bot still answer after assignment?' })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as CustomerChatSendMessageResponseBody;
+        expect(body.visitorMessage.role).toBe('visitor');
+        expect(body.assistantMessage).toBeNull();
+      });
+
+    await request(app.getHttpServer())
+      .get(
+        `/api/v1/customer-chat/conversations/${conversationBody.id}/messages?page=1&limit=2`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        expect(response.body.data).toHaveLength(2);
+        expect(response.body.total).toBeGreaterThanOrEqual(4);
+        expect(response.body.limit).toBe(2);
       });
 
     await request(app.getHttpServer())
@@ -2299,17 +2349,42 @@ describe('AppController (e2e)', () => {
         `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}/messages`,
       )
       .set('x-visitor-token', createdBody.visitorToken)
+      .set('Origin', 'https://blocked.example.com')
+      .send({ content: 'This origin must not be accepted.' })
+      .expect(403);
+
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}/messages`,
+      )
+      .set('x-visitor-token', createdBody.visitorToken)
+      .set('Origin', allowedOrigin)
       .send({ content: 'When can widget visitors get help?' })
       .expect(201)
       .expect((response) => {
         const body = response.body as CustomerChatSendMessageResponseBody;
 
-        expect(body.assistantMessage.content).toContain(
-          'widget visitors can get help',
+        expect(body.assistantMessage?.content).toContain(
+          'requested a human agent',
         );
-        expect(body.assistantMessage.citations.length).toBeGreaterThanOrEqual(
+        expect(body.assistantMessage?.citations.length).toBeGreaterThanOrEqual(
           1,
         );
+        expect(body.assistantMessage?.metadata).toEqual({});
+        expect(body.assistantMessage?.citations[0]?.content).toBeUndefined();
+        expect(body.conversation.organizationId).toBeUndefined();
+        expect(body.conversation.visitorEmail).toBeUndefined();
+      });
+
+    await request(app.getHttpServer())
+      .patch(
+        `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}/handoff`,
+      )
+      .set('x-visitor-token', createdBody.visitorToken)
+      .set('Origin', allowedOrigin)
+      .expect(200)
+      .expect((response) => {
+        expect(response.body.status).toBe('waiting_for_agent');
       });
 
     await request(app.getHttpServer())
@@ -2317,6 +2392,7 @@ describe('AppController (e2e)', () => {
         `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}`,
       )
       .set('x-visitor-token', createdBody.visitorToken)
+      .set('Origin', allowedOrigin)
       .expect(200)
       .expect((response) => {
         const body = response.body as CustomerChatConversationResponseBody;
@@ -2329,6 +2405,7 @@ describe('AppController (e2e)', () => {
         `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}`,
       )
       .set('x-visitor-token', 'wrong-token')
+      .set('Origin', allowedOrigin)
       .expect(401);
 
     await request(app.getHttpServer())
@@ -2336,6 +2413,7 @@ describe('AppController (e2e)', () => {
         `/api/v1/customer-chat/widget/conversations/${createdBody.conversation.id}/messages`,
       )
       .set('x-visitor-token', createdBody.visitorToken)
+      .set('Origin', allowedOrigin)
       .send({ content: 'x'.repeat(2001) })
       .expect(400);
   });
@@ -2416,10 +2494,16 @@ describe('AppController (e2e)', () => {
           `/api/v1/customer-chat/widget/conversations/${body.conversation.id}/messages`,
         )
         .set('x-visitor-token', body.visitorToken)
+        .set('Origin', allowedOrigin)
         .send({ content: 'What is the public support code?' })
         .expect(201);
-      return (sent.body as CustomerChatSendMessageResponseBody)
-        .assistantMessage;
+      const internal = await request(app.getHttpServer())
+        .get(`/api/v1/customer-chat/conversations/${body.conversation.id}`)
+        .set('Authorization', `Bearer ${loginBody.accessToken}`)
+        .expect(200);
+      return (
+        internal.body as CustomerChatConversationResponseBody
+      ).messages.find((message) => message.role === 'assistant')!;
     };
 
     const alphaAnswer = await askWidget(alphaWidget.widgetKey);

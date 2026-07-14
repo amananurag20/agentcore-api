@@ -10,6 +10,7 @@ import {
   CustomerChatWidgetController,
 } from './customer-chat.controller';
 import { CustomerChatService } from './customer-chat.service';
+import { CustomerChatRealtimeService } from './customer-chat-realtime.service';
 
 @Module({
   imports: [
@@ -21,6 +22,6 @@ import { CustomerChatService } from './customer-chat.service';
     RateLimitModule,
   ],
   controllers: [CustomerChatController, CustomerChatWidgetController],
-  providers: [CustomerChatService],
+  providers: [CustomerChatService, CustomerChatRealtimeService],
 })
 export class CustomerChatModule {}

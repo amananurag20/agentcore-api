@@ -17,10 +17,14 @@ export class RateLimitService implements OnModuleDestroy {
   private readonly fallbackLimits = new Map<string, InMemoryLimit>();
   private readonly prefix: string;
   private readonly redis: Redis | null;
+  private readonly failClosed: boolean;
 
   constructor(private readonly configService: ConfigService) {
     const redisUrl = this.configService.get<string>('REDIS_URL');
     this.prefix = this.configService.get<string>('QUEUE_PREFIX') ?? 'agentcore';
+    this.failClosed =
+      this.configService.get<boolean>('RATE_LIMIT_FAIL_CLOSED') ??
+      this.configService.get<string>('NODE_ENV') === 'production';
     this.redis = redisUrl
       ? new Redis(redisUrl, { maxRetriesPerRequest: 1 })
       : null;
@@ -61,12 +65,24 @@ export class RateLimitService implements OnModuleDestroy {
 
   private async consumeWithAvailableStore(key: string, windowSeconds: number) {
     if (!this.redis) {
+      if (this.failClosed) {
+        throw new HttpException(
+          'Rate limiting is temporarily unavailable.',
+          HttpStatus.SERVICE_UNAVAILABLE,
+        );
+      }
       return this.consumeInMemory(key, windowSeconds);
     }
 
     try {
       return await this.consumeRedis(key, windowSeconds);
     } catch {
+      if (this.failClosed) {
+        throw new HttpException(
+          'Rate limiting is temporarily unavailable.',
+          HttpStatus.SERVICE_UNAVAILABLE,
+        );
+      }
       return this.consumeInMemory(key, windowSeconds);
     }
   }

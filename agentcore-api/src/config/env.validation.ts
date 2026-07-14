@@ -11,6 +11,10 @@ import {
 } from 'class-validator';
 
 class EnvironmentVariables {
+  @IsString()
+  @IsOptional()
+  NODE_ENV?: string;
+
   @Transform(({ value }) => Number(value ?? 5000))
   @IsInt()
   @Min(1)
@@ -435,6 +439,61 @@ class EnvironmentVariables {
   @Max(10000)
   @IsOptional()
   PUBLIC_CHAT_MAX_MESSAGE_LENGTH = 2000;
+
+  @Transform(({ value }) => Number(value ?? 0))
+  @IsInt()
+  @Min(0)
+  @Max(10)
+  @IsOptional()
+  TRUST_PROXY_HOPS = 0;
+
+  @Transform(({ value }) =>
+    value === undefined ? undefined : value === 'true' || value === true,
+  )
+  @IsBoolean()
+  @IsOptional()
+  RATE_LIMIT_FAIL_CLOSED?: boolean;
+
+  @Transform(({ value }) =>
+    value === undefined ? undefined : value === 'true' || value === true,
+  )
+  @IsBoolean()
+  @IsOptional()
+  ALLOW_UNRESTRICTED_WIDGET_ORIGINS?: boolean;
+
+  @Transform(({ value }) => Number(value ?? 24))
+  @IsInt()
+  @Min(1)
+  @Max(720)
+  @IsOptional()
+  CUSTOMER_CHAT_VISITOR_SESSION_HOURS = 24;
+
+  @Transform(({ value }) => Number(value ?? 90))
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  @IsOptional()
+  CUSTOMER_CHAT_RETENTION_DAYS = 90;
+
+  @Transform(({ value }) => Number(value ?? 3600000))
+  @IsInt()
+  @Min(60000)
+  @Max(86400000)
+  @IsOptional()
+  CUSTOMER_CHAT_RETENTION_SWEEP_INTERVAL_MS = 3600000;
+
+  @Transform(({ value }) => Number(value ?? 0.35))
+  @Min(0)
+  @Max(1)
+  @IsOptional()
+  CUSTOMER_CHAT_MIN_SIMILARITY_SCORE = 0.35;
+
+  @Transform(
+    ({ value }) => value === undefined || value === 'true' || value === true,
+  )
+  @IsBoolean()
+  @IsOptional()
+  CUSTOMER_CHAT_AUTO_HANDOFF_ON_FAILURE = true;
 
   @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean()
