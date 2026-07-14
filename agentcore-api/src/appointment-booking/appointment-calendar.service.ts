@@ -37,6 +37,8 @@ export type AppointmentCalendarSyncJobData = {
   expectedUpdatedAt: string;
 };
 
+export type ExternalBusyInterval = { startAt: Date; endAt: Date };
+
 @Injectable()
 export class AppointmentCalendarService {
   constructor(
@@ -220,16 +222,37 @@ export class AppointmentCalendarService {
     startAt: Date,
     endAt: Date,
   ): Promise<boolean> {
+    const intervals = await this.listExternalBusyIntervals(
+      staffId,
+      startAt,
+      endAt,
+    );
+    return intervals.some(
+      (interval) => interval.startAt < endAt && interval.endAt > startAt,
+    );
+  }
+
+  async listExternalBusyIntervals(
+    staffId: string,
+    startAt: Date,
+    endAt: Date,
+  ): Promise<ExternalBusyInterval[]> {
     const connections =
       await this.prisma.appointmentCalendarConnection.findMany({
         where: { staffId, status: { in: ['active', 'error'] } },
       });
+    const intervals: ExternalBusyInterval[] = [];
     for (const connection of connections) {
       try {
         const accessToken = await this.getAccessToken(connection);
-        if (await this.queryFreeBusy(connection, accessToken, startAt, endAt)) {
-          return true;
-        }
+        intervals.push(
+          ...(await this.queryFreeBusy(
+            connection,
+            accessToken,
+            startAt,
+            endAt,
+          )),
+        );
         if (connection.status === 'error' || connection.lastError) {
           await this.prisma.appointmentCalendarConnection.update({
             where: { id: connection.id },
@@ -243,7 +266,10 @@ export class AppointmentCalendarService {
           data: { status: 'error', lastError: message.slice(0, 2000) },
         });
         if (
-          !this.configService.get<boolean>('APPOINTMENT_CALENDAR_FAIL_OPEN')
+          !this.configService.get<boolean>(
+            'APPOINTMENT_CALENDAR_FAIL_OPEN',
+            true,
+          )
         ) {
           throw new ServiceUnavailableException(
             'External calendar availability could not be verified',
@@ -251,7 +277,7 @@ export class AppointmentCalendarService {
         }
       }
     }
-    return false;
+    return intervals;
   }
 
   async scheduleBookingSync(input: {
@@ -406,7 +432,7 @@ export class AppointmentCalendarService {
     accessToken: string,
     startAt: Date,
     endAt: Date,
-  ): Promise<boolean> {
+  ): Promise<ExternalBusyInterval[]> {
     if (connection.provider === 'google') {
       const response = await fetch(
         'https://www.googleapis.com/calendar/v3/freeBusy',
@@ -418,12 +444,25 @@ export class AppointmentCalendarService {
             timeMax: endAt.toISOString(),
             items: [{ id: connection.calendarId }],
           }),
+          signal: this.providerTimeoutSignal(),
         },
       );
       const body = await this.readProviderJson<{
-        calendars?: Record<string, { busy?: unknown[] }>;
+        calendars?: Record<
+          string,
+          { busy?: Array<{ start?: string; end?: string }> }
+        >;
       }>(response);
-      return Boolean(body.calendars?.[connection.calendarId]?.busy?.length);
+      return (body.calendars?.[connection.calendarId]?.busy ?? [])
+        .map((busy) => ({
+          startAt: new Date(busy.start ?? ''),
+          endAt: new Date(busy.end ?? ''),
+        }))
+        .filter(
+          (busy) =>
+            Number.isFinite(busy.startAt.getTime()) &&
+            Number.isFinite(busy.endAt.getTime()),
+        );
     }
 
     const calendarPath =
@@ -433,19 +472,38 @@ export class AppointmentCalendarService {
     const params = new URLSearchParams({
       startDateTime: startAt.toISOString(),
       endDateTime: endAt.toISOString(),
-      $select: 'id,showAs,isCancelled',
-      $top: '10',
+      $select: 'id,showAs,isCancelled,start,end',
+      $top: '1000',
     });
     const response = await fetch(
       `https://graph.microsoft.com/v1.0${calendarPath}?${params}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Prefer: 'outlook.timezone="UTC"',
+        },
+        signal: this.providerTimeoutSignal(),
+      },
     );
     const body = await this.readProviderJson<{
-      value?: Array<{ showAs?: string; isCancelled?: boolean }>;
+      value?: Array<{
+        showAs?: string;
+        isCancelled?: boolean;
+        start?: { dateTime?: string; timeZone?: string };
+        end?: { dateTime?: string; timeZone?: string };
+      }>;
     }>(response);
-    return Boolean(
-      body.value?.some((item) => !item.isCancelled && item.showAs !== 'free'),
-    );
+    return (body.value ?? [])
+      .filter((item) => !item.isCancelled && item.showAs !== 'free')
+      .map((item) => ({
+        startAt: this.graphDateTime(item.start?.dateTime),
+        endAt: this.graphDateTime(item.end?.dateTime),
+      }))
+      .filter(
+        (busy) =>
+          Number.isFinite(busy.startAt.getTime()) &&
+          Number.isFinite(busy.endAt.getTime()),
+      );
   }
 
   private async upsertExternalEvent(
@@ -484,6 +542,7 @@ export class AppointmentCalendarService {
               : undefined,
             extendedProperties: { private: { agentcoreBookingId: booking.id } },
           }),
+          signal: this.providerTimeoutSignal(),
         },
       );
       return this.readProviderJson(response);
@@ -504,8 +563,14 @@ export class AppointmentCalendarService {
             contentType: 'text',
             content: this.eventDescription(booking),
           },
-          start: { dateTime: booking.startAt.toISOString(), timeZone: 'UTC' },
-          end: { dateTime: booking.endAt.toISOString(), timeZone: 'UTC' },
+          start: {
+            dateTime: this.graphUtcDateTime(booking.startAt),
+            timeZone: 'UTC',
+          },
+          end: {
+            dateTime: this.graphUtcDateTime(booking.endAt),
+            timeZone: 'UTC',
+          },
           attendees: booking.customerEmail
             ? [
                 {
@@ -519,6 +584,7 @@ export class AppointmentCalendarService {
             : undefined,
           transactionId: booking.id,
         }),
+        signal: this.providerTimeoutSignal(),
       },
     );
     return this.readProviderJson(response);
@@ -536,6 +602,7 @@ export class AppointmentCalendarService {
     const response = await fetch(url, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${accessToken}` },
+      signal: this.providerTimeoutSignal(),
     });
     if (!response.ok && response.status !== 404 && response.status !== 410) {
       await this.readProviderJson(response);
@@ -591,6 +658,7 @@ export class AppointmentCalendarService {
               }
             : {}),
         }),
+        signal: this.providerTimeoutSignal(),
       },
     );
     const body = await this.readProviderJson<{
@@ -643,6 +711,7 @@ export class AppointmentCalendarService {
               }
             : {}),
         }),
+        signal: this.providerTimeoutSignal(),
       },
     );
     const body = await this.readProviderJson<{
@@ -674,10 +743,14 @@ export class AppointmentCalendarService {
       const [profileResponse, calendarResponse] = await Promise.all([
         fetch('https://openidconnect.googleapis.com/v1/userinfo', {
           headers: { Authorization: `Bearer ${accessToken}` },
+          signal: this.providerTimeoutSignal(),
         }),
         fetch(
           `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}`,
-          { headers: { Authorization: `Bearer ${accessToken}` } },
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            signal: this.providerTimeoutSignal(),
+          },
         ),
       ]);
       const profile = await this.readProviderJson<{ email?: string }>(
@@ -697,10 +770,12 @@ export class AppointmentCalendarService {
         'https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName',
         {
           headers: { Authorization: `Bearer ${accessToken}` },
+          signal: this.providerTimeoutSignal(),
         },
       ),
       fetch(`https://graph.microsoft.com/v1.0${microsoftCalendarPath}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
+        signal: this.providerTimeoutSignal(),
       }),
     ]);
     const profile = await this.readProviderJson<{
@@ -756,6 +831,21 @@ export class AppointmentCalendarService {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
     };
+  }
+
+  private providerTimeoutSignal(): AbortSignal {
+    return AbortSignal.timeout(
+      this.configService.get<number>('APPOINTMENT_PROVIDER_TIMEOUT_MS', 10_000),
+    );
+  }
+
+  private graphUtcDateTime(value: Date): string {
+    return value.toISOString().replace(/Z$/, '');
+  }
+
+  private graphDateTime(value?: string): Date {
+    if (!value) return new Date(Number.NaN);
+    return new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`);
   }
 
   private eventDescription(booking: BookingForCalendar): string {

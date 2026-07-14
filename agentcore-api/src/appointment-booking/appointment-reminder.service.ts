@@ -36,16 +36,50 @@ export class AppointmentReminderService {
 
     const booking = reminder.booking;
     if (!['pending', 'confirmed'].includes(booking.status)) {
-      await this.finishSkipped(reminder.id, booking.organizationId, booking.id);
+      await this.finishSkipped(
+        reminder.id,
+        booking.organizationId,
+        booking.id,
+        'booking_not_active',
+      );
+      return;
+    }
+    if (booking.startAt <= new Date()) {
+      await this.finishSkipped(
+        reminder.id,
+        booking.organizationId,
+        booking.id,
+        'appointment_already_started',
+      );
       return;
     }
 
     try {
+      const deliveredChannels = new Set(reminder.channels);
+      const providerMessageIds =
+        reminder.providerMessageIds &&
+        typeof reminder.providerMessageIds === 'object' &&
+        !Array.isArray(reminder.providerMessageIds)
+          ? { ...reminder.providerMessageIds }
+          : {};
       const deliveries = await this.deliveryService.deliver(
         booking,
         reminder.reminderType,
+        deliveredChannels,
+        async (delivery) => {
+          deliveredChannels.add(delivery.channel);
+          providerMessageIds[delivery.channel] =
+            delivery.providerMessageId ?? delivery.provider;
+          await this.prisma.appointmentReminder.update({
+            where: { id: reminder.id },
+            data: {
+              channels: [...deliveredChannels],
+              providerMessageIds,
+            },
+          });
+        },
       );
-      if (!deliveries.length) {
+      if (!deliveries.length && deliveredChannels.size === 0) {
         await this.prisma.appointmentReminder.update({
           where: { id: reminder.id },
           data: {
@@ -61,9 +95,8 @@ export class AppointmentReminderService {
         where: { id: reminder.id },
         data: {
           status: 'sent',
-          channels: deliveries.map((delivery) => delivery.channel),
-          providerMessageIds:
-            this.deliveryService.toProviderMessageIds(deliveries),
+          channels: [...deliveredChannels],
+          providerMessageIds,
           sentAt: new Date(),
         },
       });
@@ -75,7 +108,7 @@ export class AppointmentReminderService {
         metadata: {
           reminderId: reminder.id,
           reminderType: reminder.reminderType,
-          channels: deliveries.map((delivery) => delivery.channel),
+          channels: [...deliveredChannels],
         },
       });
     } catch (error) {
@@ -95,17 +128,24 @@ export class AppointmentReminderService {
     reminderId: string,
     organizationId: string,
     bookingId: string,
+    reason: 'booking_not_active' | 'appointment_already_started',
   ) {
     await this.prisma.appointmentReminder.update({
       where: { id: reminderId },
-      data: { status: 'skipped', lastError: 'Booking is no longer active' },
+      data: {
+        status: 'skipped',
+        lastError:
+          reason === 'appointment_already_started'
+            ? 'Appointment has already started'
+            : 'Booking is no longer active',
+      },
     });
     await this.auditService.record({
       organizationId,
       action: 'appointment.reminder_skipped',
       entityType: 'appointment_booking',
       entityId: bookingId,
-      metadata: { reminderId, reason: 'booking_not_active' },
+      metadata: { reminderId, reason },
     });
   }
 }

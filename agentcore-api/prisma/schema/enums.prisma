@@ -116,6 +116,7 @@ enum AppointmentReminderStatus {
   failed
   cancelled
   skipped
+  dead_letter
 }
 
 enum AppointmentCalendarProvider {
@@ -136,6 +137,7 @@ enum AppointmentCalendarEventStatus {
   synced
   failed
   deleted
+  dead_letter
 }
 
 enum WhatsAppProviderType {

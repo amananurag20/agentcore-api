@@ -938,7 +938,9 @@ describe('AppController (e2e)', () => {
   it('/appointment-booking manages availability, conflicts, reschedule, cancel, and public booking', async () => {
     const loginBody = await loginAsAdmin();
     const suffix = Date.now();
-    const date = '2031-01-06';
+    const date = new Date(Date.now() + 30 * 24 * 60 * 60_000)
+      .toISOString()
+      .slice(0, 10);
     const dayOfWeek = new Date(`${date}T00:00:00.000Z`).getUTCDay();
 
     await request(app.getHttpServer())
@@ -963,6 +965,26 @@ describe('AppController (e2e)', () => {
     expect(serviceBody.organizationId).toBe('org_demo');
     expect(serviceBody.durationMinutes).toBe(30);
     expect(serviceBody.status).toBe('active');
+
+    await request(app.getHttpServer())
+      .post('/api/v1/appointment-booking/public/bookings')
+      .send({
+        organizationId: 'org_demo',
+        serviceId: serviceBody.id,
+        customerName: 'Past Booking Customer',
+        startAt: new Date(Date.now() - 60_000).toISOString(),
+      })
+      .expect(400);
+
+    await request(app.getHttpServer())
+      .post('/api/v1/appointment-booking/public/bookings')
+      .send({
+        organizationId: 'org_demo',
+        serviceId: serviceBody.id,
+        customerName: 'Far Future Booking Customer',
+        startAt: new Date(Date.now() + 366 * 24 * 60 * 60_000).toISOString(),
+      })
+      .expect(400);
 
     await request(app.getHttpServer())
       .post('/api/v1/appointment-booking/actions/execute')

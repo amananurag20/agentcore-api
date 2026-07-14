@@ -5,6 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import {
   AppointmentBooking,
@@ -71,6 +72,7 @@ export class AppointmentBookingService {
   constructor(
     private readonly auditService: AuditService,
     private readonly calendarService: AppointmentCalendarService,
+    private readonly configService: ConfigService,
     private readonly reminderQueueService: AppointmentReminderQueueService,
     private readonly prisma: PrismaService,
     private readonly timezoneService: AppointmentTimezoneService,
@@ -905,6 +907,7 @@ export class AppointmentBookingService {
       service.id,
     );
     const startAt = new Date(input.startAt);
+    this.assertBookableStart(startAt);
     const endAt = this.addMinutes(startAt, service.durationMinutes);
     const timezone = input.timezone ?? booking.timezone;
     this.timezoneService.assertValid(timezone);
@@ -1092,6 +1095,7 @@ export class AppointmentBookingService {
       input.serviceId,
     );
     const startAt = new Date(input.startAt);
+    this.assertBookableStart(startAt);
     const endAt = this.addMinutes(startAt, service.durationMinutes);
     const timezone = input.timezone ?? 'UTC';
     this.timezoneService.assertValid(timezone);
@@ -1204,6 +1208,11 @@ export class AppointmentBookingService {
 
     for (const staffMember of staff) {
       this.timezoneService.assertValid(staffMember.timezone);
+      const externalBusy = await this.calendarService.listExternalBusyIntervals(
+        staffMember.id,
+        this.addMinutes(dayStart, -service.bufferBeforeMinutes),
+        this.addMinutes(dayEnd, service.bufferAfterMinutes),
+      );
       const localDates = new Set([
         this.timezoneService.dateInZone(dayStart, staffMember.timezone),
         this.timezoneService.dateInZone(
@@ -1237,17 +1246,38 @@ export class AppointmentBookingService {
             const startAt = new Date(cursor);
             const endAt = this.addMinutes(startAt, service.durationMinutes);
             const isInRequestedDay = startAt >= dayStart && startAt < dayEnd;
-            const hasConflict = isInRequestedDay
-              ? await this.hasConflict({
-                  organizationId,
-                  service,
-                  staffId: staffMember.id,
-                  startAt,
-                  endAt,
-                })
+            const hasInternalConflict = isInRequestedDay
+              ? await this.hasConflict(
+                  {
+                    organizationId,
+                    service,
+                    staffId: staffMember.id,
+                    startAt,
+                    endAt,
+                  },
+                  this.prisma,
+                  false,
+                )
               : true;
+            const conflictStart = this.addMinutes(
+              startAt,
+              -service.bufferBeforeMinutes,
+            );
+            const conflictEnd = this.addMinutes(
+              endAt,
+              service.bufferAfterMinutes,
+            );
+            const hasExternalConflict = externalBusy.some(
+              (busy) =>
+                busy.startAt < conflictEnd && busy.endAt > conflictStart,
+            );
+            const isWithinBookingWindow = this.isWithinBookingWindow(startAt);
 
-            if (!hasConflict) {
+            if (
+              !hasInternalConflict &&
+              !hasExternalConflict &&
+              isWithinBookingWindow
+            ) {
               slots.push({
                 staffId: staffMember.id,
                 staffName: staffMember.name,
@@ -1514,6 +1544,47 @@ export class AppointmentBookingService {
     }
 
     return false;
+  }
+
+  private assertBookableStart(startAt: Date): void {
+    if (!Number.isFinite(startAt.getTime())) {
+      throw new BadRequestException('Appointment start time is invalid');
+    }
+    const now = Date.now();
+    const minLeadMinutes = this.configService.get<number>(
+      'APPOINTMENT_MIN_LEAD_TIME_MINUTES',
+      0,
+    );
+    const maxAdvanceDays = this.configService.get<number>(
+      'APPOINTMENT_MAX_ADVANCE_DAYS',
+      365,
+    );
+    if (startAt.getTime() < now + minLeadMinutes * 60_000) {
+      throw new BadRequestException(
+        `Appointment must be booked at least ${minLeadMinutes} minutes in advance`,
+      );
+    }
+    if (startAt.getTime() > now + maxAdvanceDays * 24 * 60 * 60_000) {
+      throw new BadRequestException(
+        `Appointment cannot be booked more than ${maxAdvanceDays} days in advance`,
+      );
+    }
+  }
+
+  private isWithinBookingWindow(startAt: Date): boolean {
+    const minLeadMinutes = this.configService.get<number>(
+      'APPOINTMENT_MIN_LEAD_TIME_MINUTES',
+      0,
+    );
+    const maxAdvanceDays = this.configService.get<number>(
+      'APPOINTMENT_MAX_ADVANCE_DAYS',
+      365,
+    );
+    const now = Date.now();
+    return (
+      startAt.getTime() >= now + minLeadMinutes * 60_000 &&
+      startAt.getTime() <= now + maxAdvanceDays * 24 * 60 * 60_000
+    );
   }
 
   private async isInsideAvailability(
@@ -1939,6 +2010,12 @@ export class AppointmentBookingService {
           isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
         });
       } catch (error) {
+        const isOverlapConstraint = this.isOverlapConstraintViolation(error);
+        if (isOverlapConstraint) {
+          throw new ConflictException(
+            'Selected slot was booked concurrently; please choose another slot',
+          );
+        }
         const isSerializationConflict =
           error instanceof Prisma.PrismaClientKnownRequestError &&
           error.code === 'P2034';
@@ -1951,6 +2028,55 @@ export class AppointmentBookingService {
       }
     }
     throw new ConflictException('Selected slot is no longer available');
+  }
+
+  private isOverlapConstraintViolation(error: unknown): boolean {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2004'
+    ) {
+      return true;
+    }
+
+    const details = this.errorDetails(error);
+    return (
+      /\b23P01\b/i.test(details) ||
+      /appointment_bookings_active_staff_no_overlap/i.test(details) ||
+      /conflicting key value violates exclusion constraint/i.test(details)
+    );
+  }
+
+  private errorDetails(error: unknown): string {
+    if (!error || typeof error !== 'object') return String(error);
+    const candidate = error as {
+      code?: unknown;
+      message?: unknown;
+      meta?: unknown;
+      cause?: unknown;
+    };
+    return [candidate.code, candidate.message, candidate.meta, candidate.cause]
+      .map((value) => this.serializeUnknown(value))
+      .join(' ');
+  }
+
+  private serializeUnknown(value: unknown): string {
+    if (value === undefined || value === null) return '';
+    if (
+      typeof value === 'string' ||
+      typeof value === 'number' ||
+      typeof value === 'boolean' ||
+      typeof value === 'bigint'
+    ) {
+      return `${value}`;
+    }
+    if (value instanceof Error) {
+      return `${value.name} ${value.message} ${this.serializeUnknown(value.cause)}`;
+    }
+    try {
+      return JSON.stringify(value) ?? '';
+    } catch {
+      return '';
+    }
   }
 
   private toJsonObject(

@@ -37,7 +37,10 @@ export class AppointmentReminderQueueService {
     const offsets = [0, ...this.getReminderOffsets()];
 
     for (const offsetMinutes of offsets) {
-      const dueAt = new Date(input.startAt.getTime() - offsetMinutes * 60_000);
+      const dueAt =
+        offsetMinutes === 0
+          ? now
+          : new Date(input.startAt.getTime() - offsetMinutes * 60_000);
       if (offsetMinutes > 0 && dueAt <= now) continue;
 
       const reminder = await this.prisma.appointmentReminder.upsert({
@@ -78,6 +81,7 @@ export class AppointmentReminderQueueService {
             {
               delay: Math.max(0, dueAt.getTime() - Date.now()),
               jobId: appointmentReminderJobId(reminder.id, dueAt),
+              attempts: 1,
             },
           );
         } catch (error) {

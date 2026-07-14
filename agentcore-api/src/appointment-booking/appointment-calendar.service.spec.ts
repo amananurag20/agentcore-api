@@ -107,7 +107,16 @@ describe('AppointmentCalendarService', () => {
     global.fetch = jest.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          calendars: { primary: { busy: [{ start: now.toISOString() }] } },
+          calendars: {
+            primary: {
+              busy: [
+                {
+                  start: '2026-07-14T09:10:00.000Z',
+                  end: '2026-07-14T09:20:00.000Z',
+                },
+              ],
+            },
+          },
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       ),

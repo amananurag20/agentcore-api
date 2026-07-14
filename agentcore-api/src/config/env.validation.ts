@@ -287,6 +287,34 @@ class EnvironmentVariables {
   @IsOptional()
   APPOINTMENT_REMINDER_MAX_ATTEMPTS = 10;
 
+  @Transform(({ value }) => Number(value ?? 300000))
+  @IsInt()
+  @Min(30000)
+  @Max(3600000)
+  @IsOptional()
+  APPOINTMENT_REMINDER_PROCESSING_TIMEOUT_MS = 300000;
+
+  @Transform(({ value }) => Number(value ?? 10000))
+  @IsInt()
+  @Min(1000)
+  @Max(120000)
+  @IsOptional()
+  APPOINTMENT_PROVIDER_TIMEOUT_MS = 10000;
+
+  @Transform(({ value }) => Number(value ?? 0))
+  @IsInt()
+  @Min(0)
+  @Max(43200)
+  @IsOptional()
+  APPOINTMENT_MIN_LEAD_TIME_MINUTES = 0;
+
+  @Transform(({ value }) => Number(value ?? 365))
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  @IsOptional()
+  APPOINTMENT_MAX_ADVANCE_DAYS = 365;
+
   @IsString()
   @IsOptional()
   GOOGLE_CALENDAR_CLIENT_ID?: string;
@@ -315,10 +343,12 @@ class EnvironmentVariables {
   @IsOptional()
   APPOINTMENT_CALENDAR_OAUTH_SUCCESS_URL?: string;
 
-  @Transform(({ value }) => value === 'true' || value === true)
+  @Transform(
+    ({ value }) => value === undefined || value === 'true' || value === true,
+  )
   @IsBoolean()
   @IsOptional()
-  APPOINTMENT_CALENDAR_FAIL_OPEN = false;
+  APPOINTMENT_CALENDAR_FAIL_OPEN = true;
 
   @Transform(({ value }) => Number(value ?? 5))
   @IsInt()
@@ -333,6 +363,20 @@ class EnvironmentVariables {
   @Max(3600000)
   @IsOptional()
   APPOINTMENT_CALENDAR_RECOVERY_INTERVAL_MS = 60000;
+
+  @Transform(({ value }) => Number(value ?? 10))
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  APPOINTMENT_CALENDAR_SYNC_MAX_ATTEMPTS = 10;
+
+  @Transform(({ value }) => Number(value ?? 300000))
+  @IsInt()
+  @Min(30000)
+  @Max(3600000)
+  @IsOptional()
+  APPOINTMENT_CALENDAR_SYNC_PROCESSING_TIMEOUT_MS = 300000;
 
   @IsString()
   @IsOptional()

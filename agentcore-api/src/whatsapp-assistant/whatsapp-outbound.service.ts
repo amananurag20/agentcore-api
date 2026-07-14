@@ -94,6 +94,7 @@ export class WhatsAppOutboundService {
             body: input.content,
           },
         }),
+        signal: this.providerTimeoutSignal(),
       },
     );
 
@@ -152,6 +153,7 @@ export class WhatsAppOutboundService {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: form,
+        signal: this.providerTimeoutSignal(),
       },
     );
     const body = (await response.json().catch(() => ({}))) as {
@@ -170,5 +172,11 @@ export class WhatsAppOutboundService {
       status: 'sent',
       providerMessageId: body.sid,
     };
+  }
+
+  private providerTimeoutSignal(): AbortSignal {
+    return AbortSignal.timeout(
+      this.configService.get<number>('APPOINTMENT_PROVIDER_TIMEOUT_MS', 10_000),
+    );
   }
 }

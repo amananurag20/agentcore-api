@@ -164,6 +164,12 @@ export class VoiceOutboundService {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: form,
+        signal: AbortSignal.timeout(
+          this.configService.get<number>(
+            'APPOINTMENT_PROVIDER_TIMEOUT_MS',
+            10_000,
+          ),
+        ),
       },
     );
     const body = (await response.json().catch(() => ({}))) as {

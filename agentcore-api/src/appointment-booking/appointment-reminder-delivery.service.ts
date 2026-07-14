@@ -32,31 +32,50 @@ export class AppointmentReminderDeliveryService {
   async deliver(
     booking: ReminderBooking,
     reminderType: string,
+    alreadyDelivered: ReadonlySet<string> = new Set(),
+    onDelivered?: (result: ReminderDeliveryResult) => Promise<void>,
   ): Promise<ReminderDeliveryResult[]> {
     const channels = this.getChannels();
     const message = this.buildMessage(booking, reminderType);
-    const deliveries: Array<Promise<ReminderDeliveryResult | null>> = [];
+    const deliveries: Array<() => Promise<ReminderDeliveryResult | null>> = [];
 
-    if (channels.has('email') && booking.customerEmail) {
-      deliveries.push(this.sendEmail(booking, message));
+    if (
+      channels.has('email') &&
+      booking.customerEmail &&
+      !alreadyDelivered.has('email')
+    ) {
+      deliveries.push(() => this.sendEmail(booking, message));
     }
-    if (channels.has('sms') && booking.customerPhone) {
-      deliveries.push(this.sendSms(booking.customerPhone, message));
+    if (
+      channels.has('sms') &&
+      booking.customerPhone &&
+      !alreadyDelivered.has('sms')
+    ) {
+      deliveries.push(() => this.sendSms(booking.customerPhone!, message));
     }
-    if (channels.has('whatsapp') && booking.customerPhone) {
-      deliveries.push(
+    if (
+      channels.has('whatsapp') &&
+      booking.customerPhone &&
+      !alreadyDelivered.has('whatsapp')
+    ) {
+      deliveries.push(() =>
         this.sendWhatsApp(
           booking.organizationId,
-          booking.customerPhone,
+          booking.customerPhone!,
           booking,
           message,
         ),
       );
     }
 
-    return (await Promise.all(deliveries)).filter(
-      (result): result is ReminderDeliveryResult => Boolean(result),
-    );
+    const results: ReminderDeliveryResult[] = [];
+    for (const deliver of deliveries) {
+      const result = await deliver();
+      if (!result) continue;
+      results.push(result);
+      await onDelivered?.(result);
+    }
+    return results;
   }
 
   private async sendEmail(
@@ -79,6 +98,7 @@ export class AppointmentReminderDeliveryService {
         subject: `Appointment: ${booking.service.name}`,
         text: message,
       }),
+      signal: this.providerTimeoutSignal(),
     });
     const body = (await response.json().catch(() => ({}))) as {
       id?: string;
@@ -111,6 +131,7 @@ export class AppointmentReminderDeliveryService {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: new URLSearchParams({ From: from, To: to, Body: message }),
+        signal: this.providerTimeoutSignal(),
       },
     );
     const body = (await response.json().catch(() => ({}))) as {
@@ -183,6 +204,7 @@ export class AppointmentReminderDeliveryService {
             ],
           },
         }),
+        signal: this.providerTimeoutSignal(),
       },
     );
     const body = (await response.json().catch(() => ({}))) as {
@@ -226,6 +248,7 @@ export class AppointmentReminderDeliveryService {
           To: to.startsWith('whatsapp:') ? to : `whatsapp:${to}`,
           Body: message,
         }),
+        signal: this.providerTimeoutSignal(),
       },
     );
     const body = (await response.json().catch(() => ({}))) as {
@@ -265,6 +288,12 @@ export class AppointmentReminderDeliveryService {
       this.configService.get<string>('APPOINTMENT_REMINDER_CHANNELS') ??
       'email,sms,whatsapp';
     return new Set(raw.split(',').map((value) => value.trim().toLowerCase()));
+  }
+
+  private providerTimeoutSignal(): AbortSignal {
+    return AbortSignal.timeout(
+      this.configService.get<number>('APPOINTMENT_PROVIDER_TIMEOUT_MS', 10_000),
+    );
   }
 
   toProviderMessageIds(
