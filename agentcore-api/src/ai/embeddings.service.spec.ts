@@ -43,4 +43,18 @@ describe('EmbeddingsService production controls', () => {
     expect(result.provider).toBe('local');
     expect(result.vector).toHaveLength(8);
   });
+
+  it('never allows deterministic embeddings to be persisted in an index', async () => {
+    const service = createService({
+      ALLOW_LOCAL_EMBEDDINGS: true,
+      DEFAULT_EMBEDDING_DIMENSIONS: 8,
+    });
+
+    await expect(
+      service.embedForIndexing({
+        organizationId: 'org-a',
+        text: 'refund policy',
+      }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
 });

@@ -1,5 +1,6 @@
 import { plainToInstance, Transform } from 'class-transformer';
 import {
+  Equals,
   IsBoolean,
   IsInt,
   IsOptional,
@@ -338,6 +339,7 @@ class EnvironmentVariables {
   DEFAULT_EMBEDDING_MODEL?: string;
 
   @Transform(({ value }) => Number(value ?? 1536))
+  @Equals(1536)
   @IsInt()
   @Min(1)
   @Max(4096)
@@ -348,6 +350,10 @@ class EnvironmentVariables {
   @IsBoolean()
   @IsOptional()
   ALLOW_LOCAL_EMBEDDINGS?: boolean;
+
+  @IsString()
+  @IsOptional()
+  CUSTOMER_CHAT_PROCESSING_FAILURE_MESSAGE?: string;
 
   @Transform(({ value }) => Number(value ?? 5000000))
   @IsInt()

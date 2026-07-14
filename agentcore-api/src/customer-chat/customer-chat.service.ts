@@ -72,6 +72,10 @@ type ConversationContext = Prisma.CustomerChatConversationGetPayload<{
   };
 }>;
 
+type MessageWithCitations = Prisma.CustomerChatMessageGetPayload<{
+  include: { citations: { include: { chunk: true } } };
+}>;
+
 @Injectable()
 export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CustomerChatService.name);
@@ -815,11 +819,17 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       },
     );
 
-    await this.realtimeService.publish({
-      type: 'message.created',
-      conversationId: conversation.id,
-      organizationId: conversation.organizationId,
-    });
+    try {
+      await this.realtimeService.publish({
+        type: 'message.created',
+        conversationId: conversation.id,
+        organizationId: conversation.organizationId,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Could not publish visitor message event for conversation ${conversation.id}: ${this.toErrorMessage(error)}`,
+      );
+    }
 
     if (!canAutoReply) {
       const updatedConversation = await this.loadConversation(conversation.id);
@@ -842,65 +852,75 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     let searchResults: KnowledgeSearchRow[] = [];
     let shouldAutoHandoff = false;
 
-    if (input.appointmentAction) {
-      const result = await this.appointmentBookingService.executeAction(
-        conversation.organizationId,
-        input.appointmentAction,
+    try {
+      if (input.appointmentAction) {
+        const result = await this.appointmentBookingService.executeAction(
+          conversation.organizationId,
+          input.appointmentAction,
+        );
+        answer = this.appointmentBookingService.formatActionResult(result);
+        metadata = { appointmentAction: input.appointmentAction };
+      } else {
+        const searchUser: AuthenticatedUser = {
+          ...currentUser,
+          orgId: conversation.organizationId,
+        };
+        const candidates = await this.knowledgeService.search(searchUser, {
+          query: input.content,
+          limit: 10,
+          productKey: 'customer_chat',
+          folderIds:
+            conversation.widgetConfig?.knowledgeScope === 'folders'
+              ? conversation.widgetConfig.folderScopes.map(
+                  (scope) => scope.folderId,
+                )
+              : undefined,
+        });
+        const minimumScore = this.configService.get<number>(
+          'CUSTOMER_CHAT_MIN_SIMILARITY_SCORE',
+          0.35,
+        );
+        searchResults = candidates
+          .filter((result) => result.score >= minimumScore)
+          .slice(0, 5);
+        const chatResult = await this.chatService.answerWithContext({
+          organizationId: conversation.organizationId,
+          question: input.content,
+          safeFallback: true,
+          context: searchResults.map((result) => ({
+            content: result.content,
+            score: result.score,
+          })),
+        });
+        answer = chatResult.answer;
+        metadata = {
+          model: chatResult.model,
+          provider: chatResult.provider,
+          adapter: chatResult.adapter,
+          usedFallback: chatResult.usedFallback,
+          error: chatResult.error,
+          retrieval: {
+            candidateCount: candidates.length,
+            acceptedCount: searchResults.length,
+            minimumScore,
+            topScore: candidates[0]?.score ?? null,
+          },
+        };
+        shouldAutoHandoff =
+          this.configService.get<boolean>(
+            'CUSTOMER_CHAT_AUTO_HANDOFF_ON_FAILURE',
+            true,
+          ) &&
+          (searchResults.length === 0 || chatResult.usedFallback);
+      }
+    } catch (error) {
+      return this.recoverFromAutoReplyFailure(
+        currentUser,
+        conversation,
+        visitorMessage,
+        publicResponse,
+        error,
       );
-      answer = this.appointmentBookingService.formatActionResult(result);
-      metadata = { appointmentAction: input.appointmentAction };
-    } else {
-      const searchUser: AuthenticatedUser = {
-        ...currentUser,
-        orgId: conversation.organizationId,
-      };
-      const candidates = await this.knowledgeService.search(searchUser, {
-        query: input.content,
-        limit: 10,
-        productKey: 'customer_chat',
-        folderIds:
-          conversation.widgetConfig?.knowledgeScope === 'folders'
-            ? conversation.widgetConfig.folderScopes.map(
-                (scope) => scope.folderId,
-              )
-            : undefined,
-      });
-      const minimumScore = this.configService.get<number>(
-        'CUSTOMER_CHAT_MIN_SIMILARITY_SCORE',
-        0.35,
-      );
-      searchResults = candidates
-        .filter((result) => result.score >= minimumScore)
-        .slice(0, 5);
-      const chatResult = await this.chatService.answerWithContext({
-        organizationId: conversation.organizationId,
-        question: input.content,
-        safeFallback: true,
-        context: searchResults.map((result) => ({
-          content: result.content,
-          score: result.score,
-        })),
-      });
-      answer = chatResult.answer;
-      metadata = {
-        model: chatResult.model,
-        provider: chatResult.provider,
-        adapter: chatResult.adapter,
-        usedFallback: chatResult.usedFallback,
-        error: chatResult.error,
-        retrieval: {
-          candidateCount: candidates.length,
-          acceptedCount: searchResults.length,
-          minimumScore,
-          topScore: candidates[0]?.score ?? null,
-        },
-      };
-      shouldAutoHandoff =
-        this.configService.get<boolean>(
-          'CUSTOMER_CHAT_AUTO_HANDOFF_ON_FAILURE',
-          true,
-        ) &&
-        (searchResults.length === 0 || chatResult.usedFallback);
     }
 
     const assistantMessage = await this.prisma.$transaction(
@@ -979,6 +999,101 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             searchResults,
             publicResponse,
           )
+        : null,
+    };
+  }
+
+  private async recoverFromAutoReplyFailure(
+    currentUser: AuthenticatedUser,
+    conversation: ConversationContext,
+    visitorMessage: MessageWithCitations,
+    publicResponse: boolean,
+    error: unknown,
+  ) {
+    const errorMessage = this.toErrorMessage(error);
+    this.logger.error(
+      `Automatic reply failed for conversation ${conversation.id}; handing off to an agent: ${errorMessage}`,
+      error instanceof Error ? error.stack : undefined,
+    );
+    const content = this.configService.get<string>(
+      'CUSTOMER_CHAT_PROCESSING_FAILURE_MESSAGE',
+      'I could not complete that request right now. I have asked a human agent to help you.',
+    );
+
+    const assistantMessage = await this.prisma.$transaction(
+      async (transaction) => {
+        const claimed = await transaction.customerChatConversation.updateMany({
+          where: {
+            id: conversation.id,
+            status: 'open',
+            assignedAgentId: null,
+          },
+          data: {
+            status: 'waiting_for_agent',
+            handoffRequestedAt: new Date(),
+            lastMessageAt: new Date(),
+            version: { increment: 1 },
+          },
+        });
+        if (claimed.count === 0) return null;
+
+        return transaction.customerChatMessage.create({
+          data: {
+            organizationId: conversation.organizationId,
+            conversationId: conversation.id,
+            role: 'assistant',
+            content,
+            metadata: this.toJsonObject({
+              usedFallback: true,
+              handoffRequested: true,
+              failureCode: 'automatic_reply_failed',
+            }),
+          },
+          include: { citations: { include: { chunk: true } } },
+        });
+      },
+    );
+    const updatedConversation = await this.loadConversation(conversation.id);
+
+    if (assistantMessage) {
+      try {
+        await this.publishConversationEvent(
+          updatedConversation,
+          'handoff.requested',
+        );
+      } catch (publishError) {
+        this.logger.warn(
+          `Could not publish failure handoff for conversation ${conversation.id}: ${this.toErrorMessage(publishError)}`,
+        );
+      }
+      try {
+        await this.auditService.record({
+          actor: currentUser,
+          organizationId: conversation.organizationId,
+          action: 'customer_chat.auto_handoff_requested',
+          entityType: 'customer_chat_conversation',
+          entityId: conversation.id,
+          metadata: { reason: 'automatic_reply_failed', error: errorMessage },
+        });
+      } catch (auditError) {
+        this.logger.warn(
+          `Could not audit failure handoff for conversation ${conversation.id}: ${this.toErrorMessage(auditError)}`,
+        );
+      }
+    }
+
+    return {
+      conversation: this.toConversationResponse(
+        updatedConversation,
+        publicResponse ? 'public' : 'internal',
+      ),
+      visitorMessage: this.toMessageResponse(
+        visitorMessage,
+        undefined,
+        publicResponse,
+      ),
+      assistantMessage: assistantMessage
+        ? this.toMessageResponse(assistantMessage, [], publicResponse)
         : null,
     };
   }
@@ -1580,6 +1695,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
 
   private addDays(value: Date, days: number): Date {
     return new Date(value.getTime() + days * 24 * 60 * 60 * 1000);
+  }
+
+  private toErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private publishConversationEvent(

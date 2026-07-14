@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { KnowledgeService } from './knowledge.service';
 
@@ -12,7 +12,10 @@ const actor = {
   customRoleIds: [],
 } as unknown as AuthenticatedUser;
 
-function createService(source: Record<string, unknown> | null = null) {
+function createService(
+  source: Record<string, unknown> | null = null,
+  embeddingProvider = 'openai',
+) {
   let capturedQuery = '';
   let capturedValues = '';
   const rawQuery = (
@@ -33,7 +36,8 @@ function createService(source: Record<string, unknown> | null = null) {
     embedText: jest.fn().mockResolvedValue({
       vector: [0, 1],
       model: 'test',
-      provider: 'local',
+      provider: embeddingProvider,
+      isFallback: embeddingProvider === 'fallback',
     }),
   };
   const policy = {
@@ -71,7 +75,7 @@ describe('KnowledgeService tenant and retrieval boundaries', () => {
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('binds semantic retrieval to organization, clearance, and quarantine', async () => {
+  it('binds semantic retrieval to tenant, policy, and embedding space', async () => {
     const { service, getCapturedQuery, getCapturedValues } = createService();
     await service.search(actor, {
       query: 'refund policy',
@@ -83,6 +87,18 @@ describe('KnowledgeService tenant and retrieval boundaries', () => {
     expect(query).toContain('"organization_id"');
     expect(query).toContain('"sensitivity_level"');
     expect(query).toContain('"is_quarantined" = false');
+    expect(query).toContain('"embedding_model"');
+    expect(query).toContain('"embedding_provider"');
     expect(getCapturedValues()).toContain('product_visibility');
+    expect(getCapturedValues()).toContain('openai');
+    expect(getCapturedValues()).toContain('test');
+  });
+
+  it('refuses to search a persistent index with local fallback vectors', async () => {
+    const { service } = createService(null, 'fallback');
+
+    await expect(
+      service.search(actor, { query: 'refund policy', limit: 5 }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 });

@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   KnowledgeChunk,
@@ -865,6 +866,11 @@ export class KnowledgeService {
       organizationId: currentUser.orgId,
       text: input.query,
     });
+    if (embedding.isFallback) {
+      throw new ServiceUnavailableException(
+        'Semantic search requires the same configured embedding provider used to index the knowledge base',
+      );
+    }
     const limit = input.limit ?? 5;
     const sourceFilter = input.sourceId
       ? Prisma.sql`AND "source_id" = ${input.sourceId}`
@@ -902,6 +908,8 @@ export class KnowledgeService {
         AND "sensitivity_level" <= ${clearanceLevel}
         AND "is_quarantined" = false
         AND "embedding" IS NOT NULL
+        AND "embedding_model" = ${embedding.model}
+        AND "embedding_provider" = ${embedding.provider}::"AIProviderType"
         ${sourceFilter}
         ${productFilter}
         ${folderFilter}

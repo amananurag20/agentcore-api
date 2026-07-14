@@ -1,13 +1,19 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AIProviderConfig, Prisma } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { resolveEmbeddingDimensions } from '../ai/embedding-model-dimensions';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
+import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-ingestion.service';
 import { CreateAIProviderDto } from './dto/create-ai-provider.dto';
 import { UpdateAIProviderDto } from './dto/update-ai-provider.dto';
 
@@ -21,9 +27,14 @@ type SafeAIProviderConfig = Omit<
 
 @Injectable()
 export class AIProvidersService {
+  private readonly logger = new Logger(AIProvidersService.name);
+
   constructor(
     private readonly auditService: AuditService,
+    private readonly configService: ConfigService,
     private readonly cryptoService: CryptoService,
+    private readonly ingestionQueue: KnowledgeIngestionQueueService,
+    private readonly ingestionService: KnowledgeIngestionService,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -51,6 +62,9 @@ export class AIProvidersService {
       currentUser,
       input.organizationId,
     );
+    this.validateEmbeddingModel(input.embeddingModel, input.settings ?? {});
+    const previousEmbeddingConfig =
+      await this.findActiveEmbeddingConfig(organizationId);
 
     const config = await this.prisma.aIProviderConfig.create({
       data: {
@@ -84,6 +98,11 @@ export class AIProvidersService {
       },
     });
 
+    await this.reembedIfActiveSpaceChanged(
+      organizationId,
+      previousEmbeddingConfig,
+    );
+
     return this.toSafeConfig(config);
   }
 
@@ -100,7 +119,29 @@ export class AIProvidersService {
     id: string,
     input: UpdateAIProviderDto,
   ): Promise<SafeAIProviderConfig> {
-    await this.findConfigForActor(currentUser, id);
+    const existing = await this.findConfigForActor(currentUser, id);
+    const organizationId = input.organizationId
+      ? this.resolveOrganizationId(currentUser, input.organizationId)
+      : existing.organizationId;
+    const settings = input.settings ?? this.toRecord(existing.settings);
+    this.validateEmbeddingModel(
+      input.embeddingModel ?? existing.embeddingModel ?? undefined,
+      settings,
+    );
+    const affectedOrganizationIds = [
+      ...new Set([existing.organizationId, organizationId]),
+    ];
+    const previousEmbeddingConfigs = new Map(
+      await Promise.all(
+        affectedOrganizationIds.map(
+          async (affectedOrganizationId) =>
+            [
+              affectedOrganizationId,
+              await this.findActiveEmbeddingConfig(affectedOrganizationId),
+            ] as const,
+        ),
+      ),
+    );
 
     const config = await this.prisma.aIProviderConfig.update({
       where: { id },
@@ -144,11 +185,21 @@ export class AIProvidersService {
       }),
     });
 
+    for (const affectedOrganizationId of affectedOrganizationIds) {
+      await this.reembedIfActiveSpaceChanged(
+        affectedOrganizationId,
+        previousEmbeddingConfigs.get(affectedOrganizationId) ?? null,
+      );
+    }
+
     return this.toSafeConfig(config);
   }
 
   async delete(currentUser: AuthenticatedUser, id: string) {
     const config = await this.findConfigForActor(currentUser, id);
+    const previousEmbeddingConfig = await this.findActiveEmbeddingConfig(
+      config.organizationId,
+    );
     await this.prisma.aIProviderConfig.delete({ where: { id } });
 
     await this.auditService.record({
@@ -162,6 +213,11 @@ export class AIProvidersService {
         name: config.name,
       },
     });
+
+    await this.reembedIfActiveSpaceChanged(
+      config.organizationId,
+      previousEmbeddingConfig,
+    );
 
     return { deleted: true };
   }
@@ -186,6 +242,117 @@ export class AIProvidersService {
     }
 
     return config;
+  }
+
+  private validateEmbeddingModel(
+    model: string | undefined,
+    settings: Record<string, unknown>,
+  ): void {
+    if (!model) return;
+
+    const storageDimensions =
+      this.configService.get<number>('DEFAULT_EMBEDDING_DIMENSIONS') ?? 1536;
+    const modelDimensions = resolveEmbeddingDimensions(model, settings);
+    if (modelDimensions === null) {
+      throw new BadRequestException(
+        `Embedding model ${model} has unknown dimensions; set settings.embeddingDimensions to validate it against the vector index`,
+      );
+    }
+    if (modelDimensions !== storageDimensions) {
+      throw new BadRequestException(
+        `Embedding model ${model} returns ${modelDimensions} dimensions, but the knowledge index requires ${storageDimensions}`,
+      );
+    }
+  }
+
+  private findActiveEmbeddingConfig(
+    organizationId: string,
+  ): Promise<AIProviderConfig | null> {
+    return this.prisma.aIProviderConfig.findFirst({
+      where: {
+        organizationId,
+        status: 'active',
+        embeddingModel: { not: null },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  private async reembedIfActiveSpaceChanged(
+    organizationId: string,
+    previousConfig: AIProviderConfig | null,
+  ): Promise<void> {
+    const activeConfig = await this.findActiveEmbeddingConfig(organizationId);
+    if (
+      !activeConfig ||
+      this.embeddingSpaceIdentity(previousConfig) ===
+        this.embeddingSpaceIdentity(activeConfig)
+    ) {
+      return;
+    }
+
+    const sources = await this.prisma.knowledgeSource.findMany({
+      where: { organizationId, status: 'ready' },
+      select: { id: true },
+    });
+    if (sources.length === 0) return;
+
+    if (this.ingestionQueue.isEnabled()) {
+      await this.prisma.knowledgeSource.updateMany({
+        where: { id: { in: sources.map((source) => source.id) } },
+        data: { status: 'pending', errorMessage: null },
+      });
+    }
+
+    const results = await Promise.allSettled(
+      sources.map((source) => {
+        const job = {
+          organizationId,
+          sourceId: source.id,
+          reason: 'embedding_model_changed' as const,
+        };
+        return this.ingestionQueue.isEnabled()
+          ? this.ingestionQueue.enqueue(job)
+          : this.ingestionService.ingestSource(job);
+      }),
+    );
+    const failures = results.flatMap((result, index) =>
+      result.status === 'rejected'
+        ? [{ sourceId: sources[index].id, reason: result.reason as unknown }]
+        : [],
+    );
+    if (failures.length > 0) {
+      await Promise.all(
+        failures.map((failure) =>
+          this.prisma.knowledgeSource.update({
+            where: { id: failure.sourceId },
+            data: {
+              status: 'failed',
+              errorMessage: `Knowledge re-embedding could not be scheduled: ${this.toErrorMessage(failure.reason)}`,
+            },
+          }),
+        ),
+      );
+      this.logger.error(
+        `Failed to schedule ${failures.length}/${sources.length} knowledge sources for re-embedding in organization ${organizationId}`,
+      );
+    }
+  }
+
+  private embeddingSpaceIdentity(config: AIProviderConfig | null): string {
+    if (!config) return 'none';
+    const settings = this.toRecord(config.settings);
+    return JSON.stringify({
+      provider: config.provider,
+      baseUrl: config.baseUrl,
+      model: config.embeddingModel,
+      adapter: settings.adapter,
+      dimensions: settings.embeddingDimensions,
+    });
+  }
+
+  private toErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private resolveOrganizationId(

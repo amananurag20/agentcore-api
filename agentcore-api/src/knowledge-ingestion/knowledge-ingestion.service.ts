@@ -93,7 +93,7 @@ export class KnowledgeIngestionService {
         });
 
         for (const [index, chunk] of chunks.entries()) {
-          const embedding = await this.embeddingsService.embedText({
+          const embedding = await this.embeddingsService.embedForIndexing({
             organizationId: source.organizationId,
             text: chunk.content,
           });
@@ -115,8 +115,7 @@ export class KnowledgeIngestionService {
                 uri: document.uri,
               }),
               embeddingModel: embedding.model,
-              embeddingProvider:
-                embedding.provider === 'local' ? undefined : embedding.provider,
+              embeddingProvider: embedding.provider,
               embeddedAt: new Date(),
             },
           });

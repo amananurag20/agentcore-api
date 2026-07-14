@@ -14,6 +14,7 @@ export interface EmbeddingResult {
   vector: number[];
   model: string;
   provider: AIProviderType | 'local';
+  isFallback: boolean;
 }
 
 @Injectable()
@@ -55,6 +56,19 @@ export class EmbeddingsService {
       );
     }
     return this.localEmbedding(input.text, providerConfig);
+  }
+
+  async embedForIndexing(input: {
+    organizationId: string;
+    text: string;
+  }): Promise<EmbeddingResult> {
+    const embedding = await this.embedText(input);
+    if (embedding.isFallback) {
+      throw new ServiceUnavailableException(
+        'Knowledge ingestion requires a configured embedding provider; local deterministic embeddings are not persisted',
+      );
+    }
+    return embedding;
   }
 
   private async findProviderConfig(
@@ -100,6 +114,7 @@ export class EmbeddingsService {
         vector: this.assertVectorDimensions(result.vector),
         model: result.model,
         provider: providerConfig.provider,
+        isFallback: false,
       };
     } catch (error) {
       if (!this.allowLocalFallback) {
@@ -139,6 +154,7 @@ export class EmbeddingsService {
       vector: this.createDeterministicVector(text),
       model: providerConfig?.embeddingModel ?? this.defaultModel,
       provider: 'local',
+      isFallback: true,
     };
   }
 
