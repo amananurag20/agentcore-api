@@ -34,6 +34,18 @@ export class AppointmentServiceResponseDto {
   @ApiProperty()
   currency: string;
 
+  @ApiProperty()
+  maxAttendees: number;
+
+  @ApiPropertyOptional()
+  cancellationWindowMinutes?: number | null;
+
+  @ApiPropertyOptional()
+  rescheduleWindowMinutes?: number | null;
+
+  @ApiProperty()
+  waitlistEnabled: boolean;
+
   @ApiProperty({ enum: AppointmentServiceStatusDto })
   status: AppointmentServiceStatusDto;
 
@@ -62,6 +74,9 @@ export class AppointmentStaffResponseDto {
 
   @ApiProperty()
   timezone: string;
+
+  @ApiProperty()
+  seatsRemaining: number;
 
   @ApiProperty({ enum: AppointmentStaffStatusDto })
   status: AppointmentStaffStatusDto;
@@ -151,6 +166,18 @@ export class AppointmentSlotResponseDto {
 
   @ApiProperty()
   timezone: string;
+
+  @ApiProperty()
+  partySize: number;
+
+  @ApiPropertyOptional()
+  checkedInAt?: Date | null;
+
+  @ApiPropertyOptional()
+  seriesId?: string | null;
+
+  @ApiPropertyOptional()
+  occurrenceIndex?: number | null;
 }
 
 export class AppointmentBookingResponseDto {

@@ -9,6 +9,7 @@ describe('AppointmentBookingService concurrency errors', () => {
     {} as never,
     { get: jest.fn() } as never,
     {} as never,
+    {} as never,
     prisma as never,
     {} as never,
   );
@@ -42,5 +43,89 @@ describe('AppointmentBookingService concurrency errors', () => {
     await expect(
       runSerializable.runSerializable(() => Promise.resolve('unreachable')),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+});
+
+describe('AppointmentBookingService group capacity', () => {
+  const startAt = new Date('2026-08-01T10:00:00.000Z');
+  const endAt = new Date('2026-08-01T10:30:00.000Z');
+  const serviceRecord = {
+    id: 'service-1',
+    organizationId: 'org-1',
+    name: 'Group class',
+    description: null,
+    durationMinutes: 30,
+    bufferBeforeMinutes: 0,
+    bufferAfterMinutes: 0,
+    priceCents: null,
+    currency: 'USD',
+    maxAttendees: 3,
+    cancellationWindowMinutes: null,
+    rescheduleWindowMinutes: null,
+    waitlistEnabled: true,
+    status: 'active' as const,
+    metadata: {},
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  const prisma = {
+    appointmentBooking: {
+      findFirst: jest.fn().mockResolvedValue({ id: 'existing-1' }),
+      findMany: jest.fn().mockResolvedValue([
+        {
+          id: 'existing-1',
+          serviceId: 'service-1',
+          staffId: 'staff-1',
+          startAt,
+          endAt,
+          partySize: 2,
+          service: serviceRecord,
+        },
+      ]),
+    },
+    appointmentStaffTimeOff: { findFirst: jest.fn().mockResolvedValue(null) },
+    appointmentBlackout: { findMany: jest.fn().mockResolvedValue([]) },
+    appointmentServiceResource: { findMany: jest.fn().mockResolvedValue([]) },
+  };
+  const bookingService = new AppointmentBookingService(
+    {} as never,
+    { hasExternalConflict: jest.fn().mockResolvedValue(false) } as never,
+    { get: jest.fn() } as never,
+    {} as never,
+    {} as never,
+    prisma as never,
+    {} as never,
+  ) as unknown as {
+    hasConflict(input: {
+      organizationId: string;
+      service: typeof serviceRecord;
+      staffId: string;
+      startAt: Date;
+      endAt: Date;
+      partySize: number;
+    }): Promise<boolean>;
+  };
+
+  it('allows seats that fit and rejects a party that exceeds remaining seats', async () => {
+    await expect(
+      bookingService.hasConflict({
+        organizationId: 'org-1',
+        service: serviceRecord,
+        staffId: 'staff-1',
+        startAt,
+        endAt,
+        partySize: 1,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      bookingService.hasConflict({
+        organizationId: 'org-1',
+        service: serviceRecord,
+        staffId: 'staff-1',
+        startAt,
+        endAt,
+        partySize: 2,
+      }),
+    ).resolves.toBe(true);
   });
 });

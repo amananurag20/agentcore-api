@@ -10,8 +10,41 @@ voice receptionist, WhatsApp assistant, and customer chat.
 - Daylight-saving gaps are rejected instead of silently shifting an appointment.
 - Staff time off, service buffers, resource time off, staff-resource mappings, and
   shared resource capacity participate in availability and booking conflicts.
+- Organization blackouts apply to every staff member and may be one-off or annual.
+- Services may set `maxAttendees`; exact group sessions share seats and availability
+  returns `seatsRemaining`. Partially overlapping group sessions remain forbidden.
 - Booking and rescheduling conflict checks run in serializable transactions with
-  bounded retries; a concurrent winner produces HTTP `409` for the loser.
+  bounded retries. PostgreSQL exclusion/capacity guards remain the final backstop,
+  and a concurrent winner produces HTTP `409` for the loser.
+
+## Policies, attendance, and closures
+
+Administrators manage organization defaults through `GET/PATCH
+/api/v1/appointment-booking/policy`. Services may override public cancellation
+and reschedule windows. Authenticated staff/admin actions bypass these customer
+self-service windows.
+
+Use `PATCH /api/v1/appointment-booking/bookings/:id/check-in` to record attendance.
+The worker marks unchecked-in confirmed bookings `no_show` after the configured
+grace period. Organization closures are managed through the authenticated
+`/appointment-booking/blackouts` endpoints.
+
+## Recurring appointments
+
+Booking creation accepts a bounded recurrence rule (`daily`, `weekly`, or
+`monthly`, interval, and 2-52 occurrences). All occurrences are availability-
+checked and created atomically in a recurrence series. Existing reschedule APIs
+change one occurrence by default; `applyToFuture=true` shifts that occurrence and
+all later ones atomically. Series cancellation supports the whole series or a
+`fromOccurrenceIndex` through authenticated and management-token public routes.
+
+## Waitlist
+
+Customers may join a full service/staff/start slot at `POST
+/api/v1/appointment-booking/public/waitlist`. Cancellation offers the released
+capacity to the first party that fits, by email/SMS, with a configurable claim
+deadline. Claims are optimistic and DB-capacity guarded. The worker expires stale
+offers, repairs interrupted claims, and advances the queue.
 
 ## Customer self-service
 
@@ -48,6 +81,12 @@ by due time, so stale reschedule jobs cannot send early. The worker claims each
 record atomically, tracks attempts/provider IDs/errors, skips inactive bookings,
 and periodically recovers publish or delivery failures.
 
+Organization quiet hours shift non-confirmation reminders to the next permitted
+wall-clock time (and drop the reminder if that would be after the appointment).
+Reminder messages include an HMAC-signed preference link when
+`APPOINTMENT_PUBLIC_URL` is configured. The public opt-out endpoint creates a
+per-channel suppression that is checked immediately before delivery.
+
 Run both processes in production:
 
 ```bash
@@ -71,9 +110,9 @@ through the Calendar sync tab or these authenticated endpoints:
 OAuth state is random, short-lived, and stored only as a SHA-256 hash. Access and
 refresh tokens are encrypted with `AI_CONFIG_ENCRYPTION_KEY` and never returned by
 the API. Connected calendars participate in availability through Google FreeBusy
-or Microsoft Graph calendarView. The default is fail-closed: a provider outage
-prevents an unverified booking unless `APPOINTMENT_CALENDAR_FAIL_OPEN=true` is set
-explicitly.
+or Microsoft Graph calendarView. The default is fail-open: a provider outage is
+recorded on the connection but does not take down public availability or booking.
+Set `APPOINTMENT_CALENDAR_FAIL_OPEN=false` to choose strict fail-closed behavior.
 
 Booking creates, reschedules, cancellations, and status changes produce durable,
 versioned BullMQ sync records. Failed records are retried and recovered by the

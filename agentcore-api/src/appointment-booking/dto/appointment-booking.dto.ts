@@ -1,4 +1,4 @@
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   ArrayNotEmpty,
@@ -17,7 +17,9 @@ import {
   Min,
   MinLength,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
+import { AppointmentRecurrenceDto } from './appointment-features.dto';
 
 export enum AppointmentServiceStatusDto {
   active = 'active',
@@ -92,6 +94,30 @@ export class CreateAppointmentServiceDto {
   @IsOptional()
   currency?: string;
 
+  @ApiPropertyOptional({ minimum: 1, maximum: 100, default: 1 })
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  maxAttendees?: number;
+
+  @ApiPropertyOptional({ minimum: 0, maximum: 43200, nullable: true })
+  @ValidateIf((_, value) => value !== null && value !== undefined)
+  @IsInt()
+  @Min(0)
+  cancellationWindowMinutes?: number | null;
+
+  @ApiPropertyOptional({ minimum: 0, maximum: 43200, nullable: true })
+  @ValidateIf((_, value) => value !== null && value !== undefined)
+  @IsInt()
+  @Min(0)
+  rescheduleWindowMinutes?: number | null;
+
+  @ApiPropertyOptional({ default: true })
+  @IsBoolean()
+  @IsOptional()
+  waitlistEnabled?: boolean;
+
   @ApiPropertyOptional({ enum: AppointmentServiceStatusDto })
   @IsEnum(AppointmentServiceStatusDto)
   @IsOptional()
@@ -146,6 +172,30 @@ export class UpdateAppointmentServiceDto {
   @IsString()
   @IsOptional()
   currency?: string;
+
+  @ApiPropertyOptional({ minimum: 1, maximum: 100 })
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  maxAttendees?: number;
+
+  @ApiPropertyOptional({ minimum: 0, maximum: 43200, nullable: true })
+  @ValidateIf((_, value) => value !== null && value !== undefined)
+  @IsInt()
+  @Min(0)
+  cancellationWindowMinutes?: number | null;
+
+  @ApiPropertyOptional({ minimum: 0, maximum: 43200, nullable: true })
+  @ValidateIf((_, value) => value !== null && value !== undefined)
+  @IsInt()
+  @Min(0)
+  rescheduleWindowMinutes?: number | null;
+
+  @ApiPropertyOptional()
+  @IsBoolean()
+  @IsOptional()
+  waitlistEnabled?: boolean;
 
   @ApiPropertyOptional({ enum: AppointmentServiceStatusDto })
   @IsEnum(AppointmentServiceStatusDto)
@@ -473,6 +523,13 @@ export class CreateAppointmentBookingDto {
   @IsOptional()
   customerPhone?: string;
 
+  @ApiPropertyOptional({ minimum: 1, maximum: 100, default: 1 })
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  partySize?: number;
+
   @ApiProperty({ example: '2026-08-01T10:00:00.000Z' })
   @IsISO8601()
   startAt: string;
@@ -491,6 +548,12 @@ export class CreateAppointmentBookingDto {
   @IsObject()
   @IsOptional()
   metadata?: Record<string, unknown>;
+
+  @ApiPropertyOptional({ type: AppointmentRecurrenceDto })
+  @ValidateNested()
+  @Type(() => AppointmentRecurrenceDto)
+  @IsOptional()
+  recurrence?: AppointmentRecurrenceDto;
 }
 
 export class PublicCreateAppointmentBookingDto {
@@ -522,6 +585,13 @@ export class PublicCreateAppointmentBookingDto {
   @IsOptional()
   customerPhone?: string;
 
+  @ApiPropertyOptional({ minimum: 1, maximum: 100, default: 1 })
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  partySize?: number;
+
   @ApiProperty({ example: '2026-08-01T10:00:00.000Z' })
   @IsISO8601()
   startAt: string;
@@ -540,6 +610,12 @@ export class PublicCreateAppointmentBookingDto {
   @IsObject()
   @IsOptional()
   metadata?: Record<string, unknown>;
+
+  @ApiPropertyOptional({ type: AppointmentRecurrenceDto })
+  @ValidateNested()
+  @Type(() => AppointmentRecurrenceDto)
+  @IsOptional()
+  recurrence?: AppointmentRecurrenceDto;
 }
 
 export class ListAppointmentBookingsDto {
@@ -603,6 +679,14 @@ export class RescheduleAppointmentBookingDto {
   @IsString()
   @IsOptional()
   timezone?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'For recurring bookings, apply the same time/staff shift to this and all future occurrences.',
+  })
+  @IsBoolean()
+  @IsOptional()
+  applyToFuture?: boolean;
 }
 
 export class CancelAppointmentBookingDto {

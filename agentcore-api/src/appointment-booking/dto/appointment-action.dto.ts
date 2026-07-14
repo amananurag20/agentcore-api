@@ -1,14 +1,21 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
   IsEmail,
   IsEnum,
   IsISO8601,
+  IsInt,
+  IsBoolean,
   IsOptional,
   IsString,
   IsUUID,
   Matches,
   MinLength,
+  Min,
+  Max,
+  ValidateNested,
 } from 'class-validator';
+import { AppointmentRecurrenceDto } from './appointment-features.dto';
 
 export enum AppointmentActionTypeDto {
   list_services = 'list_services',
@@ -64,6 +71,19 @@ export class AppointmentActionDto {
   @IsOptional()
   customerPhone?: string;
 
+  @ApiPropertyOptional({ minimum: 1, maximum: 100 })
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  partySize?: number;
+
+  @ApiPropertyOptional({ type: AppointmentRecurrenceDto })
+  @ValidateNested()
+  @Type(() => AppointmentRecurrenceDto)
+  @IsOptional()
+  recurrence?: AppointmentRecurrenceDto;
+
   @ApiPropertyOptional()
   @IsUUID()
   @IsOptional()
@@ -84,4 +104,9 @@ export class AppointmentActionDto {
   @IsString()
   @IsOptional()
   notes?: string;
+
+  @ApiPropertyOptional()
+  @IsBoolean()
+  @IsOptional()
+  applyToFuture?: boolean;
 }

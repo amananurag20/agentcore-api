@@ -31,16 +31,29 @@ export class AppointmentReminderQueueService {
     bookingId: string;
     organizationId: string;
     startAt: Date;
+    timezone?: string;
   }) {
     await this.cancelBookingReminders(input.bookingId);
     const now = new Date();
+    const policy = await this.prisma.appointmentBookingPolicy.findUnique({
+      where: { organizationId: input.organizationId },
+    });
     const offsets = [0, ...this.getReminderOffsets()];
 
     for (const offsetMinutes of offsets) {
-      const dueAt =
+      let dueAt =
         offsetMinutes === 0
           ? now
           : new Date(input.startAt.getTime() - offsetMinutes * 60_000);
+      if (offsetMinutes > 0 && policy?.quietHoursEnabled) {
+        dueAt = this.shiftOutOfQuietHours(
+          dueAt,
+          policy.quietHoursStart,
+          policy.quietHoursEnd,
+          policy.quietHoursTimezone || input.timezone || 'UTC',
+        );
+        if (dueAt >= input.startAt) continue;
+      }
       if (offsetMinutes > 0 && dueAt <= now) continue;
 
       const reminder = await this.prisma.appointmentReminder.upsert({
@@ -152,5 +165,43 @@ export class AppointmentReminderQueueService {
     }
     if (offsetMinutes % 60 === 0) return `${offsetMinutes / 60}h_before`;
     return `${offsetMinutes}m_before`;
+  }
+
+  private shiftOutOfQuietHours(
+    dueAt: Date,
+    quietStart: string,
+    quietEnd: string,
+    timezone: string,
+  ): Date {
+    const startMinutes = this.parseTime(quietStart);
+    const endMinutes = this.parseTime(quietEnd);
+    let candidate = new Date(dueAt);
+    for (let minute = 0; minute <= 24 * 60; minute += 1) {
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).formatToParts(candidate);
+      const hour = Number(parts.find((part) => part.type === 'hour')?.value);
+      const localMinute = Number(
+        parts.find((part) => part.type === 'minute')?.value,
+      );
+      const value = hour * 60 + localMinute;
+      const isQuiet =
+        startMinutes === endMinutes
+          ? true
+          : startMinutes < endMinutes
+            ? value >= startMinutes && value < endMinutes
+            : value >= startMinutes || value < endMinutes;
+      if (!isQuiet) return candidate;
+      candidate = new Date(candidate.getTime() + 60_000);
+    }
+    return candidate;
+  }
+
+  private parseTime(value: string): number {
+    const [hour, minute] = value.split(':').map(Number);
+    return hour * 60 + minute;
   }
 }

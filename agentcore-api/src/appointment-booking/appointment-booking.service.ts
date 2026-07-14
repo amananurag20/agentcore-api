@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -18,6 +19,7 @@ import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppointmentReminderQueueService } from './appointment-reminder-queue.service';
+import { AppointmentReminderDeliveryService } from './appointment-reminder-delivery.service';
 import { AppointmentTimezoneService } from './appointment-timezone.service';
 import { AppointmentCalendarService } from './appointment-calendar.service';
 import {
@@ -46,6 +48,19 @@ import {
   UpdateAppointmentResourceDto,
   UpdateAppointmentStaffDto,
 } from './dto/appointment-booking.dto';
+import {
+  AppointmentReminderOptOutDto,
+  AppointmentRecurrenceFrequencyDto,
+  AppointmentReminderChannelDto,
+  CancelAppointmentSeriesDto,
+  CheckInAppointmentDto,
+  ClaimAppointmentWaitlistDto,
+  CreateAppointmentBlackoutDto,
+  JoinAppointmentWaitlistDto,
+  ListWaitlistDto,
+  PublicCancelAppointmentSeriesDto,
+  UpdateAppointmentPolicyDto,
+} from './dto/appointment-features.dto';
 
 type StaffWithServices = Prisma.AppointmentStaffGetPayload<{
   include: {
@@ -69,10 +84,13 @@ type BookingCreationResult = {
 
 @Injectable()
 export class AppointmentBookingService {
+  private readonly logger = new Logger(AppointmentBookingService.name);
+
   constructor(
     private readonly auditService: AuditService,
     private readonly calendarService: AppointmentCalendarService,
     private readonly configService: ConfigService,
+    private readonly reminderDeliveryService: AppointmentReminderDeliveryService,
     private readonly reminderQueueService: AppointmentReminderQueueService,
     private readonly prisma: PrismaService,
     private readonly timezoneService: AppointmentTimezoneService,
@@ -114,9 +132,11 @@ export class AppointmentBookingService {
             customerName: input.customerName!,
             customerEmail: input.customerEmail,
             customerPhone: input.customerPhone,
+            partySize: input.partySize,
             startAt: input.startAt!,
             timezone: input.timezone,
             notes: input.notes,
+            recurrence: input.recurrence,
             metadata: { source: 'channel_action' },
           }),
         };
@@ -134,6 +154,7 @@ export class AppointmentBookingService {
             staffId: input.staffId,
             startAt: input.startAt!,
             timezone: input.timezone,
+            applyToFuture: input.applyToFuture,
           }),
         };
       case AppointmentActionTypeDto.cancel:
@@ -180,10 +201,18 @@ export class AppointmentBookingService {
             .join(', ')}.`
         : 'No appointments are available for that date.';
     }
+    const recurring = result.data as {
+      series?: { id: string; manageToken?: string };
+      bookings?: Array<{ startAt: Date }>;
+    };
+    if (recurring.series && recurring.bookings) {
+      return `Recurring appointment series ${recurring.series.id} was created with ${recurring.bookings.length} occurrences.${recurring.series.manageToken ? ` Management token: ${recurring.series.manageToken}` : ''}`;
+    }
     const booking = result.data as {
       id: string;
       startAt: Date;
       timezone: string;
+      seatsRemaining: number;
       status: string;
       manageToken?: string;
     };
@@ -191,6 +220,535 @@ export class AppointmentBookingService {
       return `Appointment ${booking.id} has been cancelled.`;
     }
     return `Appointment ${booking.id} is ${booking.status} for ${new Date(booking.startAt).toISOString()}.${booking.manageToken ? ` Management token: ${booking.manageToken}` : ''}`;
+  }
+
+  async getPolicy(
+    currentUser: AuthenticatedUser,
+    requestedOrganizationId?: string,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      requestedOrganizationId,
+    );
+    await this.assertAppointmentBookingEnabled(organizationId);
+    return this.prisma.appointmentBookingPolicy.upsert({
+      where: { organizationId },
+      create: { organizationId },
+      update: {},
+    });
+  }
+
+  async updatePolicy(
+    currentUser: AuthenticatedUser,
+    requestedOrganizationId: string | undefined,
+    input: UpdateAppointmentPolicyDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      requestedOrganizationId,
+    );
+    this.timezoneService.assertValid(input.quietHoursTimezone ?? 'UTC');
+    const policy = await this.prisma.appointmentBookingPolicy.upsert({
+      where: { organizationId },
+      create: { organizationId, ...input },
+      update: input,
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId,
+      action: 'appointment.policy_updated',
+      entityType: 'appointment_booking_policy',
+      entityId: organizationId,
+    });
+    return policy;
+  }
+
+  async listBlackouts(
+    currentUser: AuthenticatedUser,
+    requestedOrganizationId?: string,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      requestedOrganizationId,
+    );
+    return this.prisma.appointmentBlackout.findMany({
+      where: { organizationId },
+      orderBy: { startAt: 'asc' },
+    });
+  }
+
+  async createBlackout(
+    currentUser: AuthenticatedUser,
+    input: CreateAppointmentBlackoutDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    const startAt = new Date(input.startAt);
+    const endAt = new Date(input.endAt);
+    this.assertDateRange(startAt, endAt);
+    const blackout = await this.prisma.appointmentBlackout.create({
+      data: {
+        organizationId,
+        name: input.name,
+        startAt,
+        endAt,
+        annual: input.annual ?? false,
+      },
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId,
+      action: 'appointment.blackout_created',
+      entityType: 'appointment_blackout',
+      entityId: blackout.id,
+    });
+    return blackout;
+  }
+
+  async deleteBlackout(currentUser: AuthenticatedUser, id: string) {
+    const blackout = await this.prisma.appointmentBlackout.findUnique({
+      where: { id },
+    });
+    if (
+      !blackout ||
+      (!this.isSuperAdmin(currentUser) &&
+        blackout.organizationId !== currentUser.orgId)
+    ) {
+      throw new NotFoundException('Appointment blackout not found');
+    }
+    await this.prisma.appointmentBlackout.delete({ where: { id } });
+    return { deleted: true };
+  }
+
+  async checkInBooking(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: CheckInAppointmentDto,
+  ) {
+    const booking = await this.findBookingForActor(currentUser, id);
+    if (!['pending', 'confirmed'].includes(booking.status)) {
+      throw new ConflictException('Booking cannot be checked in');
+    }
+    const checkedInAt = input.checkedInAt
+      ? new Date(input.checkedInAt)
+      : new Date();
+    const updated = await this.prisma.appointmentBooking.update({
+      where: { id: booking.id },
+      data: { checkedInAt },
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: booking.organizationId,
+      action: 'appointment.booking_checked_in',
+      entityType: 'appointment_booking',
+      entityId: booking.id,
+      metadata: { checkedInAt: checkedInAt.toISOString() },
+    });
+    return this.toBookingResponse(updated);
+  }
+
+  async cancelSeries(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: CancelAppointmentSeriesDto,
+  ) {
+    const series = await this.prisma.appointmentRecurrenceSeries.findUnique({
+      where: { id },
+    });
+    if (
+      !series ||
+      (!this.isSuperAdmin(currentUser) &&
+        series.organizationId !== currentUser.orgId)
+    ) {
+      throw new NotFoundException('Appointment recurrence series not found');
+    }
+    return this.cancelSeriesRecord(series, input, currentUser);
+  }
+
+  async cancelPublicSeries(
+    id: string,
+    input: PublicCancelAppointmentSeriesDto,
+  ) {
+    const series = await this.prisma.appointmentRecurrenceSeries.findFirst({
+      where: { id, organizationId: input.organizationId },
+    });
+    if (
+      !series ||
+      !this.manageTokenMatches(series.manageTokenHash, input.manageToken)
+    ) {
+      throw new NotFoundException('Appointment recurrence series not found');
+    }
+    return this.cancelSeriesRecord(series, input);
+  }
+
+  private async cancelSeriesRecord(
+    series: Prisma.AppointmentRecurrenceSeriesGetPayload<object>,
+    input: CancelAppointmentSeriesDto,
+    actor?: AuthenticatedUser,
+  ) {
+    if (series.status !== 'active') {
+      throw new ConflictException('Appointment series is not active');
+    }
+    const bookings = await this.prisma.appointmentBooking.findMany({
+      where: {
+        seriesId: series.id,
+        status: { in: ['pending', 'confirmed'] },
+        occurrenceIndex:
+          input.fromOccurrenceIndex === undefined
+            ? undefined
+            : { gte: input.fromOccurrenceIndex },
+      },
+      orderBy: { occurrenceIndex: 'asc' },
+    });
+    if (!bookings.length) {
+      throw new ConflictException('No active occurrences match this request');
+    }
+    const service = await this.findActiveService(
+      series.organizationId,
+      series.serviceId,
+    );
+    for (const booking of bookings) {
+      await this.assertPublicChangeWindow(
+        booking,
+        service.cancellationWindowMinutes,
+        'cancel',
+        actor,
+      );
+    }
+    await this.prisma.$transaction([
+      this.prisma.appointmentBooking.updateMany({
+        where: { id: { in: bookings.map((booking) => booking.id) } },
+        data: {
+          status: 'cancelled',
+          cancellationReason: input.reason ?? 'Recurrence series cancelled',
+        },
+      }),
+      ...(input.fromOccurrenceIndex === undefined
+        ? [
+            this.prisma.appointmentRecurrenceSeries.update({
+              where: { id: series.id },
+              data: { status: 'cancelled' },
+            }),
+          ]
+        : []),
+    ]);
+    await Promise.all(
+      bookings.map(async (booking) => {
+        const cancelled = { ...booking, status: 'cancelled' as const };
+        await this.reminderQueueService.cancelBookingReminders(booking.id);
+        await this.calendarService.scheduleBookingSync({
+          booking: cancelled,
+          operation: 'delete',
+        });
+        await this.offerNextWaitlist(cancelled);
+      }),
+    );
+    await this.auditService.record({
+      actor,
+      organizationId: series.organizationId,
+      action: 'appointment.recurrence_series_cancelled',
+      entityType: 'appointment_recurrence_series',
+      entityId: series.id,
+      metadata: {
+        fromOccurrenceIndex: input.fromOccurrenceIndex,
+        cancelledCount: bookings.length,
+      },
+    });
+    return { cancelled: bookings.length, seriesId: series.id };
+  }
+
+  async listWaitlist(currentUser: AuthenticatedUser, input: ListWaitlistDto) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    return this.prisma.appointmentWaitlistEntry.findMany({
+      where: {
+        organizationId,
+        serviceId: input.serviceId,
+        staffId: input.staffId,
+      },
+      orderBy: [{ startAt: 'asc' }, { position: 'asc' }],
+      take: input.limit,
+    });
+  }
+
+  async joinWaitlist(input: JoinAppointmentWaitlistDto) {
+    await this.assertAppointmentBookingEnabled(input.organizationId);
+    const service = await this.findActiveService(
+      input.organizationId,
+      input.serviceId,
+    );
+    if (!service.waitlistEnabled) {
+      throw new ConflictException('Waitlist is not enabled for this service');
+    }
+    const staff = await this.findActiveStaffForService(
+      input.organizationId,
+      input.staffId,
+      service.id,
+    );
+    const startAt = new Date(input.startAt);
+    this.assertBookableStart(startAt);
+    const endAt = this.addMinutes(startAt, service.durationMinutes);
+    const timezone = input.timezone ?? staff.timezone;
+    this.timezoneService.assertValid(timezone);
+    const hasConflict = await this.hasConflict({
+      organizationId: input.organizationId,
+      service,
+      staffId: staff.id,
+      startAt,
+      endAt,
+      partySize: input.partySize,
+    });
+    const internalBookings = await this.prisma.appointmentBooking.findMany({
+      where: {
+        organizationId: input.organizationId,
+        staffId: staff.id,
+        status: { in: ['pending', 'confirmed'] },
+        startAt: { lt: endAt },
+        endAt: { gt: startAt },
+      },
+    });
+    const internallyFull =
+      service.maxAttendees <= 1
+        ? internalBookings.length > 0
+        : internalBookings
+            .filter(
+              (booking) =>
+                booking.serviceId === service.id &&
+                booking.startAt.getTime() === startAt.getTime() &&
+                booking.endAt.getTime() === endAt.getTime(),
+            )
+            .reduce((total, booking) => total + booking.partySize, 0) +
+            input.partySize >
+          service.maxAttendees;
+    if (!hasConflict || !internallyFull) {
+      throw new ConflictException('This slot is still available to book');
+    }
+    const normalizedEmail = input.customerEmail?.trim().toLowerCase();
+    const normalizedPhone = input.customerPhone?.replace(/\s+/g, '');
+    const duplicate = await this.prisma.appointmentWaitlistEntry.findFirst({
+      where: {
+        serviceId: service.id,
+        staffId: staff.id,
+        startAt,
+        status: { in: ['waiting', 'offered', 'claimed'] },
+        OR: [
+          ...(normalizedEmail ? [{ customerEmail: normalizedEmail }] : []),
+          ...(normalizedPhone ? [{ customerPhone: normalizedPhone }] : []),
+        ],
+      },
+      select: { id: true },
+    });
+    if (duplicate) {
+      throw new ConflictException('Customer is already on this waitlist');
+    }
+    const last = await this.prisma.appointmentWaitlistEntry.aggregate({
+      where: { serviceId: service.id, staffId: staff.id, startAt },
+      _max: { position: true },
+    });
+    const entry = await this.prisma.appointmentWaitlistEntry.create({
+      data: {
+        organizationId: input.organizationId,
+        serviceId: service.id,
+        staffId: staff.id,
+        startAt,
+        endAt,
+        timezone,
+        customerName: input.customerName,
+        customerEmail: normalizedEmail,
+        customerPhone: normalizedPhone,
+        partySize: input.partySize,
+        position: (last._max.position ?? 0) + 1,
+      },
+    });
+    await this.auditService.record({
+      organizationId: input.organizationId,
+      action: 'appointment.waitlist_joined',
+      entityType: 'appointment_waitlist_entry',
+      entityId: entry.id,
+      metadata: { serviceId: service.id, staffId: staff.id, startAt },
+    });
+    return entry;
+  }
+
+  async claimWaitlist(input: ClaimAppointmentWaitlistDto) {
+    const suppliedHash = this.hashManageToken(input.offerToken);
+    const entry = await this.prisma.appointmentWaitlistEntry.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        status: 'offered',
+        offerTokenHash: suppliedHash,
+        offerExpiresAt: { gt: new Date() },
+      },
+      orderBy: { offerExpiresAt: 'asc' },
+    });
+    if (!entry?.offerTokenHash || suppliedHash !== entry.offerTokenHash) {
+      throw new NotFoundException('Waitlist offer not found or expired');
+    }
+    const claimed = await this.prisma.appointmentWaitlistEntry.updateMany({
+      where: {
+        id: entry.id,
+        status: 'offered',
+        offerTokenHash: suppliedHash,
+        offerExpiresAt: { gt: new Date() },
+      },
+      data: { status: 'claimed' },
+    });
+    if (!claimed.count) {
+      throw new ConflictException('Waitlist offer has already been claimed');
+    }
+    let result: BookingCreationResult;
+    try {
+      result = await this.createBookingForOrganization(entry.organizationId, {
+        serviceId: entry.serviceId,
+        staffId: entry.staffId,
+        customerName: entry.customerName,
+        customerEmail: entry.customerEmail ?? undefined,
+        customerPhone: entry.customerPhone ?? undefined,
+        partySize: entry.partySize,
+        startAt: entry.startAt.toISOString(),
+        timezone: entry.timezone,
+        metadata: { source: 'waitlist', waitlistEntryId: entry.id },
+      });
+    } catch (error) {
+      await this.prisma.appointmentWaitlistEntry.updateMany({
+        where: { id: entry.id, status: 'claimed', claimedBookingId: null },
+        data: { status: 'offered' },
+      });
+      throw error;
+    }
+    await this.prisma.appointmentWaitlistEntry.update({
+      where: { id: entry.id },
+      data: {
+        claimedBookingId: result.booking.id,
+        offerTokenHash: null,
+        offerExpiresAt: null,
+      },
+    });
+    await this.afterBookingCreated(result.booking);
+    await this.offerNextWaitlist(result.booking);
+    return this.toBookingResponse(result.booking, result.manageToken);
+  }
+
+  async optOutReminders(input: AppointmentReminderOptOutDto) {
+    const booking = await this.prisma.appointmentBooking.findFirst({
+      where: { id: input.bookingId, organizationId: input.organizationId },
+    });
+    if (
+      !booking ||
+      !this.reminderDeliveryService.verifyReminderOptOutToken(
+        booking,
+        input.token,
+      )
+    ) {
+      throw new NotFoundException('Reminder preference link is invalid');
+    }
+    const contact =
+      input.channel === AppointmentReminderChannelDto.email
+        ? booking.customerEmail?.trim().toLowerCase()
+        : booking.customerPhone?.replace(/\s+/g, '');
+    if (!contact) {
+      throw new BadRequestException(
+        `Booking has no contact for ${input.channel} reminders`,
+      );
+    }
+    await this.prisma.appointmentReminderSuppression.upsert({
+      where: {
+        organizationId_channel_contactNormalized: {
+          organizationId: booking.organizationId,
+          channel: input.channel,
+          contactNormalized: contact,
+        },
+      },
+      create: {
+        organizationId: booking.organizationId,
+        channel: input.channel,
+        contactNormalized: contact,
+        reason: 'customer_opt_out',
+      },
+      update: { reason: 'customer_opt_out' },
+    });
+    await this.auditService.record({
+      organizationId: booking.organizationId,
+      action: 'appointment.reminder_opted_out',
+      entityType: 'appointment_booking',
+      entityId: booking.id,
+      metadata: { channel: input.channel },
+    });
+    return { optedOut: true, channel: input.channel };
+  }
+
+  async recoverExpiredWaitlistOffers(): Promise<void> {
+    const stalledClaims = await this.prisma.appointmentWaitlistEntry.findMany({
+      where: {
+        status: 'claimed',
+        claimedBookingId: null,
+        updatedAt: { lt: new Date(Date.now() - 5 * 60_000) },
+      },
+      take: 500,
+    });
+    for (const stalled of stalledClaims) {
+      const booking = await this.prisma.appointmentBooking.findFirst({
+        where: {
+          organizationId: stalled.organizationId,
+          metadata: { path: ['waitlistEntryId'], equals: stalled.id },
+        },
+        select: { id: true },
+      });
+      await this.prisma.appointmentWaitlistEntry.updateMany({
+        where: { id: stalled.id, status: 'claimed', claimedBookingId: null },
+        data: booking
+          ? {
+              claimedBookingId: booking.id,
+              offerTokenHash: null,
+              offerExpiresAt: null,
+            }
+          : { status: 'offered' },
+      });
+    }
+    const expired = await this.prisma.appointmentWaitlistEntry.findMany({
+      where: { status: 'offered', offerExpiresAt: { lte: new Date() } },
+      orderBy: { offerExpiresAt: 'asc' },
+      take: 500,
+    });
+    for (const entry of expired) {
+      const transitioned =
+        await this.prisma.appointmentWaitlistEntry.updateMany({
+          where: { id: entry.id, status: 'offered' },
+          data: {
+            status: 'expired',
+            offerTokenHash: null,
+            offerExpiresAt: null,
+          },
+        });
+      if (!transitioned.count) continue;
+      const service = await this.prisma.appointmentService.findUnique({
+        where: { id: entry.serviceId },
+      });
+      if (!service) continue;
+      const seatsRemaining = await this.getSeatsRemaining(
+        service,
+        entry.staffId,
+        entry.startAt,
+        entry.endAt,
+      );
+      const candidates = await this.prisma.appointmentWaitlistEntry.findMany({
+        where: {
+          serviceId: entry.serviceId,
+          staffId: entry.staffId,
+          startAt: entry.startAt,
+          status: 'waiting',
+          partySize: { lte: seatsRemaining },
+        },
+        orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+        take: 1,
+      });
+      const next = candidates[0];
+      if (next) await this.offerWaitlistEntry(next);
+    }
   }
 
   async listServices(currentUser: AuthenticatedUser, organizationId?: string) {
@@ -242,6 +800,10 @@ export class AppointmentBookingService {
         bufferAfterMinutes: input.bufferAfterMinutes ?? 0,
         priceCents: input.priceCents,
         currency: input.currency ?? 'USD',
+        maxAttendees: input.maxAttendees ?? 1,
+        cancellationWindowMinutes: input.cancellationWindowMinutes,
+        rescheduleWindowMinutes: input.rescheduleWindowMinutes,
+        waitlistEnabled: input.waitlistEnabled ?? true,
         status: input.status ?? 'active',
         metadata: this.toJsonObject(input.metadata),
       },
@@ -265,22 +827,44 @@ export class AppointmentBookingService {
     input: UpdateAppointmentServiceDto,
   ) {
     const existing = await this.findServiceForActor(currentUser, id);
+    if (
+      input.maxAttendees !== undefined &&
+      input.maxAttendees !== existing.maxAttendees
+    ) {
+      await this.assertServiceCapacityChange(existing.id, input.maxAttendees);
+    }
 
-    const service = await this.prisma.appointmentService.update({
-      where: { id: existing.id },
-      data: {
-        name: input.name,
-        description: input.description,
-        durationMinutes: input.durationMinutes,
-        bufferBeforeMinutes: input.bufferBeforeMinutes,
-        bufferAfterMinutes: input.bufferAfterMinutes,
-        priceCents: input.priceCents,
-        currency: input.currency,
-        status: input.status,
-        metadata: input.metadata
-          ? this.toJsonObject(input.metadata)
-          : undefined,
-      },
+    const service = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.appointmentService.update({
+        where: { id: existing.id },
+        data: {
+          name: input.name,
+          description: input.description,
+          durationMinutes: input.durationMinutes,
+          bufferBeforeMinutes: input.bufferBeforeMinutes,
+          bufferAfterMinutes: input.bufferAfterMinutes,
+          priceCents: input.priceCents,
+          currency: input.currency,
+          maxAttendees: input.maxAttendees,
+          cancellationWindowMinutes: input.cancellationWindowMinutes,
+          rescheduleWindowMinutes: input.rescheduleWindowMinutes,
+          waitlistEnabled: input.waitlistEnabled,
+          status: input.status,
+          metadata: input.metadata
+            ? this.toJsonObject(input.metadata)
+            : undefined,
+        },
+      });
+      if (input.maxAttendees !== undefined) {
+        await tx.appointmentBooking.updateMany({
+          where: {
+            serviceId: existing.id,
+            status: { in: ['pending', 'confirmed'] },
+          },
+          data: { isGroupBooking: input.maxAttendees > 1 },
+        });
+      }
+      return updated;
     });
 
     await this.auditService.record({
@@ -811,6 +1395,9 @@ export class AppointmentBookingService {
       currentUser,
       input.organizationId,
     );
+    if (input.recurrence) {
+      return this.createRecurringBooking(organizationId, input, currentUser);
+    }
     const { booking, manageToken } = await this.createBookingForOrganization(
       organizationId,
       input,
@@ -832,6 +1419,7 @@ export class AppointmentBookingService {
       bookingId: booking.id,
       organizationId,
       startAt: booking.startAt,
+      timezone: booking.timezone,
     });
     await this.calendarService.scheduleBookingSync({ booking });
 
@@ -839,6 +1427,9 @@ export class AppointmentBookingService {
   }
 
   async createPublicBooking(input: PublicCreateAppointmentBookingDto) {
+    if (input.recurrence) {
+      return this.createRecurringBooking(input.organizationId, input);
+    }
     const { booking, manageToken } = await this.createBookingForOrganization(
       input.organizationId,
       input,
@@ -859,6 +1450,7 @@ export class AppointmentBookingService {
       bookingId: booking.id,
       organizationId: input.organizationId,
       startAt: booking.startAt,
+      timezone: booking.timezone,
     });
     await this.calendarService.scheduleBookingSync({ booking });
 
@@ -900,6 +1492,15 @@ export class AppointmentBookingService {
       booking.organizationId,
       booking.serviceId,
     );
+    await this.assertPublicChangeWindow(
+      booking,
+      service.rescheduleWindowMinutes,
+      'reschedule',
+      actor,
+    );
+    if (input.applyToFuture && booking.seriesId !== null) {
+      return this.rescheduleFutureOccurrences(booking, service, input, actor);
+    }
     const staffId = input.staffId ?? booking.staffId;
     const staff = await this.findActiveStaffForService(
       booking.organizationId,
@@ -919,6 +1520,7 @@ export class AppointmentBookingService {
       startAt,
       endAt,
       excludeBookingId: booking.id,
+      partySize: booking.partySize,
     });
 
     const updated = await this.runSerializable(async (tx) => {
@@ -929,6 +1531,7 @@ export class AppointmentBookingService {
         startAt,
         endAt,
         excludeBookingId: booking.id,
+        partySize: booking.partySize,
       });
       const resourceRequirements = await tx.appointmentServiceResource.findMany(
         {
@@ -977,6 +1580,7 @@ export class AppointmentBookingService {
       bookingId: updated.id,
       organizationId: updated.organizationId,
       startAt: updated.startAt,
+      timezone: updated.timezone,
     });
     await this.calendarService.scheduleBookingSync({
       booking: updated,
@@ -984,6 +1588,138 @@ export class AppointmentBookingService {
     });
 
     return this.toBookingResponse(updated);
+  }
+
+  private async rescheduleFutureOccurrences(
+    booking: AppointmentBooking,
+    service: AppointmentService,
+    input: RescheduleAppointmentBookingDto,
+    actor?: AuthenticatedUser,
+  ) {
+    const occurrences = await this.prisma.appointmentBooking.findMany({
+      where: {
+        seriesId: booking.seriesId!,
+        occurrenceIndex: { gte: booking.occurrenceIndex ?? 0 },
+        status: { in: ['pending', 'confirmed'] },
+      },
+      orderBy: { occurrenceIndex: 'asc' },
+    });
+    if (!occurrences.length) {
+      throw new ConflictException('No future occurrences can be rescheduled');
+    }
+    if (!actor) {
+      for (const occurrence of occurrences) {
+        await this.assertPublicChangeWindow(
+          occurrence,
+          service.rescheduleWindowMinutes,
+          'reschedule',
+        );
+      }
+    }
+    const staffId = input.staffId ?? booking.staffId;
+    const staff = await this.findActiveStaffForService(
+      booking.organizationId,
+      staffId,
+      service.id,
+    );
+    const requestedStart = new Date(input.startAt);
+    this.assertBookableStart(requestedStart);
+    const shiftMs = requestedStart.getTime() - booking.startAt.getTime();
+    const timezone = input.timezone ?? booking.timezone;
+    this.timezoneService.assertValid(timezone);
+    const shifted = occurrences.map((occurrence) => ({
+      occurrence,
+      startAt: new Date(occurrence.startAt.getTime() + shiftMs),
+      endAt: new Date(occurrence.endAt.getTime() + shiftMs),
+    }));
+    for (const item of shifted) {
+      this.assertBookableStart(item.startAt);
+      if (!(await this.isInsideAvailability(staff, item.startAt, item.endAt))) {
+        throw new ConflictException(
+          `Occurrence ${item.occurrence.occurrenceIndex} is outside staff availability`,
+        );
+      }
+      if (
+        await this.calendarService.hasExternalConflict(
+          staff.id,
+          this.addMinutes(item.startAt, -service.bufferBeforeMinutes),
+          this.addMinutes(item.endAt, service.bufferAfterMinutes),
+        )
+      ) {
+        throw new ConflictException(
+          `Occurrence ${item.occurrence.occurrenceIndex} conflicts with an external calendar`,
+        );
+      }
+    }
+
+    const updated = await this.runSerializable(async (tx) => {
+      await tx.appointmentBooking.updateMany({
+        where: { id: { in: occurrences.map((item) => item.id) } },
+        data: { status: 'cancelled' },
+      });
+      const results: AppointmentBooking[] = [];
+      for (const item of shifted) {
+        await this.assertNoConflict(tx, {
+          organizationId: booking.organizationId,
+          service,
+          staffId: staff.id,
+          startAt: item.startAt,
+          endAt: item.endAt,
+          partySize: item.occurrence.partySize,
+        });
+        results.push(
+          await tx.appointmentBooking.update({
+            where: { id: item.occurrence.id },
+            data: {
+              staffId: staff.id,
+              startAt: item.startAt,
+              endAt: item.endAt,
+              timezone,
+              status: 'confirmed',
+              rescheduledFromId:
+                item.occurrence.rescheduledFromId ?? item.occurrence.id,
+            },
+          }),
+        );
+      }
+      await tx.appointmentRecurrenceSeries.update({
+        where: { id: booking.seriesId! },
+        data: {
+          staffId: staff.id,
+          timezone,
+          initialStartAt:
+            booking.occurrenceIndex === 0 ? requestedStart : undefined,
+        },
+      });
+      return results;
+    });
+
+    await Promise.all(
+      updated.map(async (item, index) => {
+        await this.reminderQueueService.enqueueBookingReminders({
+          bookingId: item.id,
+          organizationId: item.organizationId,
+          startAt: item.startAt,
+          timezone: item.timezone,
+        });
+        await this.calendarService.scheduleBookingSync({
+          booking: item,
+          previousStaffId: occurrences[index].staffId,
+        });
+      }),
+    );
+    await this.auditService.record({
+      actor,
+      organizationId: booking.organizationId,
+      action: 'appointment.recurrence_future_rescheduled',
+      entityType: 'appointment_recurrence_series',
+      entityId: booking.seriesId,
+      metadata: { fromOccurrenceIndex: booking.occurrenceIndex },
+    });
+    return {
+      seriesId: booking.seriesId,
+      bookings: updated.map((item) => this.toBookingResponse(item)),
+    };
   }
 
   async cancelBooking(
@@ -1017,6 +1753,17 @@ export class AppointmentBookingService {
       throw new ConflictException('Booking cannot be cancelled');
     }
 
+    const service = await this.findActiveService(
+      booking.organizationId,
+      booking.serviceId,
+    );
+    await this.assertPublicChangeWindow(
+      booking,
+      service.cancellationWindowMinutes,
+      'cancel',
+      actor,
+    );
+
     const updated = await this.prisma.appointmentBooking.update({
       where: { id: booking.id },
       data: {
@@ -1029,6 +1776,7 @@ export class AppointmentBookingService {
       booking: updated,
       operation: 'delete',
     });
+    await this.offerNextWaitlist(updated);
 
     await this.auditService.record({
       actor,
@@ -1067,6 +1815,7 @@ export class AppointmentBookingService {
         bookingId: updated.id,
         organizationId: updated.organizationId,
         startAt: updated.startAt,
+        timezone: updated.timezone,
       });
       await this.calendarService.scheduleBookingSync({ booking: updated });
     }
@@ -1085,6 +1834,173 @@ export class AppointmentBookingService {
     return this.toBookingResponse(updated);
   }
 
+  private async createRecurringBooking(
+    organizationId: string,
+    input: CreateAppointmentBookingDto,
+    actor?: AuthenticatedUser,
+  ) {
+    const recurrence = input.recurrence;
+    if (!recurrence) {
+      throw new BadRequestException('Recurrence rule is required');
+    }
+    await this.assertAppointmentBookingEnabled(organizationId);
+    const service = await this.findActiveService(
+      organizationId,
+      input.serviceId,
+    );
+    const timezone = input.timezone ?? 'UTC';
+    this.timezoneService.assertValid(timezone);
+    const firstStart = new Date(input.startAt);
+    this.assertBookableStart(firstStart);
+    const partySize = input.partySize ?? 1;
+    if (partySize > service.maxAttendees) {
+      throw new BadRequestException(
+        `Party size cannot exceed service capacity of ${service.maxAttendees}`,
+      );
+    }
+    const firstEnd = this.addMinutes(firstStart, service.durationMinutes);
+    const staff = input.staffId
+      ? await this.findActiveStaffForService(
+          organizationId,
+          input.staffId,
+          service.id,
+        )
+      : await this.findFirstAvailableStaff({
+          organizationId,
+          service,
+          startAt: firstStart,
+          endAt: firstEnd,
+          partySize,
+        });
+    const localDate = this.timezoneService.dateInZone(firstStart, timezone);
+    const localTime = this.timezoneService.timeInZone(firstStart, timezone);
+    const occurrences = Array.from({ length: recurrence.count }, (_, index) => {
+      const step = index * recurrence.interval;
+      const date =
+        recurrence.frequency === AppointmentRecurrenceFrequencyDto.monthly
+          ? this.timezoneService.addLocalMonths(localDate, step)
+          : this.timezoneService.addLocalDays(
+              localDate,
+              recurrence.frequency === AppointmentRecurrenceFrequencyDto.weekly
+                ? step * 7
+                : step,
+            );
+      const startAt = this.timezoneService.localToUtc(
+        date,
+        localTime,
+        timezone,
+      );
+      this.assertBookableStart(startAt);
+      return {
+        index,
+        startAt,
+        endAt: this.addMinutes(startAt, service.durationMinutes),
+      };
+    });
+
+    for (const occurrence of occurrences) {
+      await this.assertSlotIsAvailable({
+        organizationId,
+        service,
+        staff,
+        startAt: occurrence.startAt,
+        endAt: occurrence.endAt,
+        partySize,
+      });
+    }
+
+    const manageToken = randomBytes(32).toString('base64url');
+    const result = await this.runSerializable(async (tx) => {
+      const resourceRequirements = await tx.appointmentServiceResource.findMany(
+        {
+          where: { serviceId: service.id },
+          select: { resourceId: true, quantity: true },
+        },
+      );
+      const series = await tx.appointmentRecurrenceSeries.create({
+        data: {
+          organizationId,
+          serviceId: service.id,
+          staffId: staff.id,
+          frequency: recurrence.frequency,
+          interval: recurrence.interval,
+          occurrenceCount: recurrence.count,
+          initialStartAt: firstStart,
+          timezone,
+          customerName: input.customerName,
+          customerEmail: input.customerEmail,
+          customerPhone: input.customerPhone,
+          partySize,
+          notes: input.notes,
+          manageTokenHash: this.hashManageToken(manageToken),
+          metadata: this.toJsonObject(input.metadata),
+        },
+      });
+      const bookings: AppointmentBooking[] = [];
+      for (const occurrence of occurrences) {
+        await this.assertNoConflict(tx, {
+          organizationId,
+          service,
+          staffId: staff.id,
+          startAt: occurrence.startAt,
+          endAt: occurrence.endAt,
+          partySize,
+        });
+        bookings.push(
+          await tx.appointmentBooking.create({
+            data: {
+              organizationId,
+              serviceId: service.id,
+              staffId: staff.id,
+              customerName: input.customerName,
+              customerEmail: input.customerEmail,
+              customerPhone: input.customerPhone,
+              startAt: occurrence.startAt,
+              endAt: occurrence.endAt,
+              timezone,
+              notes: input.notes,
+              manageTokenHash: this.hashManageToken(manageToken),
+              partySize,
+              isGroupBooking: service.maxAttendees > 1,
+              seriesId: series.id,
+              occurrenceIndex: occurrence.index,
+              metadata: this.toJsonObject(input.metadata),
+              resourceAllocations: {
+                create: resourceRequirements.map((requirement) => ({
+                  resourceId: requirement.resourceId,
+                  quantity: requirement.quantity,
+                })),
+              },
+            },
+          }),
+        );
+      }
+      return { series, bookings };
+    });
+
+    await Promise.all(
+      result.bookings.map((booking) => this.afterBookingCreated(booking)),
+    );
+    await this.auditService.record({
+      actor,
+      organizationId,
+      action: 'appointment.recurrence_series_created',
+      entityType: 'appointment_recurrence_series',
+      entityId: result.series.id,
+      metadata: {
+        frequency: recurrence.frequency,
+        interval: recurrence.interval,
+        occurrenceCount: recurrence.count,
+      },
+    });
+    return {
+      series: { ...result.series, manageTokenHash: undefined, manageToken },
+      bookings: result.bookings.map((booking) =>
+        this.toBookingResponse(booking),
+      ),
+    };
+  }
+
   private async createBookingForOrganization(
     organizationId: string,
     input: CreateAppointmentBookingDto,
@@ -1099,6 +2015,12 @@ export class AppointmentBookingService {
     const endAt = this.addMinutes(startAt, service.durationMinutes);
     const timezone = input.timezone ?? 'UTC';
     this.timezoneService.assertValid(timezone);
+    const partySize = input.partySize ?? 1;
+    if (partySize > service.maxAttendees) {
+      throw new BadRequestException(
+        `Party size cannot exceed service capacity of ${service.maxAttendees}`,
+      );
+    }
     const staff = input.staffId
       ? await this.findActiveStaffForService(
           organizationId,
@@ -1110,6 +2032,7 @@ export class AppointmentBookingService {
           service,
           startAt,
           endAt,
+          partySize,
         });
 
     await this.assertSlotIsAvailable({
@@ -1118,6 +2041,7 @@ export class AppointmentBookingService {
       staff,
       startAt,
       endAt,
+      partySize,
     });
 
     const manageToken = randomBytes(32).toString('base64url');
@@ -1128,6 +2052,7 @@ export class AppointmentBookingService {
         staffId: staff.id,
         startAt,
         endAt,
+        partySize,
       });
       const resourceRequirements = await tx.appointmentServiceResource.findMany(
         {
@@ -1149,6 +2074,8 @@ export class AppointmentBookingService {
           timezone,
           notes: input.notes,
           manageTokenHash: this.hashManageToken(manageToken),
+          partySize,
+          isGroupBooking: service.maxAttendees > 1,
           metadata: this.toJsonObject(input.metadata),
           resourceAllocations: {
             create: resourceRequirements.map((requirement) => ({
@@ -1160,6 +2087,103 @@ export class AppointmentBookingService {
       });
     });
     return { booking, manageToken };
+  }
+
+  private async afterBookingCreated(booking: AppointmentBooking) {
+    await this.reminderQueueService.enqueueBookingReminders({
+      bookingId: booking.id,
+      organizationId: booking.organizationId,
+      startAt: booking.startAt,
+      timezone: booking.timezone,
+    });
+    await this.calendarService.scheduleBookingSync({ booking });
+  }
+
+  private async offerNextWaitlist(cancelledBooking: AppointmentBooking) {
+    const service = await this.prisma.appointmentService.findUnique({
+      where: { id: cancelledBooking.serviceId },
+    });
+    if (!service?.waitlistEnabled || cancelledBooking.startAt <= new Date()) {
+      return;
+    }
+    const candidates = await this.prisma.appointmentWaitlistEntry.findMany({
+      where: {
+        serviceId: cancelledBooking.serviceId,
+        staffId: cancelledBooking.staffId,
+        startAt: cancelledBooking.startAt,
+        status: 'waiting',
+      },
+      orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+      take: 100,
+    });
+    const seatsRemaining = await this.getSeatsRemaining(
+      service,
+      cancelledBooking.staffId,
+      cancelledBooking.startAt,
+      cancelledBooking.endAt,
+    );
+    const candidate = candidates.find(
+      (entry) => entry.partySize <= seatsRemaining,
+    );
+    if (!candidate) return;
+    await this.offerWaitlistEntry(candidate);
+  }
+
+  private async offerWaitlistEntry(
+    candidate: Prisma.AppointmentWaitlistEntryGetPayload<object>,
+  ) {
+    const policy = await this.prisma.appointmentBookingPolicy.findUnique({
+      where: { organizationId: candidate.organizationId },
+    });
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = new Date(
+      Date.now() + (policy?.waitlistOfferMinutes ?? 15) * 60_000,
+    );
+    const transitioned = await this.prisma.appointmentWaitlistEntry.updateMany({
+      where: { id: candidate.id, status: 'waiting' },
+      data: {
+        status: 'offered',
+        offerTokenHash: this.hashManageToken(token),
+        offerExpiresAt: expiresAt,
+      },
+    });
+    if (!transitioned.count) return;
+
+    const publicUrl = this.configService.get<string>('APPOINTMENT_PUBLIC_URL');
+    const claimUrl = publicUrl
+      ? new URL('/appointment-waitlist/claim', publicUrl)
+      : undefined;
+    claimUrl?.searchParams.set('organizationId', candidate.organizationId);
+    claimUrl?.searchParams.set('offerToken', token);
+    try {
+      await this.reminderDeliveryService.deliverTransactional({
+        email: candidate.customerEmail,
+        phone: candidate.customerPhone,
+        subject: 'An appointment slot is available',
+        message: `A requested appointment slot is available until ${expiresAt.toISOString()}.${claimUrl ? ` Claim it here: ${claimUrl.toString()}` : ` Offer token: ${token}`}`,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Waitlist offer delivery failed for ${candidate.id}`,
+        error,
+      );
+      await this.auditService.record({
+        organizationId: candidate.organizationId,
+        action: 'appointment.waitlist_offer_delivery_failed',
+        entityType: 'appointment_waitlist_entry',
+        entityId: candidate.id,
+        metadata: {
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+    await this.auditService.record({
+      organizationId: candidate.organizationId,
+      action: 'appointment.waitlist_offered',
+      entityType: 'appointment_waitlist_entry',
+      entityId: candidate.id,
+      metadata: { expiresAt: expiresAt.toISOString() },
+    });
   }
 
   private async listAvailableSlots(
@@ -1204,6 +2228,7 @@ export class AppointmentBookingService {
       startAt: Date;
       endAt: Date;
       timezone: string;
+      seatsRemaining: number;
     }> = [];
 
     for (const staffMember of staff) {
@@ -1278,12 +2303,19 @@ export class AppointmentBookingService {
               !hasExternalConflict &&
               isWithinBookingWindow
             ) {
+              const seatsRemaining = await this.getSeatsRemaining(
+                service,
+                staffMember.id,
+                startAt,
+                endAt,
+              );
               slots.push({
                 staffId: staffMember.id,
                 staffName: staffMember.name,
                 startAt,
                 endAt,
                 timezone: staffMember.timezone,
+                seatsRemaining,
               });
             }
 
@@ -1305,6 +2337,7 @@ export class AppointmentBookingService {
     service: AppointmentService;
     startAt: Date;
     endAt: Date;
+    partySize?: number;
   }): Promise<AppointmentStaff> {
     const staff = await this.prisma.appointmentStaff.findMany({
       where: {
@@ -1327,6 +2360,7 @@ export class AppointmentBookingService {
         staffId: staffMember.id,
         startAt: input.startAt,
         endAt: input.endAt,
+        partySize: input.partySize,
       });
 
       if (isAvailable && !hasConflict) {
@@ -1344,6 +2378,7 @@ export class AppointmentBookingService {
     startAt: Date;
     endAt: Date;
     excludeBookingId?: string;
+    partySize?: number;
   }) {
     const isInsideAvailability = await this.isInsideAvailability(
       input.staff,
@@ -1364,6 +2399,7 @@ export class AppointmentBookingService {
       startAt: input.startAt,
       endAt: input.endAt,
       excludeBookingId: input.excludeBookingId,
+      partySize: input.partySize,
     });
 
     if (hasConflict) {
@@ -1380,6 +2416,7 @@ export class AppointmentBookingService {
       startAt: Date;
       endAt: Date;
       excludeBookingId?: string;
+      partySize?: number;
     },
   ) {
     const hasConflict = await this.hasConflict(input, tx, false);
@@ -1397,6 +2434,7 @@ export class AppointmentBookingService {
       startAt: Date;
       endAt: Date;
       excludeBookingId?: string;
+      partySize?: number;
     },
     client: PrismaService | Prisma.TransactionClient = this.prisma,
     checkExternalCalendar = true,
@@ -1409,44 +2447,77 @@ export class AppointmentBookingService {
       input.endAt,
       input.service.bufferAfterMinutes,
     );
+    const continuingGroupSession =
+      input.service.maxAttendees > 1
+        ? Boolean(
+            await client.appointmentBooking.findFirst({
+              where: {
+                organizationId: input.organizationId,
+                serviceId: input.service.id,
+                staffId: input.staffId,
+                id: input.excludeBookingId
+                  ? { not: input.excludeBookingId }
+                  : undefined,
+                startAt: input.startAt,
+                endAt: input.endAt,
+                status: { in: ['pending', 'confirmed'] },
+              },
+              select: { id: true },
+            }),
+          )
+        : false;
 
-    const [bookings, timeOff, resourceConflict, externalCalendarConflict] =
-      await Promise.all([
-        client.appointmentBooking.findMany({
-          where: {
-            organizationId: input.organizationId,
-            staffId: input.staffId,
-            id: input.excludeBookingId
-              ? { not: input.excludeBookingId }
-              : undefined,
-            status: { in: ['pending', 'confirmed'] },
-            startAt: {
-              lt: this.addMinutes(conflictEnd, 240),
-              gt: this.addMinutes(conflictStart, -24 * 60 - 240),
-            },
+    const [
+      bookings,
+      timeOff,
+      blackouts,
+      resourceConflict,
+      externalCalendarConflict,
+    ] = await Promise.all([
+      client.appointmentBooking.findMany({
+        where: {
+          organizationId: input.organizationId,
+          staffId: input.staffId,
+          id: input.excludeBookingId
+            ? { not: input.excludeBookingId }
+            : undefined,
+          status: { in: ['pending', 'confirmed'] },
+          startAt: {
+            lt: this.addMinutes(conflictEnd, 240),
+            gt: this.addMinutes(conflictStart, -24 * 60 - 240),
           },
-          include: { service: true },
-        }),
-        client.appointmentStaffTimeOff.findFirst({
-          where: {
-            organizationId: input.organizationId,
-            staffId: input.staffId,
-            startAt: { lt: conflictEnd },
-            endAt: { gt: conflictStart },
-          },
-          select: { id: true },
-        }),
-        this.hasResourceConflict(input, conflictStart, conflictEnd, client),
-        checkExternalCalendar
-          ? this.calendarService.hasExternalConflict(
-              input.staffId,
-              conflictStart,
-              conflictEnd,
-            )
-          : false,
-      ]);
+        },
+        include: { service: true },
+      }),
+      client.appointmentStaffTimeOff.findFirst({
+        where: {
+          organizationId: input.organizationId,
+          staffId: input.staffId,
+          startAt: { lt: conflictEnd },
+          endAt: { gt: conflictStart },
+        },
+        select: { id: true },
+      }),
+      client.appointmentBlackout.findMany({
+        where: {
+          organizationId: input.organizationId,
+          OR: [
+            { annual: true },
+            { startAt: { lt: conflictEnd }, endAt: { gt: conflictStart } },
+          ],
+        },
+      }),
+      this.hasResourceConflict(input, conflictStart, conflictEnd, client),
+      checkExternalCalendar && !continuingGroupSession
+        ? this.calendarService.hasExternalConflict(
+            input.staffId,
+            conflictStart,
+            conflictEnd,
+          )
+        : false,
+    ]);
 
-    const bookingConflict = bookings.some((booking) => {
+    const overlappingBookings = bookings.filter((booking) => {
       const existingStart = this.addMinutes(
         booking.startAt,
         -booking.service.bufferBeforeMinutes,
@@ -1457,10 +2528,35 @@ export class AppointmentBookingService {
       );
       return existingStart < conflictEnd && existingEnd > conflictStart;
     });
+    let bookingConflict = overlappingBookings.length > 0;
+    if (input.service.maxAttendees > 1) {
+      const differentSession = overlappingBookings.some(
+        (booking) =>
+          booking.serviceId !== input.service.id ||
+          booking.startAt.getTime() !== input.startAt.getTime() ||
+          booking.endAt.getTime() !== input.endAt.getTime(),
+      );
+      const usedSeats = overlappingBookings
+        .filter(
+          (booking) =>
+            booking.serviceId === input.service.id &&
+            booking.startAt.getTime() === input.startAt.getTime() &&
+            booking.endAt.getTime() === input.endAt.getTime(),
+        )
+        .reduce((total, booking) => total + booking.partySize, 0);
+      bookingConflict =
+        differentSession ||
+        usedSeats + (input.partySize ?? 1) > input.service.maxAttendees;
+    }
+
+    const blackoutConflict = blackouts.some((blackout) =>
+      this.blackoutOverlaps(blackout, conflictStart, conflictEnd),
+    );
 
     return (
       bookingConflict ||
       Boolean(timeOff) ||
+      blackoutConflict ||
       resourceConflict ||
       externalCalendarConflict
     );
@@ -1474,6 +2570,7 @@ export class AppointmentBookingService {
       startAt: Date;
       endAt: Date;
       excludeBookingId?: string;
+      partySize?: number;
     },
     conflictStart: Date,
     conflictEnd: Date,
@@ -1526,6 +2623,15 @@ export class AppointmentBookingService {
 
       const usedCapacity = allocations.reduce((total, allocation) => {
         const existing = allocation.booking;
+        if (
+          input.service.maxAttendees > 1 &&
+          existing.serviceId === input.service.id &&
+          existing.staffId === input.staffId &&
+          existing.startAt.getTime() === input.startAt.getTime() &&
+          existing.endAt.getTime() === input.endAt.getTime()
+        ) {
+          return total;
+        }
         const existingStart = this.addMinutes(
           existing.startAt,
           -existing.service.bufferBeforeMinutes,
@@ -1567,6 +2673,119 @@ export class AppointmentBookingService {
     if (startAt.getTime() > now + maxAdvanceDays * 24 * 60 * 60_000) {
       throw new BadRequestException(
         `Appointment cannot be booked more than ${maxAdvanceDays} days in advance`,
+      );
+    }
+  }
+
+  private async assertPublicChangeWindow(
+    booking: AppointmentBooking,
+    serviceWindowMinutes: number | null,
+    action: 'cancel' | 'reschedule',
+    actor?: AuthenticatedUser,
+  ): Promise<void> {
+    if (
+      actor?.roles.some((role) =>
+        ['super_admin', 'org_admin', 'product_admin'].includes(role),
+      )
+    ) {
+      return;
+    }
+    const policy = await this.prisma.appointmentBookingPolicy.findUnique({
+      where: { organizationId: booking.organizationId },
+    });
+    const windowMinutes =
+      serviceWindowMinutes ??
+      (action === 'cancel'
+        ? policy?.cancellationWindowMinutes
+        : policy?.rescheduleWindowMinutes) ??
+      0;
+    if (
+      windowMinutes > 0 &&
+      booking.startAt.getTime() - Date.now() < windowMinutes * 60_000
+    ) {
+      throw new ConflictException(
+        `Public ${action} is not allowed within ${windowMinutes} minutes of the appointment`,
+      );
+    }
+  }
+
+  private blackoutOverlaps(
+    blackout: { startAt: Date; endAt: Date; annual: boolean },
+    startAt: Date,
+    endAt: Date,
+  ): boolean {
+    if (!blackout.annual) {
+      return blackout.startAt < endAt && blackout.endAt > startAt;
+    }
+    const duration = blackout.endAt.getTime() - blackout.startAt.getTime();
+    return [startAt.getUTCFullYear() - 1, startAt.getUTCFullYear()].some(
+      (year) => {
+        const projectedStart = new Date(
+          Date.UTC(
+            year,
+            blackout.startAt.getUTCMonth(),
+            blackout.startAt.getUTCDate(),
+            blackout.startAt.getUTCHours(),
+            blackout.startAt.getUTCMinutes(),
+            blackout.startAt.getUTCSeconds(),
+          ),
+        );
+        const projectedEnd = new Date(projectedStart.getTime() + duration);
+        return projectedStart < endAt && projectedEnd > startAt;
+      },
+    );
+  }
+
+  private async getSeatsRemaining(
+    service: AppointmentService,
+    staffId: string,
+    startAt: Date,
+    endAt: Date,
+  ): Promise<number> {
+    if (service.maxAttendees <= 1) return 1;
+    const aggregate = await this.prisma.appointmentBooking.aggregate({
+      where: {
+        serviceId: service.id,
+        staffId,
+        startAt,
+        endAt,
+        status: { in: ['pending', 'confirmed'] },
+      },
+      _sum: { partySize: true },
+    });
+    return Math.max(0, service.maxAttendees - (aggregate._sum.partySize ?? 0));
+  }
+
+  private async assertServiceCapacityChange(
+    serviceId: string,
+    maxAttendees: number,
+  ): Promise<void> {
+    const bookings = await this.prisma.appointmentBooking.findMany({
+      where: { serviceId, status: { in: ['pending', 'confirmed'] } },
+      select: {
+        staffId: true,
+        startAt: true,
+        endAt: true,
+        partySize: true,
+      },
+    });
+    const sessions = new Map<string, { seats: number; bookings: number }>();
+    for (const booking of bookings) {
+      const key = `${booking.staffId}:${booking.startAt.toISOString()}:${booking.endAt.toISOString()}`;
+      const current = sessions.get(key) ?? { seats: 0, bookings: 0 };
+      current.seats += booking.partySize;
+      current.bookings += 1;
+      sessions.set(key, current);
+    }
+    if (
+      [...sessions.values()].some(
+        (session) =>
+          session.seats > maxAttendees ||
+          (maxAttendees === 1 && session.bookings > 1),
+      )
+    ) {
+      throw new ConflictException(
+        'Service capacity cannot be reduced below existing active bookings',
       );
     }
   }
@@ -1966,6 +3185,14 @@ export class AppointmentBookingService {
 
   private hashManageToken(token: string): string {
     return createHash('sha256').update(token).digest('hex');
+  }
+
+  private manageTokenMatches(storedHash: string, token: string): boolean {
+    const supplied = Buffer.from(this.hashManageToken(token), 'hex');
+    const stored = Buffer.from(storedHash, 'hex');
+    return (
+      stored.length === supplied.length && timingSafeEqual(stored, supplied)
+    );
   }
 
   private requireActionFields(

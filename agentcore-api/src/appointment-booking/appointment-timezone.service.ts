@@ -83,6 +83,29 @@ export class AppointmentTimezoneService {
     return result.toISOString().slice(0, 10);
   }
 
+  addLocalMonths(date: string, months: number): string {
+    const parsed = this.parseLocal(date, '00:00');
+    const targetMonth = new Date(
+      Date.UTC(parsed.year, parsed.month - 1 + months, 1),
+    );
+    const lastDay = new Date(
+      Date.UTC(targetMonth.getUTCFullYear(), targetMonth.getUTCMonth() + 1, 0),
+    ).getUTCDate();
+    const result = new Date(
+      Date.UTC(
+        targetMonth.getUTCFullYear(),
+        targetMonth.getUTCMonth(),
+        Math.min(parsed.day, lastDay),
+      ),
+    );
+    return result.toISOString().slice(0, 10);
+  }
+
+  timeInZone(instant: Date, timezone: string): string {
+    const parts = this.partsInZone(instant, timezone);
+    return `${this.pad(parts.hour)}:${this.pad(parts.minute)}:${this.pad(parts.second)}`;
+  }
+
   private partsInZone(instant: Date, timezone: string): LocalDateTime {
     const formatter = new Intl.DateTimeFormat('en-CA', {
       timeZone: timezone,

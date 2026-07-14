@@ -5,6 +5,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUrl,
   Max,
   Min,
   MinLength,
@@ -230,6 +231,11 @@ class EnvironmentVariables {
   APPOINTMENT_EMAIL_FROM?: string;
 
   @IsString()
+  @IsUrl({ require_tld: false })
+  @IsOptional()
+  APPOINTMENT_PUBLIC_URL?: string;
+
+  @IsString()
   @IsOptional()
   TWILIO_ACCOUNT_SID?: string;
 
@@ -293,6 +299,20 @@ class EnvironmentVariables {
   @Max(3600000)
   @IsOptional()
   APPOINTMENT_REMINDER_PROCESSING_TIMEOUT_MS = 300000;
+
+  @Transform(({ value }) => Number(value ?? 60000))
+  @IsInt()
+  @Min(5000)
+  @Max(3600000)
+  @IsOptional()
+  APPOINTMENT_NO_SHOW_SCAN_INTERVAL_MS = 60000;
+
+  @Transform(({ value }) => Number(value ?? 60000))
+  @IsInt()
+  @Min(5000)
+  @Max(3600000)
+  @IsOptional()
+  APPOINTMENT_WAITLIST_RECOVERY_INTERVAL_MS = 60000;
 
   @Transform(({ value }) => Number(value ?? 10000))
   @IsInt()

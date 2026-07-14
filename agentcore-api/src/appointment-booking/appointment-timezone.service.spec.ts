@@ -34,4 +34,18 @@ describe('AppointmentTimezoneService', () => {
       BadRequestException,
     );
   });
+
+  it('adds local months without overflowing shorter months', () => {
+    expect(service.addLocalMonths('2026-01-31', 1)).toBe('2026-02-28');
+    expect(service.addLocalMonths('2028-01-31', 1)).toBe('2028-02-29');
+  });
+
+  it('extracts local wall-clock time for recurrence materialization', () => {
+    expect(
+      service.timeInZone(
+        new Date('2026-07-15T13:45:30.000Z'),
+        'America/New_York',
+      ),
+    ).toBe('09:45:30');
+  });
 });

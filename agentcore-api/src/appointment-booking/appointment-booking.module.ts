@@ -14,6 +14,7 @@ import { AppointmentBookingService } from './appointment-booking.service';
 import { AppointmentReminderQueueService } from './appointment-reminder-queue.service';
 import { AppointmentTimezoneService } from './appointment-timezone.service';
 import { AppointmentCalendarService } from './appointment-calendar.service';
+import { AppointmentReminderDeliveryService } from './appointment-reminder-delivery.service';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { AppointmentCalendarService } from './appointment-calendar.service';
   providers: [
     AppointmentBookingService,
     AppointmentReminderQueueService,
+    AppointmentReminderDeliveryService,
     AppointmentTimezoneService,
     AppointmentCalendarService,
   ],

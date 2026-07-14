@@ -8,6 +8,7 @@ import {
   WhatsAppAssistantConfig,
 } from '@prisma/client';
 import { CryptoService } from '../crypto/crypto.service';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
 type ReminderBooking = AppointmentBooking & {
@@ -36,27 +37,31 @@ export class AppointmentReminderDeliveryService {
     onDelivered?: (result: ReminderDeliveryResult) => Promise<void>,
   ): Promise<ReminderDeliveryResult[]> {
     const channels = this.getChannels();
+    const suppressed = await this.getSuppressedChannels(booking);
     const message = this.buildMessage(booking, reminderType);
     const deliveries: Array<() => Promise<ReminderDeliveryResult | null>> = [];
 
     if (
       channels.has('email') &&
       booking.customerEmail &&
-      !alreadyDelivered.has('email')
+      !alreadyDelivered.has('email') &&
+      !suppressed.has('email')
     ) {
       deliveries.push(() => this.sendEmail(booking, message));
     }
     if (
       channels.has('sms') &&
       booking.customerPhone &&
-      !alreadyDelivered.has('sms')
+      !alreadyDelivered.has('sms') &&
+      !suppressed.has('sms')
     ) {
       deliveries.push(() => this.sendSms(booking.customerPhone!, message));
     }
     if (
       channels.has('whatsapp') &&
       booking.customerPhone &&
-      !alreadyDelivered.has('whatsapp')
+      !alreadyDelivered.has('whatsapp') &&
+      !suppressed.has('whatsapp')
     ) {
       deliveries.push(() =>
         this.sendWhatsApp(
@@ -78,13 +83,67 @@ export class AppointmentReminderDeliveryService {
     return results;
   }
 
+  async deliverTransactional(input: {
+    email?: string | null;
+    phone?: string | null;
+    subject: string;
+    message: string;
+  }): Promise<ReminderDeliveryResult[]> {
+    const results: ReminderDeliveryResult[] = [];
+    if (input.email) {
+      const email = await this.sendEmailMessage(
+        input.email,
+        input.subject,
+        input.message,
+      );
+      if (email) results.push(email);
+    }
+    if (input.phone) {
+      const sms = await this.sendSms(input.phone, input.message);
+      if (sms) results.push(sms);
+    }
+    return results;
+  }
+
+  reminderOptOutToken(booking: Pick<ReminderBooking, 'id' | 'organizationId'>) {
+    const secret = this.configService.get<string>('JWT_ACCESS_SECRET');
+    if (!secret) throw new Error('JWT_ACCESS_SECRET is not configured');
+    return createHmac('sha256', secret)
+      .update(`${booking.organizationId}:${booking.id}:reminder-opt-out`)
+      .digest('base64url');
+  }
+
+  verifyReminderOptOutToken(
+    booking: Pick<ReminderBooking, 'id' | 'organizationId'>,
+    token: string,
+  ): boolean {
+    const expected = Buffer.from(this.reminderOptOutToken(booking));
+    const supplied = Buffer.from(token);
+    return (
+      expected.length === supplied.length && timingSafeEqual(expected, supplied)
+    );
+  }
+
   private async sendEmail(
     booking: ReminderBooking,
     message: string,
   ): Promise<ReminderDeliveryResult | null> {
+    if (!booking.customerEmail) return null;
+    return this.sendEmailMessage(
+      booking.customerEmail,
+      `Appointment: ${booking.service.name}`,
+      message,
+    );
+  }
+
+  private async sendEmailMessage(
+    to: string,
+    subject: string,
+    message: string,
+  ): Promise<ReminderDeliveryResult | null> {
     const apiKey = this.configService.get<string>('RESEND_API_KEY');
     const from = this.configService.get<string>('APPOINTMENT_EMAIL_FROM');
-    if (!apiKey || !from || !booking.customerEmail) return null;
+    if (!apiKey || !from) return null;
 
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -94,8 +153,8 @@ export class AppointmentReminderDeliveryService {
       },
       body: JSON.stringify({
         from,
-        to: [booking.customerEmail],
-        subject: `Appointment: ${booking.service.name}`,
+        to: [to],
+        subject,
         text: message,
       }),
       signal: this.providerTimeoutSignal(),
@@ -272,7 +331,33 @@ export class AppointmentReminderDeliveryService {
       reminderType === 'confirmation'
         ? 'Your appointment is confirmed.'
         : 'This is an appointment reminder.';
-    return `${prefix} ${booking.service.name} with ${booking.staff.name} is scheduled for ${this.formatStart(booking)}.`;
+    const base = `${prefix} ${booking.service.name} with ${booking.staff.name} is scheduled for ${this.formatStart(booking)}.`;
+    const publicUrl = this.configService.get<string>('APPOINTMENT_PUBLIC_URL');
+    if (!publicUrl) return base;
+    const url = new URL('/appointment-reminders/unsubscribe', publicUrl);
+    url.searchParams.set('organizationId', booking.organizationId);
+    url.searchParams.set('bookingId', booking.id);
+    url.searchParams.set('token', this.reminderOptOutToken(booking));
+    return `${base} Manage reminder preferences: ${url.toString()}`;
+  }
+
+  private async getSuppressedChannels(
+    booking: ReminderBooking,
+  ): Promise<Set<string>> {
+    const contacts = [
+      booking.customerEmail?.trim().toLowerCase(),
+      booking.customerPhone?.replace(/\s+/g, ''),
+    ].filter((value): value is string => Boolean(value));
+    if (!contacts.length) return new Set();
+    const suppressions =
+      await this.prisma.appointmentReminderSuppression.findMany({
+        where: {
+          organizationId: booking.organizationId,
+          contactNormalized: { in: contacts },
+        },
+        select: { channel: true },
+      });
+    return new Set(suppressions.map((item) => item.channel));
   }
 
   private formatStart(booking: ReminderBooking): string {

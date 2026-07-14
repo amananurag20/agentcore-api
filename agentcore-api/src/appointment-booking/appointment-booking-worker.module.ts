@@ -12,6 +12,11 @@ import { AppointmentReminderRecoveryService } from './appointment-reminder-recov
 import { AppointmentCalendarService } from './appointment-calendar.service';
 import { AppointmentCalendarWorker } from './appointment-calendar.worker';
 import { AppointmentCalendarRecoveryService } from './appointment-calendar-recovery.service';
+import { AppointmentNoShowService } from './appointment-no-show.service';
+import { AppointmentReminderQueueService } from './appointment-reminder-queue.service';
+import { AppointmentBookingService } from './appointment-booking.service';
+import { AppointmentTimezoneService } from './appointment-timezone.service';
+import { AppointmentWaitlistRecoveryService } from './appointment-waitlist-recovery.service';
 
 @Module({
   imports: [
@@ -33,6 +38,11 @@ import { AppointmentCalendarRecoveryService } from './appointment-calendar-recov
     AppointmentCalendarService,
     AppointmentCalendarWorker,
     AppointmentCalendarRecoveryService,
+    AppointmentReminderQueueService,
+    AppointmentNoShowService,
+    AppointmentTimezoneService,
+    AppointmentBookingService,
+    AppointmentWaitlistRecoveryService,
   ],
 })
 export class AppointmentBookingWorkerModule {}

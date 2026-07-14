@@ -65,6 +65,17 @@ import {
 } from './dto/appointment-booking-response.dto';
 import { AppointmentActionDto } from './dto/appointment-action.dto';
 import { AppointmentCalendarService } from './appointment-calendar.service';
+import {
+  AppointmentReminderOptOutDto,
+  CancelAppointmentSeriesDto,
+  CheckInAppointmentDto,
+  ClaimAppointmentWaitlistDto,
+  CreateAppointmentBlackoutDto,
+  JoinAppointmentWaitlistDto,
+  ListWaitlistDto,
+  PublicCancelAppointmentSeriesDto,
+  UpdateAppointmentPolicyDto,
+} from './dto/appointment-features.dto';
 import type { Response } from 'express';
 
 @ApiTags('Appointment Booking')
@@ -76,6 +87,58 @@ export class AppointmentBookingController {
   constructor(
     private readonly appointmentBookingService: AppointmentBookingService,
   ) {}
+
+  @Get('policy')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  getPolicy(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.appointmentBookingService.getPolicy(user, organizationId);
+  }
+
+  @Patch('policy')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  updatePolicy(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId: string | undefined,
+    @Body() body: UpdateAppointmentPolicyDto,
+  ) {
+    return this.appointmentBookingService.updatePolicy(
+      user,
+      organizationId,
+      body,
+    );
+  }
+
+  @Get('blackouts')
+  listBlackouts(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.appointmentBookingService.listBlackouts(user, organizationId);
+  }
+
+  @Post('blackouts')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  createBlackout(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateAppointmentBlackoutDto,
+  ) {
+    return this.appointmentBookingService.createBlackout(user, body);
+  }
+
+  @Delete('blackouts/:id')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  deleteBlackout(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.appointmentBookingService.deleteBlackout(user, id);
+  }
 
   @Post('actions/execute')
   @ApiOperation({
@@ -402,6 +465,33 @@ export class AppointmentBookingController {
   ) {
     return this.appointmentBookingService.updateBookingStatus(user, id, body);
   }
+
+  @Patch('bookings/:id/check-in')
+  @ApiOperation({ summary: 'Mark a booking as attended/check-in' })
+  checkInBooking(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: CheckInAppointmentDto,
+  ) {
+    return this.appointmentBookingService.checkInBooking(user, id, body);
+  }
+
+  @Get('waitlist')
+  listWaitlist(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListWaitlistDto,
+  ) {
+    return this.appointmentBookingService.listWaitlist(user, query);
+  }
+
+  @Patch('series/:id/cancel')
+  cancelSeries(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: CancelAppointmentSeriesDto,
+  ) {
+    return this.appointmentBookingService.cancelSeries(user, id, body);
+  }
 }
 
 @ApiTags('Appointment Calendar Sync')
@@ -512,6 +602,47 @@ export class PublicAppointmentBookingController {
   ) {
     await this.limitPublicRequest(request, body.organizationId, 'write');
     return this.appointmentBookingService.createPublicBooking(body);
+  }
+
+  @Public()
+  @Post('waitlist')
+  async joinWaitlist(
+    @Body() body: JoinAppointmentWaitlistDto,
+    @Req() request: Request,
+  ) {
+    await this.limitPublicRequest(request, body.organizationId, 'write');
+    return this.appointmentBookingService.joinWaitlist(body);
+  }
+
+  @Public()
+  @Post('waitlist/claim')
+  async claimWaitlist(
+    @Body() body: ClaimAppointmentWaitlistDto,
+    @Req() request: Request,
+  ) {
+    await this.limitPublicRequest(request, body.organizationId, 'write');
+    return this.appointmentBookingService.claimWaitlist(body);
+  }
+
+  @Public()
+  @Post('reminders/opt-out')
+  async optOutReminders(
+    @Body() body: AppointmentReminderOptOutDto,
+    @Req() request: Request,
+  ) {
+    await this.limitPublicRequest(request, body.organizationId, 'write');
+    return this.appointmentBookingService.optOutReminders(body);
+  }
+
+  @Public()
+  @Patch('series/:id/cancel')
+  async cancelPublicSeries(
+    @Param('id') id: string,
+    @Body() body: PublicCancelAppointmentSeriesDto,
+    @Req() request: Request,
+  ) {
+    await this.limitPublicRequest(request, body.organizationId, 'write');
+    return this.appointmentBookingService.cancelPublicSeries(id, body);
   }
 
   @Public()

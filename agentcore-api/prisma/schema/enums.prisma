@@ -140,6 +140,32 @@ enum AppointmentCalendarEventStatus {
   dead_letter
 }
 
+enum AppointmentRecurrenceFrequency {
+  daily
+  weekly
+  monthly
+}
+
+enum AppointmentRecurrenceSeriesStatus {
+  active
+  cancelled
+  completed
+}
+
+enum AppointmentWaitlistStatus {
+  waiting
+  offered
+  claimed
+  expired
+  cancelled
+}
+
+enum AppointmentReminderChannel {
+  email
+  sms
+  whatsapp
+}
+
 enum WhatsAppProviderType {
   meta
   twilio
