@@ -1,4 +1,7 @@
-import { ForbiddenException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { WhatsAppAssistantConfig } from '@prisma/client';
 import { createHmac } from 'crypto';
 import { WhatsAppAssistantService } from './whatsapp-assistant.service';
@@ -6,14 +9,16 @@ import { WhatsAppAssistantService } from './whatsapp-assistant.service';
 function createService(
   prisma: Record<string, unknown> = {},
   rateLimit: Record<string, unknown> = { consume: jest.fn() },
+  outbound: Record<string, unknown> = { sendText: jest.fn() },
+  audit: Record<string, unknown> = { record: jest.fn() },
 ) {
   return new WhatsAppAssistantService(
-    {} as never,
+    audit as never,
     {} as never,
     { answerWithContext: jest.fn() } as never,
     { decrypt: () => 'app-secret' } as never,
     { search: jest.fn() } as never,
-    { sendText: jest.fn() } as never,
+    outbound as never,
     prisma as never,
     { enqueue: jest.fn(), isEnabled: () => true } as never,
     {
@@ -132,5 +137,106 @@ describe('WhatsAppAssistantService hardening', () => {
     expect(update).toHaveBeenCalled();
     expect(updateInput?.where).toEqual({ id: 'message-1' });
     expect(updateInput?.data.processingError).toBeNull();
+  });
+
+  it('persists a failed agent send and returns a sanitized provider error', async () => {
+    type MessageCreateInput = {
+      data: { deliveryStatus?: string; providerMessageId?: string };
+    };
+    type MessageUpdateInput = {
+      where: { id: string };
+      data: {
+        deliveryStatus?: string;
+        deliveryError?: string;
+        deliveryAttempts?: { increment: number };
+      };
+    };
+    type ConversationUpdateInput = {
+      data: { status?: string; assignedAgentId?: string };
+    };
+    const providerError = new Error('private provider response body');
+    const sendText = jest.fn().mockRejectedValue(providerError);
+    let createInput: MessageCreateInput | undefined;
+    const create = jest.fn((input: MessageCreateInput) => {
+      createInput = input;
+      return Promise.resolve({
+        id: 'message-1',
+        deliveryStatus: 'pending',
+        deliveryAttempts: 0,
+        metadata: {},
+      });
+    });
+    let messageUpdateInput: MessageUpdateInput | undefined;
+    const updateMessage = jest.fn((input: MessageUpdateInput) => {
+      messageUpdateInput = input;
+      return Promise.resolve({});
+    });
+    const conversation = {
+      id: 'conversation-1',
+      organizationId: 'org-1',
+      configId: 'config-1',
+      contactWaId: '919876543210',
+      assignedAgentId: null,
+      sessionExpiresAt: new Date(Date.now() + 60_000),
+      messages: [],
+    };
+    let conversationUpdateInput: ConversationUpdateInput | undefined;
+    const updateConversation = jest.fn((input: ConversationUpdateInput) => {
+      conversationUpdateInput = input;
+      return Promise.resolve({
+        ...conversation,
+        status: 'waiting_for_agent',
+        assignedAgentId: 'agent-1',
+      });
+    });
+    const service = createService(
+      {
+        organizationProduct: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+        },
+        whatsAppAssistantConfig: {
+          findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'config-1' }),
+        },
+        whatsAppConversation: {
+          findUnique: jest.fn().mockResolvedValue(conversation),
+          update: updateConversation,
+        },
+        whatsAppMessage: { create, update: updateMessage },
+      },
+      { consume: jest.fn().mockResolvedValue(undefined) },
+      { sendText },
+      { record: jest.fn().mockResolvedValue(undefined) },
+    );
+
+    let thrown: unknown;
+    try {
+      await service.sendAgentMessage(
+        {
+          sub: 'agent-1',
+          email: 'agent@example.com',
+          orgId: 'org-1',
+          roles: ['agent'],
+        },
+        conversation.id,
+        { content: 'Hello' },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ServiceUnavailableException);
+    expect((thrown as Error).message).not.toContain(providerError.message);
+    expect(conversationUpdateInput?.data).toMatchObject({
+      status: 'waiting_for_agent',
+      assignedAgentId: 'agent-1',
+    });
+    expect(createInput?.data.deliveryStatus).toBe('pending');
+    expect(createInput?.data.providerMessageId).toBeUndefined();
+    expect(messageUpdateInput?.where).toEqual({ id: 'message-1' });
+    expect(messageUpdateInput?.data).toMatchObject({
+      deliveryStatus: 'failed',
+      deliveryError: 'Provider delivery failed after retry attempts',
+      deliveryAttempts: { increment: 1 },
+    });
   });
 });

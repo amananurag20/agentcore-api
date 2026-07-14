@@ -261,6 +261,57 @@ export class VoiceOutboundService {
     return `<Response><Gather input="speech dtmf" action="${this.escapeTwiml(gatherUrl)}" method="POST" speechTimeout="auto" actionOnEmptyResult="true">${prompt}</Gather>${this.sayTwiml(config, 'I did not hear anything. Goodbye.')}<Hangup/></Response>`;
   }
 
+  hasConversationRelay(config: VoiceReceptionistConfig): boolean {
+    return Boolean(this.getConversationRelayUrl(config));
+  }
+
+  getConversationRelayUrl(config: VoiceReceptionistConfig): string | undefined {
+    const configured = this.toRecord(config.settings).conversationRelayUrl;
+    if (typeof configured === 'string' && /^wss:\/\//.test(configured)) {
+      return configured;
+    }
+    const baseUrl = this.configService
+      .get<string>('VOICE_CONVERSATION_RELAY_PUBLIC_BASE_URL')
+      ?.replace(/\/$/, '');
+    return baseUrl && /^wss:\/\//.test(baseUrl)
+      ? `${baseUrl}/api/v1/voice-receptionist/stream/${config.id}`
+      : undefined;
+  }
+
+  buildConversationRelayTwiml(
+    config: VoiceReceptionistConfig,
+    greeting: string,
+  ): string {
+    const relayUrl = this.getConversationRelayUrl(config);
+    if (!relayUrl) {
+      throw new ServiceUnavailableException(
+        'VOICE_CONVERSATION_RELAY_PUBLIC_BASE_URL or settings.conversationRelayUrl is required',
+      );
+    }
+    const actionUrl = this.getTwilioCallbackUrl(
+      config,
+      'twilioConversationRelayCallbackUrl',
+      'relay',
+    );
+    if (!actionUrl) {
+      throw new ServiceUnavailableException(
+        'VOICE_WEBHOOK_PUBLIC_BASE_URL or settings.twilioConversationRelayCallbackUrl is required',
+      );
+    }
+    const attributes = [
+      `url="${this.escapeTwiml(relayUrl)}"`,
+      `welcomeGreeting="${this.escapeTwiml(greeting)}"`,
+      'welcomeGreetingInterruptible="any"',
+      `language="${this.escapeTwiml(this.twilioLanguage(config.defaultLocale))}"`,
+      'interruptible="any"',
+      'reportInputDuringAgentSpeech="any"',
+      'dtmfDetection="true"',
+      'preemptible="true"',
+      ...this.conversationRelayProviderAttributes(config),
+    ].join(' ');
+    return `<Response><Connect action="${this.escapeTwiml(actionUrl)}" method="POST"><ConversationRelay ${attributes}><Parameter name="configId" value="${this.escapeTwiml(config.id)}"/></ConversationRelay></Connect></Response>`;
+  }
+
   buildTransferTwiml(
     config: VoiceReceptionistConfig,
     transferTo: string,
@@ -338,10 +389,98 @@ export class VoiceOutboundService {
     return aliases[locale] ?? locale;
   }
 
+  private conversationRelayProviderAttributes(
+    config: VoiceReceptionistConfig,
+  ): string[] {
+    const settings = this.toRecord(config.settings);
+    const configuredTtsProvider =
+      typeof settings.conversationRelayTtsProvider === 'string'
+        ? settings.conversationRelayTtsProvider
+        : config.ttsProvider;
+    const configuredVoice =
+      typeof settings.conversationRelayVoice === 'string'
+        ? settings.conversationRelayVoice
+        : config.ttsVoice;
+    const ttsProvider =
+      this.conversationRelayTtsProvider(configuredTtsProvider) ??
+      (configuredVoice && this.isConversationRelayVoiceAlias(configuredVoice)
+        ? 'Amazon'
+        : undefined);
+    const transcriptionProvider =
+      typeof settings.conversationRelayTranscriptionProvider === 'string'
+        ? this.conversationRelayTranscriptionProvider(
+            settings.conversationRelayTranscriptionProvider,
+          )
+        : this.conversationRelayTranscriptionProvider(config.sttProvider);
+    const speechModel =
+      typeof settings.conversationRelaySpeechModel === 'string'
+        ? settings.conversationRelaySpeechModel
+        : undefined;
+
+    return [
+      ttsProvider ? `ttsProvider="${ttsProvider}"` : undefined,
+      configuredVoice && ttsProvider
+        ? `voice="${this.escapeTwiml(this.conversationRelayVoice(configuredVoice))}"`
+        : undefined,
+      transcriptionProvider
+        ? `transcriptionProvider="${transcriptionProvider}"`
+        : undefined,
+      speechModel
+        ? `speechModel="${this.escapeTwiml(speechModel)}"`
+        : undefined,
+    ].filter((value): value is string => Boolean(value));
+  }
+
+  private conversationRelayTtsProvider(
+    provider?: string | null,
+  ): 'Google' | 'Amazon' | 'ElevenLabs' | undefined {
+    const normalized = provider?.toLowerCase();
+    if (normalized === 'google') return 'Google';
+    if (normalized === 'elevenlabs') return 'ElevenLabs';
+    if (['amazon', 'polly', 'twilio'].includes(normalized ?? '')) {
+      return 'Amazon';
+    }
+    return undefined;
+  }
+
+  private conversationRelayTranscriptionProvider(
+    provider?: string | null,
+  ): 'Google' | 'Deepgram' | undefined {
+    const normalized = provider?.toLowerCase();
+    if (normalized === 'google') return 'Google';
+    if (normalized === 'deepgram') return 'Deepgram';
+    return undefined;
+  }
+
+  private conversationRelayVoice(voice: string): string {
+    const aliases: Record<string, string> = {
+      alice: 'Joanna-Neural',
+      alloy: 'Joanna-Neural',
+      echo: 'Matthew-Neural',
+      fable: 'Amy-Neural',
+      nova: 'Joanna-Neural',
+      onyx: 'Matthew-Neural',
+      shimmer: 'Joanna-Neural',
+    };
+    return aliases[voice] ?? voice;
+  }
+
+  private isConversationRelayVoiceAlias(voice: string): boolean {
+    return [
+      'alice',
+      'alloy',
+      'echo',
+      'fable',
+      'nova',
+      'onyx',
+      'shimmer',
+    ].includes(voice);
+  }
+
   private getTwilioCallbackUrl(
     config: VoiceReceptionistConfig,
     key: string,
-    callback: 'gather' | 'dial' | 'recording',
+    callback: 'gather' | 'dial' | 'recording' | 'relay',
   ): string | undefined {
     const value = this.toRecord(config.settings)[key];
     if (typeof value === 'string' && /^https:\/\//.test(value)) return value;

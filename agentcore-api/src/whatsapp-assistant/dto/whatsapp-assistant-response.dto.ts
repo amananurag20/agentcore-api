@@ -98,6 +98,18 @@ export class WhatsAppMessageResponseDto {
   @ApiPropertyOptional()
   mediaMimeType?: string | null;
 
+  @ApiPropertyOptional()
+  deliveryStatus?: string | null;
+
+  @ApiPropertyOptional()
+  deliveryError?: string | null;
+
+  @ApiProperty()
+  deliveryAttempts: number;
+
+  @ApiPropertyOptional()
+  deliveredAt?: Date | null;
+
   @ApiProperty()
   metadata: Record<string, unknown>;
 

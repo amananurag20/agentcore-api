@@ -9,6 +9,10 @@ import {
 import { VoiceReceptionistService } from './voice-receptionist.service';
 
 type TestableVoiceService = {
+  authorizeConversationRelay(
+    configId: string,
+    signature: string | undefined,
+  ): Promise<VoiceReceptionistConfig>;
   evaluateBusinessHours(config: VoiceReceptionistConfig): { isOpen: boolean };
   assertWebhookSignature(
     config: VoiceReceptionistConfig,
@@ -60,6 +64,20 @@ describe('VoiceReceptionistService hardening', () => {
       ),
     } as unknown as ConfigService;
     const cryptoService = { decrypt: jest.fn(() => secret) };
+    const outboundService = {
+      getConversationRelayUrl: jest.fn(
+        () =>
+          'wss://voice.example.com/api/v1/voice-receptionist/stream/config-1',
+      ),
+    };
+    const prisma = {
+      voiceReceptionistConfig: {
+        findFirst: jest.fn().mockResolvedValue(baseConfig),
+      },
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'product-1' }),
+      },
+    };
     return new VoiceReceptionistService(
       {} as never,
       {} as never,
@@ -68,8 +86,8 @@ describe('VoiceReceptionistService hardening', () => {
       cryptoService as never,
       {} as never,
       {} as never,
-      {} as never,
-      {} as never,
+      outboundService as never,
+      prisma as never,
     ) as unknown as TestableVoiceService;
   }
 
@@ -164,6 +182,24 @@ describe('VoiceReceptionistService hardening', () => {
         { originalUrl: path },
       ),
     ).not.toThrow();
+  });
+
+  it('fails closed and accepts only the signed ConversationRelay WebSocket URL', async () => {
+    const service = createService({
+      VOICE_WEBHOOK_SIGNATURE_REQUIRED: true,
+    });
+    await expect(
+      service.authorizeConversationRelay('config-1', undefined),
+    ).rejects.toThrow(ForbiddenException);
+
+    const signature = createHmac('sha1', secret)
+      .update(
+        'wss://voice.example.com/api/v1/voice-receptionist/stream/config-1',
+      )
+      .digest('base64');
+    await expect(
+      service.authorizeConversationRelay('config-1', signature),
+    ).resolves.toEqual(baseConfig);
   });
 
   it('includes recent caller and receptionist turns in follow-up questions', () => {

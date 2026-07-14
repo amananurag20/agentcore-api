@@ -594,6 +594,10 @@ class EnvironmentVariables {
   @IsOptional()
   VOICE_WEBHOOK_PUBLIC_BASE_URL?: string;
 
+  @IsString()
+  @IsOptional()
+  VOICE_CONVERSATION_RELAY_PUBLIC_BASE_URL?: string;
+
   @Transform(({ value }) => Number(value ?? 5000))
   @IsInt()
   @Min(1000)
@@ -607,6 +611,13 @@ class EnvironmentVariables {
   @Max(30000)
   @IsOptional()
   VOICE_AI_TIMEOUT_MS = 8000;
+
+  @Transform(({ value }) => Number(value ?? 1800))
+  @IsInt()
+  @Min(60)
+  @Max(14400)
+  @IsOptional()
+  VOICE_MAX_CALL_DURATION_SECONDS = 1800;
 
   @IsString()
   @IsOptional()

@@ -29,6 +29,7 @@ import {
   RouteVoiceCallDto,
   SendVoiceAgentMessageDto,
   TwilioDialCallbackDto,
+  TwilioConversationRelayCallbackDto,
   TwilioGatherCallbackDto,
   TwilioIncomingCallDto,
   TwilioRecordingCallbackDto,
@@ -261,6 +262,25 @@ export class VoiceReceptionistWebhookController {
     @Req() request: RawBodyRequest,
   ) {
     return this.voiceReceptionistService.handleTwilioStatus(
+      configId,
+      body,
+      request.rawBody,
+      request.headers,
+      this.requestUrl(request),
+    );
+  }
+
+  @Public()
+  @Post(':configId/twilio/relay')
+  @HttpCode(200)
+  @Header('Content-Type', 'text/xml')
+  @ApiOperation({ summary: 'Process a Twilio ConversationRelay result' })
+  handleTwilioConversationRelay(
+    @Param('configId') configId: string,
+    @Body() body: TwilioConversationRelayCallbackDto,
+    @Req() request: RawBodyRequest,
+  ) {
+    return this.voiceReceptionistService.handleTwilioConversationRelayCallback(
       configId,
       body,
       request.rawBody,

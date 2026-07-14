@@ -46,6 +46,9 @@ type WhatsAppConversationWithMessages = Prisma.WhatsAppConversationGetPayload<{
   };
 }>;
 
+type AgentOutboundMessageType =
+  'text' | 'template' | 'image' | 'audio' | 'video' | 'document';
+
 class HumanOwnedConversationError extends Error {}
 
 @Injectable()
@@ -321,53 +324,28 @@ export class WhatsAppAssistantService {
       where: { id: conversation.configId },
     });
     this.assertSessionWindowOpen(conversation.sessionExpiresAt);
-    const delivery = await this.outboundService.sendText({
-      config,
-      to: conversation.contactWaId,
+    const result = await this.deliverAgentOutbound({
+      currentUser,
+      conversation,
+      type: 'text',
       content: input.content,
-    });
-    const message = await this.prisma.whatsAppMessage.create({
-      data: {
-        organizationId: conversation.organizationId,
-        conversationId: conversation.id,
-        direction: 'outbound',
-        role: 'agent',
-        type: 'text',
-        providerMessageId: delivery.providerMessageId,
-        content: input.content,
-        metadata: this.toJsonObject({
-          delivery,
-          agentId: currentUser.sub,
-          agentEmail: currentUser.email,
-        }),
-      },
-    });
-
-    const updated = await this.prisma.whatsAppConversation.update({
-      where: { id: conversation.id },
-      data: {
-        status: 'waiting_for_agent',
-        assignedAgentId: conversation.assignedAgentId ?? currentUser.sub,
-        lastMessageAt: new Date(),
-      },
-      include: this.conversationInclude(),
-    });
-
-    await this.auditService.record({
-      actor: currentUser,
-      organizationId: conversation.organizationId,
-      action: 'whatsapp.agent_replied',
-      entityType: 'whatsapp_conversation',
-      entityId: conversation.id,
       metadata: {
-        messageId: message.id,
+        agentId: currentUser.sub,
+        agentEmail: currentUser.email,
       },
+      successAction: 'whatsapp.agent_replied',
+      deliver: () =>
+        this.outboundService.sendText({
+          config,
+          to: conversation.contactWaId,
+          content: input.content,
+        }),
     });
 
     return {
-      conversation: this.toConversationResponse(updated),
-      agentMessage: this.toMessageResponse(message),
-      delivery,
+      conversation: this.toConversationResponse(result.conversation),
+      agentMessage: this.toMessageResponse(result.message),
+      delivery: result.delivery,
     };
   }
 
@@ -387,52 +365,36 @@ export class WhatsAppAssistantService {
       input.language,
       conversation.locale,
     );
-    const delivery = await this.outboundService.sendTemplate({
-      config,
-      to: conversation.contactWaId,
-      name: template.name,
-      language: template.language,
-      components: input.components,
-    });
-    const message = await this.prisma.whatsAppMessage.create({
-      data: {
-        organizationId: conversation.organizationId,
-        conversationId: conversation.id,
-        direction: 'outbound',
-        role: 'agent',
-        type: 'template',
-        providerMessageId: delivery.providerMessageId,
-        content: template.name,
-        metadata: this.toJsonObject({
-          delivery,
-          templateId: template.id,
-          templateName: template.name,
-          language: template.language,
-          components: input.components ?? [],
-          agentId: currentUser.sub,
-        }),
-      },
-    });
-    const updated = await this.claimForAgent(
-      conversation.id,
-      conversation.assignedAgentId ?? currentUser.sub,
-    );
-    await this.auditService.record({
-      actor: currentUser,
-      organizationId: conversation.organizationId,
-      action: 'whatsapp.template_sent',
-      entityType: 'whatsapp_conversation',
-      entityId: conversation.id,
+    const result = await this.deliverAgentOutbound({
+      currentUser,
+      conversation,
+      type: 'template',
+      content: template.name,
       metadata: {
-        messageId: message.id,
+        templateId: template.id,
+        templateName: template.name,
+        language: template.language,
+        components: input.components ?? [],
+        agentId: currentUser.sub,
+      },
+      successAction: 'whatsapp.template_sent',
+      successMetadata: {
         templateName: template.name,
         language: template.language,
       },
+      deliver: () =>
+        this.outboundService.sendTemplate({
+          config,
+          to: conversation.contactWaId,
+          name: template.name,
+          language: template.language,
+          components: input.components,
+        }),
     });
     return {
-      conversation: this.toConversationResponse(updated),
-      message: this.toMessageResponse(message),
-      delivery,
+      conversation: this.toConversationResponse(result.conversation),
+      message: this.toMessageResponse(result.message),
+      delivery: result.delivery,
     };
   }
 
@@ -447,44 +409,163 @@ export class WhatsAppAssistantService {
     const config = await this.prisma.whatsAppAssistantConfig.findUniqueOrThrow({
       where: { id: conversation.configId },
     });
-    const delivery = await this.outboundService.sendMedia({
-      config,
-      to: conversation.contactWaId,
-      ...input,
+    const result = await this.deliverAgentOutbound({
+      currentUser,
+      conversation,
+      type: input.type,
+      content: input.caption,
+      mediaUrl: input.link,
+      metadata: {
+        providerMediaId: input.mediaId,
+        filename: input.filename,
+        agentId: currentUser.sub,
+      },
+      successAction: 'whatsapp.media_sent',
+      successMetadata: { type: input.type },
+      deliver: () =>
+        this.outboundService.sendMedia({
+          config,
+          to: conversation.contactWaId,
+          ...input,
+        }),
     });
-    const message = await this.prisma.whatsAppMessage.create({
+    return {
+      conversation: this.toConversationResponse(result.conversation),
+      message: this.toMessageResponse(result.message),
+      delivery: result.delivery,
+    };
+  }
+
+  private async deliverAgentOutbound(input: {
+    currentUser: AuthenticatedUser;
+    conversation: WhatsAppConversationWithMessages;
+    type: AgentOutboundMessageType;
+    content?: string;
+    mediaUrl?: string;
+    metadata: Record<string, unknown>;
+    successAction: string;
+    successMetadata?: Record<string, unknown>;
+    deliver: () => Promise<WhatsAppOutboundResult>;
+  }) {
+    const updatedConversation = await this.claimForAgent(
+      input.conversation.id,
+      input.conversation.assignedAgentId ?? input.currentUser.sub,
+    );
+    const pendingMessage = await this.prisma.whatsAppMessage.create({
       data: {
-        organizationId: conversation.organizationId,
-        conversationId: conversation.id,
+        organizationId: input.conversation.organizationId,
+        conversationId: input.conversation.id,
         direction: 'outbound',
         role: 'agent',
         type: input.type,
-        providerMessageId: delivery.providerMessageId,
-        content: input.caption,
-        mediaUrl: input.link,
-        metadata: this.toJsonObject({
-          delivery,
-          providerMediaId: input.mediaId,
-          filename: input.filename,
-          agentId: currentUser.sub,
-        }),
+        content: input.content,
+        mediaUrl: input.mediaUrl,
+        deliveryStatus: 'pending',
+        metadata: this.toJsonObject(input.metadata),
       },
     });
-    const updated = await this.claimForAgent(
-      conversation.id,
-      conversation.assignedAgentId ?? currentUser.sub,
-    );
-    await this.auditService.record({
-      actor: currentUser,
-      organizationId: conversation.organizationId,
-      action: 'whatsapp.media_sent',
-      entityType: 'whatsapp_conversation',
-      entityId: conversation.id,
-      metadata: { messageId: message.id, type: input.type },
-    });
+
+    let delivery: WhatsAppOutboundResult;
+    try {
+      delivery = await input.deliver();
+    } catch (error) {
+      const failureMessage = 'Provider delivery failed after retry attempts';
+      let failurePersisted = false;
+      try {
+        await this.prisma.whatsAppMessage.update({
+          where: { id: pendingMessage.id },
+          data: {
+            deliveryStatus: 'failed',
+            deliveryError: failureMessage,
+            deliveryAttempts: { increment: 1 },
+            metadata: this.toJsonObject({
+              ...input.metadata,
+              failedAt: new Date().toISOString(),
+            }),
+          },
+        });
+        failurePersisted = true;
+        await this.auditService
+          .record({
+            actor: input.currentUser,
+            organizationId: input.conversation.organizationId,
+            action: 'whatsapp.agent_delivery_failed',
+            entityType: 'whatsapp_message',
+            entityId: pendingMessage.id,
+            metadata: { type: input.type },
+          })
+          .catch((auditError) =>
+            this.logger.error(
+              `Failed to audit WhatsApp delivery failure for ${pendingMessage.id}`,
+              auditError instanceof Error ? auditError.stack : undefined,
+            ),
+          );
+      } catch (persistenceError) {
+        this.logger.error(
+          `Failed to persist WhatsApp delivery failure for ${pendingMessage.id}`,
+          persistenceError instanceof Error
+            ? persistenceError.stack
+            : undefined,
+        );
+      }
+      this.logger.error(
+        `Agent WhatsApp delivery failed for ${pendingMessage.id}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      throw new ServiceUnavailableException(
+        failurePersisted
+          ? 'WhatsApp delivery failed; the failed attempt was recorded'
+          : 'WhatsApp delivery failed and failure tracking is temporarily unavailable',
+      );
+    }
+    let message: typeof pendingMessage;
+    try {
+      message = await this.prisma.whatsAppMessage.update({
+        where: { id: pendingMessage.id },
+        data: {
+          providerMessageId: delivery.providerMessageId,
+          deliveryStatus: delivery.status,
+          deliveryError: null,
+          deliveryAttempts: { increment: 1 },
+          metadata: this.toJsonObject({
+            ...input.metadata,
+            delivery,
+          }),
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Provider accepted WhatsApp message ${pendingMessage.id}, but delivery tracking could not be updated`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      throw new ServiceUnavailableException(
+        'WhatsApp accepted the message, but delivery tracking is temporarily unavailable',
+      );
+    }
+    await this.auditService
+      .record({
+        actor: input.currentUser,
+        organizationId: input.conversation.organizationId,
+        action: input.successAction,
+        entityType: 'whatsapp_conversation',
+        entityId: input.conversation.id,
+        metadata: {
+          messageId: message.id,
+          ...input.successMetadata,
+        },
+      })
+      .catch((auditError) =>
+        this.logger.error(
+          `Failed to audit successful WhatsApp delivery for ${message.id}`,
+          auditError instanceof Error ? auditError.stack : undefined,
+        ),
+      );
     return {
-      conversation: this.toConversationResponse(updated),
-      message: this.toMessageResponse(message),
+      conversation: {
+        ...updatedConversation,
+        messages: [...updatedConversation.messages, message],
+      },
+      message,
       delivery,
     };
   }
@@ -669,9 +750,22 @@ export class WhatsAppAssistantService {
     });
     if (!message) return;
 
+    const timestampSeconds = Number(status.timestamp);
+    const callbackAt = Number.isFinite(timestampSeconds)
+      ? new Date(timestampSeconds * 1000)
+      : new Date();
+    const deliveredAt = ['delivered', 'read'].includes(status.status)
+      ? callbackAt
+      : undefined;
     await this.prisma.whatsAppMessage.update({
       where: { id: message.id },
       data: {
+        deliveryStatus: status.status,
+        deliveryError:
+          status.status === 'failed'
+            ? 'Provider reported delivery failure'
+            : null,
+        deliveredAt,
         metadata: this.toJsonObject({
           ...this.toRecord(message.metadata),
           deliveryStatus: status,

@@ -92,6 +92,10 @@ model WhatsAppMessage {
   processedAt        DateTime?                @map("processed_at")
   processingError    String?                  @map("processing_error")
   processingAttempts Int                      @default(0) @map("processing_attempts")
+  deliveryStatus     String?                  @map("delivery_status")
+  deliveryError      String?                  @map("delivery_error")
+  deliveryAttempts   Int                      @default(0) @map("delivery_attempts")
+  deliveredAt        DateTime?                @map("delivered_at")
   metadata           Json                     @default("{}")
   createdAt          DateTime                 @default(now()) @map("created_at")
 
@@ -99,5 +103,6 @@ model WhatsAppMessage {
   @@index([organizationId])
   @@index([conversationId, createdAt])
   @@index([processedAt])
+  @@index([organizationId, deliveryStatus])
   @@map("whatsapp_messages")
 }

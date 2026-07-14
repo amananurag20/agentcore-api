@@ -77,6 +77,10 @@ describe('VoiceReceptionistService Twilio callbacks', () => {
       },
     };
     const outbound = {
+      hasConversationRelay: jest.fn(() => false),
+      buildConversationRelayTwiml: jest.fn(
+        () => '<Response><Connect/></Response>',
+      ),
       buildVoicemailTwiml: jest.fn(() => '<Response><Record/></Response>'),
       buildGatherTwiml: jest.fn(() => '<Response><Gather/></Response>'),
       buildCloseTwiml: jest.fn(() => '<Response><Hangup/></Response>'),

@@ -24,6 +24,7 @@ import {
   UpdateVoiceCallStatusDto,
   UpdateVoiceConfigDto,
   TwilioDialCallbackDto,
+  TwilioConversationRelayCallbackDto,
   TwilioGatherCallbackDto,
   TwilioIncomingCallDto,
   TwilioRecordingCallbackDto,
@@ -43,6 +44,20 @@ type VoiceCallWithEvents = Prisma.VoiceCallGetPayload<{
     events: true;
   };
 }>;
+
+export type ConversationRelaySetup = {
+  sessionId: string;
+  callSid: string;
+  from?: string;
+  to?: string;
+};
+
+export type ConversationRelayPromptResult =
+  | { type: 'text'; content: string; language?: string }
+  | {
+      type: 'end';
+      handoffData: string;
+    };
 
 @Injectable()
 export class VoiceReceptionistService {
@@ -799,6 +814,8 @@ export class VoiceReceptionistService {
       'greeting',
       'Hello, thank you for calling. How can I help you today?',
     );
+    const useConversationRelay =
+      this.outboundService.hasConversationRelay(config);
     const greetingPlayed = call.events.some(
       (event) => this.toRecord(event.metadata).greeting === true,
     );
@@ -810,11 +827,216 @@ export class VoiceReceptionistService {
           type: 'assistant_response',
           role: 'assistant',
           content: greeting,
-          metadata: this.toJsonObject({ greeting: true, delivery: 'twiml' }),
+          metadata: this.toJsonObject({
+            greeting: true,
+            delivery: useConversationRelay ? 'conversation-relay' : 'twiml',
+          }),
         },
       });
     }
+    if (useConversationRelay) {
+      return this.outboundService.buildConversationRelayTwiml(config, greeting);
+    }
     return this.outboundService.buildGatherTwiml(config, greeting);
+  }
+
+  async authorizeConversationRelay(
+    configId: string,
+    signature: string | undefined,
+  ): Promise<VoiceReceptionistConfig> {
+    const config = await this.findActiveConfig(configId);
+    await this.assertVoiceEnabled(config.organizationId);
+    const required = this.configService.get<boolean>(
+      'VOICE_WEBHOOK_SIGNATURE_REQUIRED',
+      true,
+    );
+    if (!required && !signature) return config;
+    if (!signature || !config.apiKeyEncrypted) {
+      throw new ForbiddenException('Invalid Twilio WebSocket signature');
+    }
+    const requestUrl = this.outboundService.getConversationRelayUrl(config);
+    if (!requestUrl) {
+      throw new ForbiddenException('ConversationRelay URL is not configured');
+    }
+    const expected = createHmac(
+      'sha1',
+      this.cryptoService.decrypt(config.apiKeyEncrypted),
+    )
+      .update(requestUrl)
+      .digest('base64');
+    if (!this.secureCompareText(expected, signature)) {
+      throw new ForbiddenException('Invalid Twilio WebSocket signature');
+    }
+    return config;
+  }
+
+  async handleConversationRelaySetup(
+    config: VoiceReceptionistConfig,
+    input: ConversationRelaySetup,
+  ): Promise<void> {
+    const call = await this.findOrCreateCallbackCall(config, input.callSid);
+    await this.prisma.voiceCall.update({
+      where: { id: call.id },
+      data: {
+        fromNumber: input.from,
+        toNumber: input.to,
+        status: 'in_progress',
+        lastEventAt: new Date(),
+        metadata: this.toJsonObject({
+          ...this.toRecord(call.metadata),
+          conversationRelaySessionId: input.sessionId,
+          transport: 'conversation-relay',
+        }),
+      },
+    });
+    await this.prisma.voiceCallEvent.create({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: 'system',
+        role: 'system',
+        content: 'ConversationRelay streaming session connected.',
+        metadata: this.toJsonObject({ sessionId: input.sessionId }),
+      },
+    });
+  }
+
+  async handleConversationRelayPrompt(
+    config: VoiceReceptionistConfig,
+    callSid: string,
+    content: string,
+    digits?: string,
+    language?: string,
+  ): Promise<ConversationRelayPromptResult> {
+    const call = await this.findCallByProvider(config.id, callSid);
+    const normalizedContent = content.trim();
+    await this.prisma.voiceCallEvent.create({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: 'transcript',
+        role: 'caller',
+        content: normalizedContent,
+        metadata: this.toJsonObject({
+          transport: 'conversation-relay',
+          digits,
+          language,
+        }),
+      },
+    });
+    const route = digits
+      ? this.matchDtmfRoute(config, digits)
+      : this.matchKeywordRoute(config, normalizedContent);
+    if (route) {
+      await this.prisma.voiceCallEvent.create({
+        data: {
+          organizationId: config.organizationId,
+          callId: call.id,
+          type: 'transfer_requested',
+          role: 'system',
+          content: `Routing caller to ${route.department}.`,
+          metadata: this.toJsonObject({
+            transferTo: route.transferTo,
+            transport: 'conversation-relay',
+          }),
+        },
+      });
+      return {
+        type: 'end',
+        handoffData: JSON.stringify({
+          action: 'transfer',
+          transferTo: route.transferTo,
+        }),
+      };
+    }
+
+    const reply = await this.createAssistantReply(
+      config,
+      call,
+      normalizedContent,
+      undefined,
+      'inline',
+    );
+    return {
+      type: 'text',
+      content: reply.event.content ?? 'How else can I help?',
+      language,
+    };
+  }
+
+  async handleConversationRelayInterrupt(
+    config: VoiceReceptionistConfig,
+    callSid: string,
+    utteranceUntilInterrupt?: string,
+    durationUntilInterruptMs?: number,
+  ): Promise<void> {
+    const call = await this.findCallByProvider(config.id, callSid);
+    await this.prisma.voiceCallEvent.create({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: 'barge_in',
+        role: 'caller',
+        content: utteranceUntilInterrupt,
+        metadata: this.toJsonObject({
+          transport: 'conversation-relay',
+          durationUntilInterruptMs,
+        }),
+      },
+    });
+  }
+
+  async handleTwilioConversationRelayCallback(
+    configId: string,
+    input: TwilioConversationRelayCallbackDto,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ): Promise<string> {
+    const config = await this.loadSignedTwilioConfig(
+      configId,
+      rawBody,
+      headers,
+      requestUrl,
+    );
+    const call = await this.findOrCreateCallbackCall(config, input.CallSid);
+    const handoff = this.parseConversationRelayHandoff(input.HandoffData);
+    await this.prisma.voiceCallEvent.create({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: 'system',
+        role: 'system',
+        content: `ConversationRelay session ${input.SessionStatus ?? 'ended'}.`,
+        metadata: this.toJsonObject({
+          sessionId: input.SessionId,
+          sessionDurationSeconds: this.parseOptionalInt(input.SessionDuration),
+          errorCode: input.ErrorCode,
+          errorMessage: input.ErrorMessage,
+          handoff,
+        }),
+      },
+    });
+    if (handoff?.action === 'transfer' && handoff.transferTo) {
+      await this.prisma.voiceCall.update({
+        where: { id: call.id },
+        data: { status: 'transferred', lastEventAt: new Date() },
+      });
+      return this.outboundService.buildTransferTwiml(
+        config,
+        handoff.transferTo,
+      );
+    }
+    if (handoff?.action === 'voicemail' && config.voicemailEnabled) {
+      return this.outboundService.buildVoicemailTwiml(config);
+    }
+    if (input.SessionStatus === 'failed' || input.ErrorCode) {
+      return this.outboundService.buildGatherTwiml(
+        config,
+        'I am sorry, the live voice connection was interrupted. How can I help?',
+      );
+    }
+    return '<Response><Hangup/></Response>';
   }
 
   async handleTwilioGather(
@@ -1380,6 +1602,31 @@ export class VoiceReceptionistService {
     if (value === undefined) return undefined;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  private parseConversationRelayHandoff(value?: string):
+    | {
+        action?: 'transfer' | 'voicemail' | 'close';
+        transferTo?: string;
+      }
+    | undefined {
+    if (!value || value.length > 2_000) return undefined;
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      const action = ['transfer', 'voicemail', 'close'].includes(
+        String(parsed.action),
+      )
+        ? (parsed.action as 'transfer' | 'voicemail' | 'close')
+        : undefined;
+      const transferTo =
+        typeof parsed.transferTo === 'string' &&
+        /^\+[1-9]\d{7,14}$/.test(parsed.transferTo)
+          ? parsed.transferTo
+          : undefined;
+      return { action, transferTo };
+    } catch {
+      return undefined;
+    }
   }
 
   private async upsertCall(

@@ -12,6 +12,7 @@ import {
 import { VoiceReceptionistService } from './voice-receptionist.service';
 import { VoiceOutboundService } from './voice-outbound.service';
 import { VoiceNotificationService } from './voice-notification.service';
+import { VoiceConversationRelayGateway } from './voice-conversation-relay.gateway';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { VoiceNotificationService } from './voice-notification.service';
     VoiceReceptionistService,
     VoiceOutboundService,
     VoiceNotificationService,
+    VoiceConversationRelayGateway,
   ],
 })
 export class VoiceReceptionistModule {}

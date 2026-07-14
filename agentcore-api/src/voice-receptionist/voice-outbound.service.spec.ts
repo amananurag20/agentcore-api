@@ -30,7 +30,9 @@ describe('VoiceOutboundService TwiML', () => {
       get: jest.fn((key: string) =>
         key === 'VOICE_WEBHOOK_PUBLIC_BASE_URL'
           ? 'https://voice.example.com'
-          : undefined,
+          : key === 'VOICE_CONVERSATION_RELAY_PUBLIC_BASE_URL'
+            ? 'wss://voice.example.com'
+            : undefined,
       ),
     } as unknown as ConfigService,
     {} as never,
@@ -44,6 +46,24 @@ describe('VoiceOutboundService TwiML', () => {
     expect(twiml).toContain('voice="Polly.Joanna"');
     expect(twiml).toContain('language="en-US"');
     expect(twiml).toContain('Welcome &amp; hello');
+  });
+
+  it('builds an interruptible ConversationRelay stream with live STT/TTS', () => {
+    const twiml = service.buildConversationRelayTwiml(
+      config,
+      'Welcome & hello',
+    );
+
+    expect(twiml).toContain('<Connect action="https://voice.example.com');
+    expect(twiml).toContain(
+      'url="wss://voice.example.com/api/v1/voice-receptionist/stream/config-1"',
+    );
+    expect(twiml).toContain('welcomeGreeting="Welcome &amp; hello"');
+    expect(twiml).toContain('interruptible="any"');
+    expect(twiml).toContain('reportInputDuringAgentSpeech="any"');
+    expect(twiml).toContain('ttsProvider="Amazon"');
+    expect(twiml).toContain('voice="Joanna-Neural"');
+    expect(twiml).toContain('/config-1/twilio/relay');
   });
 
   it('adds a transfer result callback and explicit voicemail capture callbacks', () => {

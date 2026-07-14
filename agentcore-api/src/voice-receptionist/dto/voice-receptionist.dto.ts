@@ -425,6 +425,73 @@ export class TwilioDialCallbackDto {
   DialCallDuration?: string;
 }
 
+export class TwilioConversationRelayCallbackDto {
+  @ApiPropertyOptional({ example: 'AC123456789' })
+  @IsString()
+  @IsOptional()
+  AccountSid?: string;
+
+  @ApiProperty({ example: 'CA123456789' })
+  @IsString()
+  @MinLength(1)
+  CallSid: string;
+
+  @ApiPropertyOptional({ example: 'completed' })
+  @IsString()
+  @IsOptional()
+  CallStatus?: string;
+
+  @ApiPropertyOptional({ example: '+15551234567' })
+  @IsString()
+  @IsOptional()
+  From?: string;
+
+  @ApiPropertyOptional({ example: '+15557654321' })
+  @IsString()
+  @IsOptional()
+  To?: string;
+
+  @ApiPropertyOptional({ example: 'inbound' })
+  @IsString()
+  @IsOptional()
+  Direction?: string;
+
+  @ApiPropertyOptional({ example: 'AP123456789' })
+  @IsString()
+  @IsOptional()
+  ApplicationSid?: string;
+
+  @ApiPropertyOptional({ example: 'VX123456789' })
+  @IsString()
+  @IsOptional()
+  SessionId?: string;
+
+  @ApiPropertyOptional({ example: 'ended' })
+  @IsString()
+  @IsOptional()
+  SessionStatus?: string;
+
+  @ApiPropertyOptional({ example: '42' })
+  @IsString()
+  @IsOptional()
+  SessionDuration?: string;
+
+  @ApiPropertyOptional({ example: '{"action":"transfer"}' })
+  @IsString()
+  @IsOptional()
+  HandoffData?: string;
+
+  @ApiPropertyOptional({ example: '39001' })
+  @IsString()
+  @IsOptional()
+  ErrorCode?: string;
+
+  @ApiPropertyOptional({ example: 'WebSocket connection failed.' })
+  @IsString()
+  @IsOptional()
+  ErrorMessage?: string;
+}
+
 export class TwilioRecordingCallbackDto {
   @ApiProperty({ example: 'CA123456789' })
   @IsString()
