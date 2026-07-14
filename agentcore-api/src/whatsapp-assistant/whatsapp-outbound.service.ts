@@ -14,6 +14,15 @@ export interface WhatsAppOutboundResult {
   providerMessageId?: string;
 }
 
+export interface MetaWhatsAppTemplate {
+  id?: string;
+  name: string;
+  language: string;
+  status: string;
+  category?: string;
+  components?: unknown[];
+}
+
 @Injectable()
 export class WhatsAppOutboundService {
   private readonly logger = new Logger(WhatsAppOutboundService.name);
@@ -28,42 +37,130 @@ export class WhatsAppOutboundService {
     to: string;
     content: string;
   }): Promise<WhatsAppOutboundResult> {
+    return this.send(
+      input,
+      () =>
+        this.sendMetaMessage(input.config, input.to, {
+          type: 'text',
+          text: { preview_url: false, body: input.content },
+        }),
+      () => this.sendTwilioText(input),
+    );
+  }
+
+  async sendTemplate(input: {
+    config: WhatsAppAssistantConfig;
+    to: string;
+    name: string;
+    language: string;
+    components?: Record<string, unknown>[];
+  }): Promise<WhatsAppOutboundResult> {
+    return this.send(input, () =>
+      this.sendMetaMessage(input.config, input.to, {
+        type: 'template',
+        template: {
+          name: input.name,
+          language: { policy: 'deterministic', code: input.language },
+          ...(input.components?.length ? { components: input.components } : {}),
+        },
+      }),
+    );
+  }
+
+  async sendMedia(input: {
+    config: WhatsAppAssistantConfig;
+    to: string;
+    type: 'image' | 'audio' | 'video' | 'document';
+    mediaId?: string;
+    link?: string;
+    caption?: string;
+    filename?: string;
+  }): Promise<WhatsAppOutboundResult> {
+    if (!input.mediaId && !input.link) {
+      throw new BadRequestException(
+        'A Meta media id or HTTPS media link is required',
+      );
+    }
+    if (input.link) this.assertHttpsUrl(input.link);
+    const media = {
+      ...(input.mediaId ? { id: input.mediaId } : { link: input.link }),
+      ...(input.caption && input.type !== 'audio'
+        ? { caption: input.caption }
+        : {}),
+      ...(input.filename && input.type === 'document'
+        ? { filename: input.filename }
+        : {}),
+    };
+    return this.send(
+      input,
+      () =>
+        this.sendMetaMessage(input.config, input.to, {
+          type: input.type,
+          [input.type]: media,
+        }),
+      input.link ? () => this.sendTwilioMedia(input) : undefined,
+    );
+  }
+
+  async listMetaTemplates(
+    config: WhatsAppAssistantConfig,
+  ): Promise<MetaWhatsAppTemplate[]> {
+    const { accessToken, businessAccountId } =
+      this.metaManagementCredentials(config);
+    let url: URL | null = new URL(
+      `${this.graphBaseUrl()}/${encodeURIComponent(businessAccountId)}/message_templates`,
+    );
+    url.searchParams.set(
+      'fields',
+      'id,name,language,status,category,components',
+    );
+    url.searchParams.set('limit', '100');
+    const templates: MetaWhatsAppTemplate[] = [];
+
+    for (let page = 0; url && page < 20; page += 1) {
+      this.assertGraphUrl(url);
+      const response = await this.fetchWithRetry(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const body = (await response.json().catch(() => ({}))) as {
+        data?: MetaWhatsAppTemplate[];
+        paging?: { next?: string };
+        error?: { message?: string };
+      };
+      if (!response.ok) {
+        throw new ServiceUnavailableException(
+          body.error?.message ??
+            `Meta template sync failed with ${response.status}`,
+        );
+      }
+      templates.push(...(body.data ?? []));
+      url = body.paging?.next ? new URL(body.paging.next) : null;
+    }
+
+    return templates;
+  }
+
+  private async send(
+    input: { config: WhatsAppAssistantConfig; to: string },
+    meta: () => Promise<WhatsAppOutboundResult>,
+    twilio?: () => Promise<WhatsAppOutboundResult>,
+  ) {
     this.assertWhatsAppRecipient(input.to);
     const mode =
       this.configService.get<'mock' | 'live'>('WHATSAPP_OUTBOUND_MODE') ??
       'mock';
-
-    if (mode === 'live') {
-      if (input.config.provider === 'meta') {
-        return this.sendMetaText(input);
-      }
-
-      if (input.config.provider === 'twilio') {
-        return this.sendTwilioText(input);
-      }
-
-      throw new ServiceUnavailableException(
-        `Live outbound delivery is not implemented for provider ${input.config.provider}`,
-      );
-    }
-
-    return this.sendMockText(input);
+    if (mode !== 'live') return this.sendMock(input.config);
+    if (input.config.provider === 'meta') return meta();
+    if (input.config.provider === 'twilio' && twilio) return twilio();
+    throw new ServiceUnavailableException(
+      `This WhatsApp message type is not implemented for provider ${input.config.provider}`,
+    );
   }
 
-  private sendMockText(input: {
-    config: WhatsAppAssistantConfig;
-    to: string;
-    content: string;
-  }): WhatsAppOutboundResult {
+  private sendMock(config: WhatsAppAssistantConfig): WhatsAppOutboundResult {
     this.logger.log(
-      [
-        'WhatsApp outbound mock',
-        `provider=${input.config.provider}`,
-        `config=${input.config.id}`,
-        `to=${input.to}`,
-      ].join(' '),
+      `WhatsApp outbound mock provider=${config.provider} config=${config.id}`,
     );
-
     return {
       provider: 'mock',
       status: 'queued',
@@ -71,22 +168,17 @@ export class WhatsAppOutboundService {
     };
   }
 
-  private async sendMetaText(input: {
-    config: WhatsAppAssistantConfig;
-    to: string;
-    content: string;
-  }): Promise<WhatsAppOutboundResult> {
-    if (!input.config.accessTokenEncrypted || !input.config.phoneNumberId) {
-      throw new ServiceUnavailableException(
-        `Meta WhatsApp credentials are missing for config ${input.config.id}`,
-      );
-    }
-
-    const accessToken = this.cryptoService.decrypt(
-      input.config.accessTokenEncrypted,
-    );
-    const response = await fetch(
-      `https://graph.facebook.com/v20.0/${input.config.phoneNumberId}/messages`,
+  private async sendMetaMessage(
+    config: WhatsAppAssistantConfig,
+    to: string,
+    message: Record<string, unknown>,
+  ): Promise<WhatsAppOutboundResult> {
+    const { accessToken, phoneNumberId } =
+      this.metaMessagingCredentials(config);
+    const response = await this.fetchWithRetry(
+      new URL(
+        `${this.graphBaseUrl()}/${encodeURIComponent(phoneNumberId)}/messages`,
+      ),
       {
         method: 'POST',
         headers: {
@@ -96,29 +188,21 @@ export class WhatsAppOutboundService {
         body: JSON.stringify({
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
-          to: input.to,
-          type: 'text',
-          text: {
-            preview_url: false,
-            body: input.content,
-          },
+          to,
+          ...message,
         }),
-        signal: this.providerTimeoutSignal(),
       },
     );
-
     const body = (await response.json().catch(() => ({}))) as {
       messages?: Array<{ id?: string }>;
       error?: { message?: string };
     };
-
     if (!response.ok) {
-      throw new Error(
+      throw new ServiceUnavailableException(
         body.error?.message ??
           `Meta WhatsApp send failed with ${response.status}`,
       );
     }
-
     return {
       provider: 'meta',
       status: 'sent',
@@ -130,62 +214,175 @@ export class WhatsAppOutboundService {
     config: WhatsAppAssistantConfig;
     to: string;
     content: string;
-  }): Promise<WhatsAppOutboundResult> {
+  }) {
+    return this.sendTwilio(input.config, input.to, { Body: input.content });
+  }
+
+  private async sendTwilioMedia(input: {
+    config: WhatsAppAssistantConfig;
+    to: string;
+    link?: string;
+    caption?: string;
+  }) {
+    return this.sendTwilio(input.config, input.to, {
+      ...(input.caption ? { Body: input.caption } : {}),
+      MediaUrl: input.link!,
+    });
+  }
+
+  private async sendTwilio(
+    config: WhatsAppAssistantConfig,
+    to: string,
+    fields: Record<string, string>,
+  ): Promise<WhatsAppOutboundResult> {
     if (
-      !input.config.accessTokenEncrypted ||
-      !input.config.businessAccountId ||
-      !input.config.phoneNumberId
+      !config.accessTokenEncrypted ||
+      !config.businessAccountId ||
+      !config.phoneNumberId
     ) {
       throw new ServiceUnavailableException(
-        `Twilio WhatsApp credentials are missing for config ${input.config.id}`,
+        `Twilio WhatsApp credentials are missing for config ${config.id}`,
       );
     }
-
-    const authToken = this.cryptoService.decrypt(
-      input.config.accessTokenEncrypted,
-    );
-    const accountSid = input.config.businessAccountId;
-    const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+    const authToken = this.cryptoService.decrypt(config.accessTokenEncrypted);
+    const accountSid = config.businessAccountId;
     const form = new URLSearchParams({
-      From: `whatsapp:${input.config.phoneNumberId}`,
-      To: input.to.startsWith('whatsapp:') ? input.to : `whatsapp:${input.to}`,
-      Body: input.content,
+      From: `whatsapp:${config.phoneNumberId}`,
+      To: to.startsWith('whatsapp:') ? to : `whatsapp:${to}`,
+      ...fields,
     });
-
-    const response = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+    const response = await this.fetchWithRetry(
+      new URL(
+        `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+      ),
       {
         method: 'POST',
         headers: {
-          Authorization: `Basic ${auth}`,
+          Authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`,
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: form,
-        signal: this.providerTimeoutSignal(),
       },
     );
     const body = (await response.json().catch(() => ({}))) as {
       sid?: string;
       message?: string;
     };
-
     if (!response.ok) {
-      throw new Error(
+      throw new ServiceUnavailableException(
         body.message ?? `Twilio WhatsApp send failed with ${response.status}`,
       );
     }
+    return { provider: 'twilio', status: 'sent', providerMessageId: body.sid };
+  }
 
+  private async fetchWithRetry(url: URL, init: RequestInit): Promise<Response> {
+    const maxRetries = this.configService.get<number>(
+      'WHATSAPP_PROVIDER_MAX_RETRIES',
+      2,
+    );
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        const response = await fetch(url, {
+          ...init,
+          signal: AbortSignal.timeout(
+            this.configService.get<number>(
+              'WHATSAPP_PROVIDER_TIMEOUT_MS',
+              10_000,
+            ),
+          ),
+        });
+        if (
+          attempt < maxRetries &&
+          [408, 425, 429, 500, 502, 503, 504].includes(response.status)
+        ) {
+          await this.sleep(this.retryDelay(response, attempt));
+          continue;
+        }
+        return response;
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxRetries) {
+          await this.sleep(250 * 2 ** attempt);
+          continue;
+        }
+      }
+    }
+    throw new ServiceUnavailableException(
+      `WhatsApp provider request failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    );
+  }
+
+  private retryDelay(response: Response, attempt: number) {
+    const retryAfter = response.headers.get('retry-after');
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds) && seconds >= 0) {
+        return Math.min(seconds * 1000, 30_000);
+      }
+      const dateDelay = Date.parse(retryAfter) - Date.now();
+      if (Number.isFinite(dateDelay)) {
+        return Math.min(Math.max(dateDelay, 0), 30_000);
+      }
+    }
+    return 250 * 2 ** attempt;
+  }
+
+  private sleep(ms: number) {
+    return new Promise<void>((resolve) => setTimeout(resolve, ms));
+  }
+
+  private metaMessagingCredentials(config: WhatsAppAssistantConfig) {
+    if (!config.accessTokenEncrypted || !config.phoneNumberId) {
+      throw new ServiceUnavailableException(
+        `Meta WhatsApp credentials are missing for config ${config.id}`,
+      );
+    }
     return {
-      provider: 'twilio',
-      status: 'sent',
-      providerMessageId: body.sid,
+      accessToken: this.cryptoService.decrypt(config.accessTokenEncrypted),
+      phoneNumberId: config.phoneNumberId,
     };
   }
 
-  private providerTimeoutSignal(): AbortSignal {
-    return AbortSignal.timeout(
-      this.configService.get<number>('WHATSAPP_PROVIDER_TIMEOUT_MS', 10_000),
+  private metaManagementCredentials(config: WhatsAppAssistantConfig) {
+    if (!config.accessTokenEncrypted || !config.businessAccountId) {
+      throw new ServiceUnavailableException(
+        `Meta template-management credentials are missing for config ${config.id}`,
+      );
+    }
+    return {
+      accessToken: this.cryptoService.decrypt(config.accessTokenEncrypted),
+      businessAccountId: config.businessAccountId,
+    };
+  }
+
+  private graphBaseUrl() {
+    const version = this.configService.get<string>(
+      'WHATSAPP_GRAPH_API_VERSION',
+      'v20.0',
     );
+    return `https://graph.facebook.com/${version}`;
+  }
+
+  private assertGraphUrl(url: URL) {
+    if (url.protocol !== 'https:' || url.hostname !== 'graph.facebook.com') {
+      throw new ServiceUnavailableException(
+        'Meta returned an invalid paging URL',
+      );
+    }
+  }
+
+  private assertHttpsUrl(value: string) {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new BadRequestException('Outbound media link is invalid');
+    }
+    if (url.protocol !== 'https:') {
+      throw new BadRequestException('Outbound media links must use HTTPS');
+    }
   }
 
   private assertWhatsAppRecipient(value: string) {

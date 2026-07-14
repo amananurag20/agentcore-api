@@ -1,6 +1,8 @@
 import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsEnum,
   IsInt,
   IsObject,
@@ -32,6 +34,7 @@ export enum WhatsAppConversationStatusDto {
 
 export enum WhatsAppMessageTypeDto {
   text = 'text',
+  template = 'template',
   image = 'image',
   audio = 'audio',
   video = 'video',
@@ -188,6 +191,60 @@ export class SendWhatsAppAgentMessageDto {
   @IsString()
   @MinLength(1)
   content: string;
+}
+
+export class SendWhatsAppTemplateMessageDto {
+  @ApiProperty({ example: 'order_update' })
+  @IsString()
+  @MinLength(1)
+  templateName: string;
+
+  @ApiPropertyOptional({ example: 'en_US' })
+  @IsString()
+  @IsOptional()
+  language?: string;
+
+  @ApiPropertyOptional({
+    example: [{ type: 'body', parameters: [{ type: 'text', text: 'Ada' }] }],
+  })
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsObject({ each: true })
+  @IsOptional()
+  components?: Record<string, unknown>[];
+}
+
+export enum WhatsAppOutboundMediaTypeDto {
+  image = 'image',
+  audio = 'audio',
+  video = 'video',
+  document = 'document',
+}
+
+export class SendWhatsAppMediaMessageDto {
+  @ApiProperty({ enum: WhatsAppOutboundMediaTypeDto })
+  @IsEnum(WhatsAppOutboundMediaTypeDto)
+  type: WhatsAppOutboundMediaTypeDto;
+
+  @ApiPropertyOptional({ example: '1234567890' })
+  @IsString()
+  @IsOptional()
+  mediaId?: string;
+
+  @ApiPropertyOptional({ example: 'https://cdn.example.com/invoice.pdf' })
+  @IsString()
+  @IsOptional()
+  link?: string;
+
+  @ApiPropertyOptional({ example: 'Your invoice' })
+  @IsString()
+  @IsOptional()
+  caption?: string;
+
+  @ApiPropertyOptional({ example: 'invoice.pdf' })
+  @IsString()
+  @IsOptional()
+  filename?: string;
 }
 
 export class UpdateWhatsAppConversationStatusDto {

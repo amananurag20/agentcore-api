@@ -468,6 +468,10 @@ class EnvironmentVariables {
   @IsOptional()
   DEFAULT_CHAT_MODEL?: string;
 
+  @IsString()
+  @IsOptional()
+  AI_TRANSCRIPTION_MODEL = 'whisper-1';
+
   @Transform(({ value }) => Number(value ?? 60))
   @IsInt()
   @Min(1)
@@ -614,6 +618,52 @@ class EnvironmentVariables {
   @Max(120000)
   @IsOptional()
   WHATSAPP_PROVIDER_TIMEOUT_MS = 10000;
+
+  @Transform(({ value }) => Number(value ?? 2))
+  @IsInt()
+  @Min(0)
+  @Max(5)
+  @IsOptional()
+  WHATSAPP_PROVIDER_MAX_RETRIES = 2;
+
+  @IsString()
+  @IsOptional()
+  WHATSAPP_GRAPH_API_VERSION = 'v20.0';
+
+  @Transform(({ value }) => Number(value ?? 26214400))
+  @IsInt()
+  @Min(1024)
+  @Max(104857600)
+  @IsOptional()
+  WHATSAPP_MEDIA_MAX_BYTES = 26214400;
+
+  @Transform(({ value }) => Number(value ?? 60))
+  @IsInt()
+  @Min(1)
+  @Max(3600)
+  @IsOptional()
+  WHATSAPP_WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = 60;
+
+  @Transform(({ value }) => Number(value ?? 300))
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  @IsOptional()
+  WHATSAPP_WEBHOOK_MAX_REQUESTS_PER_WINDOW = 300;
+
+  @Transform(({ value }) => Number(value ?? 60))
+  @IsInt()
+  @Min(1)
+  @Max(3600)
+  @IsOptional()
+  WHATSAPP_AGENT_RATE_LIMIT_WINDOW_SECONDS = 60;
+
+  @Transform(({ value }) => Number(value ?? 30))
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  @IsOptional()
+  WHATSAPP_AGENT_MAX_SENDS_PER_WINDOW = 30;
 
   @Transform(({ value }) => Number(value ?? 5))
   @IsInt()

@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   Get,
+  Header,
+  HttpCode,
   Param,
   Patch,
   Post,
@@ -26,6 +28,11 @@ import {
   ListVoiceCallsDto,
   RouteVoiceCallDto,
   SendVoiceAgentMessageDto,
+  TwilioDialCallbackDto,
+  TwilioGatherCallbackDto,
+  TwilioIncomingCallDto,
+  TwilioRecordingCallbackDto,
+  TwilioStatusCallbackDto,
   UpdateVoiceCallStatusDto,
   UpdateVoiceConfigDto,
   VoiceWebhookEventDto,
@@ -204,5 +211,107 @@ export class VoiceReceptionistWebhookController {
         originalUrl: request.originalUrl,
       },
     );
+  }
+
+  @Public()
+  @Post(':configId/twilio/incoming')
+  @HttpCode(200)
+  @Header('Content-Type', 'text/xml')
+  @ApiOperation({ summary: 'Receive an incoming Twilio call and return TwiML' })
+  handleTwilioIncoming(
+    @Param('configId') configId: string,
+    @Body() body: TwilioIncomingCallDto,
+    @Req() request: RawBodyRequest,
+  ) {
+    return this.voiceReceptionistService.handleTwilioIncoming(
+      configId,
+      body,
+      request.rawBody,
+      request.headers,
+      this.requestUrl(request),
+    );
+  }
+
+  @Public()
+  @Post(':configId/twilio/gather')
+  @HttpCode(200)
+  @Header('Content-Type', 'text/xml')
+  @ApiOperation({ summary: 'Process Twilio speech or DTMF input' })
+  handleTwilioGather(
+    @Param('configId') configId: string,
+    @Body() body: TwilioGatherCallbackDto,
+    @Req() request: RawBodyRequest,
+  ) {
+    return this.voiceReceptionistService.handleTwilioGather(
+      configId,
+      body,
+      request.rawBody,
+      request.headers,
+      this.requestUrl(request),
+    );
+  }
+
+  @Public()
+  @Post(':configId/twilio/status')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Process a Twilio call status callback' })
+  handleTwilioStatus(
+    @Param('configId') configId: string,
+    @Body() body: TwilioStatusCallbackDto,
+    @Req() request: RawBodyRequest,
+  ) {
+    return this.voiceReceptionistService.handleTwilioStatus(
+      configId,
+      body,
+      request.rawBody,
+      request.headers,
+      this.requestUrl(request),
+    );
+  }
+
+  @Public()
+  @Post(':configId/twilio/dial')
+  @HttpCode(200)
+  @Header('Content-Type', 'text/xml')
+  @ApiOperation({ summary: 'Process a Twilio transfer result' })
+  handleTwilioDial(
+    @Param('configId') configId: string,
+    @Body() body: TwilioDialCallbackDto,
+    @Req() request: RawBodyRequest,
+  ) {
+    return this.voiceReceptionistService.handleTwilioDial(
+      configId,
+      body,
+      request.rawBody,
+      request.headers,
+      this.requestUrl(request),
+    );
+  }
+
+  @Public()
+  @Post(':configId/twilio/recording')
+  @HttpCode(200)
+  @Header('Content-Type', 'text/xml')
+  @ApiOperation({ summary: 'Capture a Twilio voicemail recording/transcript' })
+  handleTwilioRecording(
+    @Param('configId') configId: string,
+    @Body() body: TwilioRecordingCallbackDto,
+    @Req() request: RawBodyRequest,
+  ) {
+    return this.voiceReceptionistService.handleTwilioRecording(
+      configId,
+      body,
+      request.rawBody,
+      request.headers,
+      this.requestUrl(request),
+    );
+  }
+
+  private requestUrl(request: RawBodyRequest) {
+    return {
+      protocol: request.protocol,
+      host: request.get?.('host'),
+      originalUrl: request.originalUrl,
+    };
   }
 }

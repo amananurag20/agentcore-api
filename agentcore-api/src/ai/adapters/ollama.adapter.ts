@@ -39,7 +39,9 @@ export class OllamaAdapter implements AIProviderAdapter {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: input.model,
-          messages: input.messages,
+          messages: input.messages.map((message) =>
+            this.toOllamaMessage(message),
+          ),
           stream: false,
           options: {
             num_predict: input.maxOutputTokens ?? this.options.maxOutputTokens,
@@ -106,6 +108,20 @@ export class OllamaAdapter implements AIProviderAdapter {
 
   private resolveBaseUrl(baseUrl?: string | null): string {
     return (baseUrl || 'http://localhost:11434').replace(/\/+$/, '');
+  }
+
+  private toOllamaMessage(message: AIChatRequest['messages'][number]) {
+    if (typeof message.content === 'string') return message;
+    return {
+      role: message.role,
+      content: message.content
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text)
+        .join('\n'),
+      images: message.content
+        .filter((part) => part.type === 'image_url')
+        .map((part) => part.image_url.url.replace(/^data:[^;]+;base64,/, '')),
+    };
   }
 
   private async fetchWithRetry(

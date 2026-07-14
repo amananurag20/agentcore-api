@@ -23,6 +23,11 @@ import {
   SendVoiceAgentMessageDto,
   UpdateVoiceCallStatusDto,
   UpdateVoiceConfigDto,
+  TwilioDialCallbackDto,
+  TwilioGatherCallbackDto,
+  TwilioIncomingCallDto,
+  TwilioRecordingCallbackDto,
+  TwilioStatusCallbackDto,
   VoiceCallEventTypeDto,
   VoiceRouteActionDto,
   VoiceWebhookEventDto,
@@ -31,6 +36,7 @@ import {
   VoiceOutboundService,
   VoiceProviderActionResult,
 } from './voice-outbound.service';
+import { VoiceNotificationService } from './voice-notification.service';
 
 type VoiceCallWithEvents = Prisma.VoiceCallGetPayload<{
   include: {
@@ -47,6 +53,7 @@ export class VoiceReceptionistService {
     private readonly configService: ConfigService,
     private readonly cryptoService: CryptoService,
     private readonly knowledgeService: KnowledgeService,
+    private readonly notificationService: VoiceNotificationService,
     private readonly outboundService: VoiceOutboundService,
     private readonly prisma: PrismaService,
   ) {}
@@ -346,11 +353,39 @@ export class VoiceReceptionistService {
 
   async requestHandoff(currentUser: AuthenticatedUser, id: string) {
     const call = await this.findCallForActor(currentUser, id);
+    const config = await this.prisma.voiceReceptionistConfig.findUniqueOrThrow({
+      where: { id: call.configId },
+    });
+    const action = config.transferPhoneNumber
+      ? await this.safeProviderAction(config.provider, () =>
+          this.outboundService.transferCall({
+            config,
+            providerCallId: call.providerCallId,
+            transferTo: config.transferPhoneNumber,
+          }),
+        )
+      : undefined;
+    const connected = action?.status === 'sent';
+    const fallbackAgent = connected
+      ? null
+      : await this.prisma.user.findFirst({
+          where: {
+            orgId: call.organizationId,
+            isActive: true,
+            roles: { hasSome: ['agent', 'org_admin'] },
+          },
+          select: { id: true },
+          orderBy: { createdAt: 'asc' },
+        });
+    const notifications = connected
+      ? []
+      : await this.notificationService.notifyHandoff(config, call);
 
     const updated = await this.prisma.voiceCall.update({
       where: { id: call.id },
       data: {
-        status: 'waiting_for_agent',
+        status: connected ? 'transferred' : 'waiting_for_agent',
+        assignedAgentId: call.assignedAgentId ?? fallbackAgent?.id,
         lastEventAt: new Date(),
       },
       include: this.callInclude(),
@@ -362,7 +397,10 @@ export class VoiceReceptionistService {
         callId: call.id,
         type: 'route_decision',
         role: 'system',
-        content: 'Human handoff requested',
+        content: connected
+          ? 'Human handoff requested and transfer initiated.'
+          : 'Human handoff requested; agents notified.',
+        metadata: this.toJsonObject({ action, notifications }),
       },
     });
 
@@ -403,7 +441,7 @@ export class VoiceReceptionistService {
       });
       status = 'voicemail';
     } else {
-      action = await this.outboundService.speakText({
+      action = await this.outboundService.hangupCall({
         config,
         providerCallId: call.providerCallId,
         content: 'Thank you for calling. Goodbye.',
@@ -519,7 +557,7 @@ export class VoiceReceptionistService {
               }),
             )
           : await this.safeProviderAction(config.provider, () =>
-              this.outboundService.speakText({
+              this.outboundService.hangupCall({
                 config,
                 providerCallId: call.providerCallId,
                 content: this.getSettingString(
@@ -551,6 +589,29 @@ export class VoiceReceptionistService {
                 ? new Date()
                 : undefined,
             lastEventAt: new Date(),
+          },
+        });
+      } else {
+        const greeting = this.getSettingString(
+          config,
+          'greeting',
+          'Hello, thank you for calling. How can I help you today?',
+        );
+        action = await this.safeProviderAction(config.provider, () =>
+          this.outboundService.speakText({
+            config,
+            providerCallId: call.providerCallId,
+            content: greeting,
+          }),
+        );
+        await this.prisma.voiceCallEvent.create({
+          data: {
+            organizationId: config.organizationId,
+            callId: call.id,
+            type: 'assistant_response',
+            role: 'assistant',
+            content: greeting,
+            metadata: this.toJsonObject({ greeting: true, action }),
           },
         });
       }
@@ -622,11 +683,19 @@ export class VoiceReceptionistService {
       const failed = ['busy', 'canceled', 'failed', 'no-answer'].includes(
         providerStatus ?? '',
       );
+      const rawDuration = input.metadata?.durationSeconds;
+      const durationSeconds =
+        typeof rawDuration === 'number'
+          ? Math.max(0, Math.floor(rawDuration))
+          : typeof rawDuration === 'string'
+            ? this.parseOptionalInt(rawDuration)
+            : undefined;
       await this.prisma.voiceCall.update({
         where: { id: call.id },
         data: {
           status: failed ? 'failed' : 'completed',
           endedAt: now,
+          durationSeconds,
           lastEventAt: now,
           summary: input.content,
           metadata: this.toJsonObject({
@@ -667,11 +736,373 @@ export class VoiceReceptionistService {
     };
   }
 
+  async handleTwilioIncoming(
+    configId: string,
+    input: TwilioIncomingCallDto,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ): Promise<string> {
+    const config = await this.loadSignedTwilioConfig(
+      configId,
+      rawBody,
+      headers,
+      requestUrl,
+    );
+    const call = await this.upsertCall(
+      config,
+      {
+        providerCallId: input.CallSid,
+        fromNumber: input.From,
+        toNumber: input.To,
+        callerName: input.CallerName,
+        eventType: VoiceCallEventTypeDto.call_started,
+      },
+      new Date(),
+    );
+    if (!call.events.some((event) => event.type === 'call_started')) {
+      await this.prisma.voiceCallEvent.create({
+        data: {
+          organizationId: config.organizationId,
+          callId: call.id,
+          type: 'call_started',
+          role: 'system',
+          content: 'Twilio call connected.',
+        },
+      });
+    }
+
+    if (!this.evaluateBusinessHours(config).isOpen) {
+      if (config.voicemailEnabled) {
+        await this.prisma.voiceCall.update({
+          where: { id: call.id },
+          data: { status: 'voicemail', lastEventAt: new Date() },
+        });
+        return this.outboundService.buildVoicemailTwiml(config);
+      }
+      await this.prisma.voiceCall.update({
+        where: { id: call.id },
+        data: { status: 'completed', endedAt: new Date() },
+      });
+      return this.outboundService.buildCloseTwiml(
+        config,
+        this.getSettingString(
+          config,
+          'afterHoursMessage',
+          'We are currently closed. Please call again during business hours.',
+        ),
+      );
+    }
+
+    const greeting = this.getSettingString(
+      config,
+      'greeting',
+      'Hello, thank you for calling. How can I help you today?',
+    );
+    const greetingPlayed = call.events.some(
+      (event) => this.toRecord(event.metadata).greeting === true,
+    );
+    if (!greetingPlayed) {
+      await this.prisma.voiceCallEvent.create({
+        data: {
+          organizationId: config.organizationId,
+          callId: call.id,
+          type: 'assistant_response',
+          role: 'assistant',
+          content: greeting,
+          metadata: this.toJsonObject({ greeting: true, delivery: 'twiml' }),
+        },
+      });
+    }
+    return this.outboundService.buildGatherTwiml(config, greeting);
+  }
+
+  async handleTwilioGather(
+    configId: string,
+    input: TwilioGatherCallbackDto,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ): Promise<string> {
+    const config = await this.loadSignedTwilioConfig(
+      configId,
+      rawBody,
+      headers,
+      requestUrl,
+    );
+    const call = await this.findCallByProvider(config.id, input.CallSid);
+    const idempotencyKey = this.getHeader(
+      headers,
+      'i-twilio-idempotency-token',
+    );
+    if (idempotencyKey) {
+      const prior = await this.prisma.voiceCallEvent.findFirst({
+        where: {
+          callId: call.id,
+          metadata: { path: ['idempotencyKey'], equals: idempotencyKey },
+        },
+      });
+      const priorResponse = prior
+        ? this.toRecord(prior.metadata).responseTwiml
+        : undefined;
+      if (typeof priorResponse === 'string') return priorResponse;
+    }
+    if (['completed', 'failed', 'voicemail'].includes(call.status)) {
+      return this.outboundService.buildCloseTwiml(config, 'Goodbye.');
+    }
+    const content = input.SpeechResult?.trim() || input.Digits?.trim();
+    if (!content) {
+      return this.outboundService.buildGatherTwiml(
+        config,
+        'I did not catch that. How can I help?',
+      );
+    }
+    const inboundEvent = await this.prisma.voiceCallEvent.create({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: 'transcript',
+        role: 'caller',
+        content,
+        confidence: this.parseOptionalFloat(input.Confidence),
+        metadata: this.toJsonObject({ digits: input.Digits, idempotencyKey }),
+      },
+    });
+    const route = input.Digits
+      ? this.matchDtmfRoute(config, input.Digits)
+      : this.matchKeywordRoute(config, content);
+    if (route) {
+      await this.prisma.voiceCallEvent.create({
+        data: {
+          organizationId: config.organizationId,
+          callId: call.id,
+          type: 'transfer_requested',
+          role: 'system',
+          content: `Routing caller to ${route.department}.`,
+          metadata: this.toJsonObject({ transferTo: route.transferTo }),
+        },
+      });
+      await this.prisma.voiceCall.update({
+        where: { id: call.id },
+        data: { status: 'transferred', lastEventAt: new Date() },
+      });
+      const twiml = this.outboundService.buildTransferTwiml(
+        config,
+        route.transferTo,
+      );
+      await this.storeTwilioResponse(inboundEvent, twiml);
+      return twiml;
+    }
+
+    const reply = await this.createAssistantReply(
+      config,
+      call,
+      content,
+      undefined,
+      'inline',
+    );
+    const twiml = this.outboundService.buildGatherTwiml(
+      config,
+      reply.event.content ?? 'How else can I help?',
+    );
+    await this.storeTwilioResponse(inboundEvent, twiml);
+    return twiml;
+  }
+
+  async handleTwilioStatus(
+    configId: string,
+    input: TwilioStatusCallbackDto,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ) {
+    const config = await this.loadSignedTwilioConfig(
+      configId,
+      rawBody,
+      headers,
+      requestUrl,
+    );
+    const call = await this.findOrCreateCallbackCall(config, input.CallSid);
+    const status = this.mapTwilioCallStatus(input.CallStatus);
+    const terminal = status === 'completed' || status === 'failed';
+    const durationSeconds = this.parseOptionalInt(input.CallDuration);
+    const updated = await this.prisma.voiceCall.update({
+      where: { id: call.id },
+      data: {
+        status,
+        durationSeconds,
+        endedAt: terminal ? new Date() : undefined,
+        lastEventAt: new Date(),
+        metadata: this.toJsonObject({
+          ...this.toRecord(call.metadata),
+          providerStatus: input.CallStatus,
+        }),
+      },
+      include: this.callInclude(),
+    });
+    await this.prisma.voiceCallEvent.create({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: terminal ? 'call_ended' : 'system',
+        role: 'system',
+        content: `Twilio call status: ${input.CallStatus}`,
+        metadata: this.toJsonObject({ durationSeconds }),
+      },
+    });
+    return this.toCallResponse(updated);
+  }
+
+  async handleTwilioDial(
+    configId: string,
+    input: TwilioDialCallbackDto,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ): Promise<string> {
+    const config = await this.loadSignedTwilioConfig(
+      configId,
+      rawBody,
+      headers,
+      requestUrl,
+    );
+    const call = await this.findCallByProvider(config.id, input.CallSid);
+    const answered = input.DialCallStatus === 'completed';
+    await this.prisma.voiceCallEvent.create({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: 'route_decision',
+        role: 'system',
+        content: `Transfer result: ${input.DialCallStatus}`,
+        metadata: this.toJsonObject({
+          dialDurationSeconds: this.parseOptionalInt(input.DialCallDuration),
+        }),
+      },
+    });
+    if (answered) {
+      await this.prisma.voiceCall.update({
+        where: { id: call.id },
+        data: {
+          status: 'completed',
+          endedAt: new Date(),
+          lastEventAt: new Date(),
+        },
+      });
+      return '<Response><Hangup/></Response>';
+    }
+    if (config.voicemailEnabled) {
+      await this.prisma.voiceCall.update({
+        where: { id: call.id },
+        data: { status: 'voicemail', lastEventAt: new Date() },
+      });
+      return this.outboundService.buildVoicemailTwiml(config);
+    }
+    await this.prisma.voiceCall.update({
+      where: { id: call.id },
+      data: { status: 'in_progress', lastEventAt: new Date() },
+    });
+    return this.outboundService.buildGatherTwiml(
+      config,
+      'No one is available right now. Would you like help with something else?',
+    );
+  }
+
+  async handleTwilioRecording(
+    configId: string,
+    input: TwilioRecordingCallbackDto,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ): Promise<string> {
+    const config = await this.loadSignedTwilioConfig(
+      configId,
+      rawBody,
+      headers,
+      requestUrl,
+    );
+    const call = await this.findCallByProvider(config.id, input.CallSid);
+    const recordingDurationSeconds = this.parseOptionalInt(
+      input.RecordingDuration,
+    );
+    await this.prisma.voiceCall.update({
+      where: { id: call.id },
+      data: {
+        status: 'voicemail',
+        recordingSid: input.RecordingSid,
+        recordingUrl: input.RecordingUrl,
+        recordingDurationSeconds,
+        lastEventAt: new Date(),
+      },
+    });
+    const existingEvent = await this.prisma.voiceCallEvent.findFirst({
+      where: {
+        callId: call.id,
+        type: 'voicemail',
+        metadata: { path: ['recordingSid'], equals: input.RecordingSid },
+      },
+    });
+    const previousMetadata = existingEvent
+      ? this.toRecord(existingEvent.metadata)
+      : {};
+    const eventData = {
+      content: input.TranscriptionText,
+      audioUrl: input.RecordingUrl,
+      metadata: this.toJsonObject({
+        ...previousMetadata,
+        recordingSid: input.RecordingSid,
+        recordingStatus: input.RecordingStatus,
+        recordingDurationSeconds,
+        transcriptionStatus: input.TranscriptionStatus,
+      }),
+    };
+    const savedEvent = existingEvent
+      ? await this.prisma.voiceCallEvent.update({
+          where: { id: existingEvent.id },
+          data: eventData,
+        })
+      : await this.prisma.voiceCallEvent.create({
+          data: {
+            organizationId: config.organizationId,
+            callId: call.id,
+            type: 'voicemail',
+            role: 'caller',
+            ...eventData,
+          },
+        });
+    if (
+      previousMetadata.notificationSent !== true &&
+      (input.RecordingStatus === 'completed' || input.TranscriptionText)
+    ) {
+      const notifications = await this.notificationService.notifyVoicemail(
+        config,
+        call,
+        input.RecordingUrl,
+        input.TranscriptionText,
+      );
+      await this.prisma.voiceCallEvent.update({
+        where: { id: savedEvent.id },
+        data: {
+          metadata: this.toJsonObject({
+            ...this.toRecord(savedEvent.metadata),
+            notificationSent: true,
+            notifications,
+          }),
+        },
+      });
+    }
+    return this.outboundService.buildCloseTwiml(
+      config,
+      'Thank you. Your message has been recorded. Goodbye.',
+    );
+  }
+
   private async createAssistantReply(
     config: VoiceReceptionistConfig,
     call: VoiceCallWithEvents,
     content: string,
     appointmentAction?: AppointmentActionDto,
+    delivery: 'provider' | 'inline' = 'provider',
   ): Promise<{
     event: Prisma.VoiceCallEventGetPayload<object>;
     action: VoiceProviderActionResult;
@@ -694,12 +1125,11 @@ export class VoiceReceptionistService {
           'I am sorry, I could not complete that appointment request. Please try again or ask for a person.',
         );
       }
-      const action = await this.safeProviderAction(config.provider, () =>
-        this.outboundService.speakText({
-          config,
-          providerCallId: call.providerCallId,
-          content: answer,
-        }),
+      const action = await this.deliverAssistantReply(
+        config,
+        call,
+        answer,
+        delivery,
       );
       const event = await this.prisma.voiceCallEvent.create({
         data: {
@@ -737,7 +1167,7 @@ export class VoiceReceptionistService {
       chatResult = await this.withTimeout(
         this.chatService.answerWithContext({
           organizationId: config.organizationId,
-          question: content,
+          question: this.buildConversationQuestion(call, content),
           safeFallback: true,
           context: searchResults.map((result) => ({
             content: result.content,
@@ -761,12 +1191,11 @@ export class VoiceReceptionistService {
       };
     }
 
-    const action = await this.safeProviderAction(config.provider, () =>
-      this.outboundService.speakText({
-        config,
-        providerCallId: call.providerCallId,
-        content: chatResult.answer,
-      }),
+    const action = await this.deliverAssistantReply(
+      config,
+      call,
+      chatResult.answer,
+      delivery,
     );
     const event = await this.prisma.voiceCallEvent.create({
       data: {
@@ -800,6 +1229,157 @@ export class VoiceReceptionistService {
     return value && !Array.isArray(value) && typeof value === 'object'
       ? (value as AppointmentActionDto)
       : undefined;
+  }
+
+  private async deliverAssistantReply(
+    config: VoiceReceptionistConfig,
+    call: VoiceCallWithEvents,
+    content: string,
+    delivery: 'provider' | 'inline',
+  ): Promise<VoiceProviderActionResult> {
+    if (delivery === 'inline') {
+      return {
+        provider: 'twilio',
+        status: 'sent',
+        providerActionId: `twiml-${call.providerCallId ?? call.id}`,
+      };
+    }
+    return this.safeProviderAction(config.provider, () =>
+      this.outboundService.speakText({
+        config,
+        providerCallId: call.providerCallId,
+        content,
+      }),
+    );
+  }
+
+  private async storeTwilioResponse(
+    event: Prisma.VoiceCallEventGetPayload<object>,
+    responseTwiml: string,
+  ): Promise<void> {
+    await this.prisma.voiceCallEvent.update({
+      where: { id: event.id },
+      data: {
+        metadata: this.toJsonObject({
+          ...this.toRecord(event.metadata),
+          responseTwiml,
+        }),
+      },
+    });
+  }
+
+  private buildConversationQuestion(
+    call: VoiceCallWithEvents,
+    currentMessage: string,
+  ): string {
+    const history = call.events
+      .filter(
+        (event) =>
+          event.content &&
+          ['caller', 'assistant', 'agent'].includes(event.role) &&
+          ['transcript', 'assistant_response'].includes(event.type),
+      )
+      .slice(-10)
+      .map((event) => {
+        const speaker = event.role === 'caller' ? 'Caller' : 'Receptionist';
+        return `${speaker}: ${event.content}`;
+      })
+      .join('\n')
+      .slice(-3500);
+    return history
+      ? `Use the conversation history to resolve follow-up references.\n${history}\nCaller: ${currentMessage}`
+      : currentMessage;
+  }
+
+  private async loadSignedTwilioConfig(
+    configId: string,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ) {
+    const config = await this.findActiveConfig(configId);
+    await this.assertVoiceEnabled(config.organizationId);
+    this.assertTwilioCallbackSignature(config, rawBody, headers, requestUrl);
+    return config;
+  }
+
+  private assertTwilioCallbackSignature(
+    config: VoiceReceptionistConfig,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ): void {
+    const required = this.configService.get<boolean>(
+      'VOICE_WEBHOOK_SIGNATURE_REQUIRED',
+      true,
+    );
+    const signature = this.getHeader(headers, 'x-twilio-signature');
+    if (!required && !signature) return;
+    if (!signature || !rawBody || !config.apiKeyEncrypted) {
+      throw new ForbiddenException('Invalid Twilio webhook signature');
+    }
+    const params = [...new URLSearchParams(rawBody.toString('utf8')).entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => `${key}${value}`)
+      .join('');
+    const expected = createHmac(
+      'sha1',
+      this.cryptoService.decrypt(config.apiKeyEncrypted),
+    )
+      .update(`${this.buildWebhookUrl(requestUrl)}${params}`)
+      .digest('base64');
+    if (!this.secureCompareText(expected, signature)) {
+      throw new ForbiddenException('Invalid Twilio webhook signature');
+    }
+  }
+
+  private async findCallByProvider(configId: string, providerCallId: string) {
+    const call = await this.prisma.voiceCall.findUnique({
+      where: { configId_providerCallId: { configId, providerCallId } },
+      include: this.callInclude(),
+    });
+    if (!call) throw new NotFoundException('Voice call not found');
+    return call;
+  }
+
+  private async findOrCreateCallbackCall(
+    config: VoiceReceptionistConfig,
+    providerCallId: string,
+  ) {
+    return this.prisma.voiceCall.upsert({
+      where: {
+        configId_providerCallId: { configId: config.id, providerCallId },
+      },
+      create: {
+        organizationId: config.organizationId,
+        configId: config.id,
+        providerCallId,
+        locale: config.defaultLocale,
+        status: 'ringing',
+      },
+      update: {},
+      include: this.callInclude(),
+    });
+  }
+
+  private mapTwilioCallStatus(status: string): VoiceCallWithEvents['status'] {
+    if (status === 'completed') return 'completed';
+    if (['busy', 'canceled', 'failed', 'no-answer'].includes(status)) {
+      return 'failed';
+    }
+    if (['answered', 'in-progress'].includes(status)) return 'in_progress';
+    return 'ringing';
+  }
+
+  private parseOptionalInt(value?: string): number | undefined {
+    if (value === undefined || !/^\d+$/.test(value)) return undefined;
+    return Number(value);
+  }
+
+  private parseOptionalFloat(value?: string): number | undefined {
+    if (value === undefined) return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
   }
 
   private async upsertCall(
@@ -1247,14 +1827,51 @@ export class VoiceReceptionistService {
       }
     }
 
-    const gatherUrl = settings.twilioGatherUrl;
+    for (const key of [
+      'twilioGatherUrl',
+      'twilioDialCallbackUrl',
+      'twilioRecordingCallbackUrl',
+    ]) {
+      const value = settings[key];
+      if (
+        value !== undefined &&
+        (typeof value !== 'string' || !this.isHttpsUrl(value))
+      ) {
+        throw new BadRequestException(`settings.${key} must be an HTTPS URL`);
+      }
+    }
+
+    const dtmfRoutes = settings.dtmfRoutes;
     if (
-      gatherUrl !== undefined &&
-      (typeof gatherUrl !== 'string' || !this.isHttpsUrl(gatherUrl))
+      dtmfRoutes !== undefined &&
+      (!dtmfRoutes ||
+        typeof dtmfRoutes !== 'object' ||
+        Array.isArray(dtmfRoutes))
     ) {
-      throw new BadRequestException(
-        'settings.twilioGatherUrl must be an HTTPS URL',
-      );
+      throw new BadRequestException('settings.dtmfRoutes must be an object');
+    }
+    if (
+      dtmfRoutes &&
+      typeof dtmfRoutes === 'object' &&
+      !Array.isArray(dtmfRoutes)
+    ) {
+      for (const [digits, route] of Object.entries(dtmfRoutes)) {
+        const target =
+          typeof route === 'string'
+            ? route
+            : route && typeof route === 'object' && !Array.isArray(route)
+              ? (route as Record<string, unknown>).transferTo
+              : undefined;
+        if (
+          !/^\d+$/.test(digits) ||
+          typeof target !== 'string' ||
+          !/^\+[1-9]\d{7,14}$/.test(target)
+        ) {
+          throw new BadRequestException(
+            'Every DTMF route must map digits to an E.164 phone number',
+          );
+        }
+      }
     }
 
     const voicemailMaxLength = settings.voicemailMaxLengthSeconds;
@@ -1268,6 +1885,34 @@ export class VoiceReceptionistService {
       throw new BadRequestException(
         'settings.voicemailMaxLengthSeconds must be an integer from 10 to 600',
       );
+    }
+    for (const key of [
+      'handoffNotificationEmail',
+      'voicemailNotificationEmail',
+    ]) {
+      const value = settings[key];
+      if (
+        value !== undefined &&
+        (typeof value !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))
+      ) {
+        throw new BadRequestException(
+          `settings.${key} must be an email address`,
+        );
+      }
+    }
+    for (const key of [
+      'handoffNotificationPhone',
+      'voicemailNotificationPhone',
+    ]) {
+      const value = settings[key];
+      if (
+        value !== undefined &&
+        (typeof value !== 'string' || !/^\+[1-9]\d{7,14}$/.test(value))
+      ) {
+        throw new BadRequestException(
+          `settings.${key} must be an E.164 phone number`,
+        );
+      }
     }
   }
 
@@ -1294,6 +1939,33 @@ export class VoiceReceptionistService {
         normalized.includes(department.toLocaleLowerCase(config.defaultLocale))
       ) {
         return { department, transferTo };
+      }
+    }
+    return undefined;
+  }
+
+  private matchDtmfRoute(
+    config: VoiceReceptionistConfig,
+    digits: string,
+  ): { department: string; transferTo: string } | undefined {
+    const routes = this.toRecord(config.settings).dtmfRoutes;
+    if (!routes || typeof routes !== 'object' || Array.isArray(routes)) {
+      return undefined;
+    }
+    const route = (routes as Record<string, unknown>)[digits];
+    if (typeof route === 'string') {
+      return { department: `menu option ${digits}`, transferTo: route };
+    }
+    if (route && typeof route === 'object' && !Array.isArray(route)) {
+      const value = route as Record<string, unknown>;
+      if (typeof value.transferTo === 'string') {
+        return {
+          department:
+            typeof value.department === 'string'
+              ? value.department
+              : `menu option ${digits}`,
+          transferTo: value.transferTo,
+        };
       }
     }
     return undefined;

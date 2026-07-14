@@ -13,12 +13,35 @@ model WhatsAppAssistantConfig {
   defaultLocale               String                 @default("en") @map("default_locale")
   settings                    Json                   @default("{}")
   conversations               WhatsAppConversation[]
+  templates                   WhatsAppTemplate[]
   createdAt                   DateTime               @default(now()) @map("created_at")
   updatedAt                   DateTime               @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@index([phoneNumberId])
   @@map("whatsapp_assistant_configs")
+}
+
+model WhatsAppTemplate {
+  id                 String                  @id @default(uuid())
+  organizationId     String                  @map("organization_id")
+  organization       Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  configId           String                  @map("config_id")
+  config             WhatsAppAssistantConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  providerTemplateId String?                 @map("provider_template_id")
+  name               String
+  language           String
+  status             String
+  category           String?
+  components         Json                    @default("[]")
+  syncedAt           DateTime                @default(now()) @map("synced_at")
+  createdAt          DateTime                @default(now()) @map("created_at")
+  updatedAt          DateTime                @updatedAt @map("updated_at")
+
+  @@unique([configId, name, language])
+  @@index([organizationId, status])
+  @@index([configId, language, status])
+  @@map("whatsapp_templates")
 }
 
 model WhatsAppConversation {
@@ -63,6 +86,9 @@ model WhatsAppMessage {
   mediaUrl           String?                  @map("media_url")
   mediaMimeType      String?                  @map("media_mime_type")
   mediaSha256        String?                  @map("media_sha256")
+  mediaStorageBucket String?                  @map("media_storage_bucket")
+  mediaStorageKey    String?                  @map("media_storage_key")
+  mediaSizeBytes     Int?                     @map("media_size_bytes")
   processedAt        DateTime?                @map("processed_at")
   processingError    String?                  @map("processing_error")
   processingAttempts Int                      @default(0) @map("processing_attempts")

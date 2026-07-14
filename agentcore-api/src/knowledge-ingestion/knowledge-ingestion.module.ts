@@ -21,6 +21,10 @@ import { UrlScraperService } from './url-scraper.service';
     TextChunkerService,
     UrlScraperService,
   ],
-  exports: [KnowledgeIngestionQueueService, KnowledgeIngestionService],
+  exports: [
+    KnowledgeFileExtractorService,
+    KnowledgeIngestionQueueService,
+    KnowledgeIngestionService,
+  ],
 })
 export class KnowledgeIngestionModule {}

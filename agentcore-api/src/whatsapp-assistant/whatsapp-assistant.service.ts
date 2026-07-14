@@ -17,11 +17,14 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { RateLimitService } from '../rate-limit/rate-limit.service';
 import {
   AssignWhatsAppConversationDto,
   CreateWhatsAppConfigDto,
   ListWhatsAppConversationsDto,
   SendWhatsAppAgentMessageDto,
+  SendWhatsAppMediaMessageDto,
+  SendWhatsAppTemplateMessageDto,
   UpdateWhatsAppConfigDto,
   UpdateWhatsAppConversationStatusDto,
   WhatsAppInboundWebhookDto,
@@ -31,6 +34,7 @@ import {
   WhatsAppOutboundService,
 } from './whatsapp-outbound.service';
 import { WhatsAppInboundQueueService } from './whatsapp-inbound-queue.service';
+import { WhatsAppMediaService } from './whatsapp-media.service';
 import {
   isLegacyWebhookPayload,
   parseMetaWebhook,
@@ -58,6 +62,8 @@ export class WhatsAppAssistantService {
     private readonly prisma: PrismaService,
     private readonly inboundQueue: WhatsAppInboundQueueService,
     private readonly configService: ConfigService,
+    private readonly mediaService: WhatsAppMediaService,
+    private readonly rateLimitService: RateLimitService,
   ) {}
 
   async listConfigs(
@@ -226,6 +232,82 @@ export class WhatsAppAssistantService {
     return this.toConversationResponse(conversation);
   }
 
+  async getMessageMedia(currentUser: AuthenticatedUser, messageId: string) {
+    const message = await this.prisma.whatsAppMessage.findUnique({
+      where: { id: messageId },
+    });
+    if (
+      !message ||
+      (!this.isSuperAdmin(currentUser) &&
+        message.organizationId !== currentUser.orgId)
+    ) {
+      throw new NotFoundException('WhatsApp media not found');
+    }
+    await this.assertWhatsAppEnabled(message.organizationId);
+    return this.mediaService.getStoredMedia(message);
+  }
+
+  async listTemplates(currentUser: AuthenticatedUser, configId: string) {
+    const config = await this.findConfigForActor(currentUser, configId);
+    return this.prisma.whatsAppTemplate.findMany({
+      where: { configId: config.id },
+      orderBy: [{ name: 'asc' }, { language: 'asc' }],
+    });
+  }
+
+  async syncTemplates(currentUser: AuthenticatedUser, configId: string) {
+    const config = await this.findConfigForActor(currentUser, configId);
+    if (config.provider !== 'meta') {
+      throw new BadRequestException('Template sync is only available for Meta');
+    }
+    const syncedAt = new Date();
+    const templates = await this.outboundService.listMetaTemplates(config);
+    await this.prisma.$transaction([
+      ...templates.map((template) =>
+        this.prisma.whatsAppTemplate.upsert({
+          where: {
+            configId_name_language: {
+              configId: config.id,
+              name: template.name,
+              language: template.language,
+            },
+          },
+          create: {
+            organizationId: config.organizationId,
+            configId: config.id,
+            providerTemplateId: template.id,
+            name: template.name,
+            language: template.language,
+            status: template.status,
+            category: template.category,
+            components: this.toJsonArray(template.components),
+            syncedAt,
+          },
+          update: {
+            providerTemplateId: template.id,
+            status: template.status,
+            category: template.category,
+            components: this.toJsonArray(template.components),
+            syncedAt,
+          },
+        }),
+      ),
+      this.prisma.whatsAppTemplate.updateMany({
+        where: { configId: config.id, syncedAt: { lt: syncedAt } },
+        data: { status: 'STALE' },
+      }),
+    ]);
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'whatsapp.templates_synced',
+      entityType: 'whatsapp_config',
+      entityId: config.id,
+      metadata: { count: templates.length },
+    });
+    return this.listTemplates(currentUser, configId);
+  }
+
   async sendAgentMessage(
     currentUser: AuthenticatedUser,
     id: string,
@@ -233,6 +315,7 @@ export class WhatsAppAssistantService {
   ) {
     const conversation = await this.findConversationForActor(currentUser, id);
     await this.assertWhatsAppEnabled(conversation.organizationId);
+    await this.limitAgentOutbound(currentUser, conversation.id);
 
     const config = await this.prisma.whatsAppAssistantConfig.findUniqueOrThrow({
       where: { id: conversation.configId },
@@ -284,6 +367,124 @@ export class WhatsAppAssistantService {
     return {
       conversation: this.toConversationResponse(updated),
       agentMessage: this.toMessageResponse(message),
+      delivery,
+    };
+  }
+
+  async sendTemplateMessage(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: SendWhatsAppTemplateMessageDto,
+  ) {
+    const conversation = await this.findConversationForActor(currentUser, id);
+    await this.limitAgentOutbound(currentUser, conversation.id);
+    const config = await this.prisma.whatsAppAssistantConfig.findUniqueOrThrow({
+      where: { id: conversation.configId },
+    });
+    const template = await this.selectApprovedTemplate(
+      config,
+      input.templateName,
+      input.language,
+      conversation.locale,
+    );
+    const delivery = await this.outboundService.sendTemplate({
+      config,
+      to: conversation.contactWaId,
+      name: template.name,
+      language: template.language,
+      components: input.components,
+    });
+    const message = await this.prisma.whatsAppMessage.create({
+      data: {
+        organizationId: conversation.organizationId,
+        conversationId: conversation.id,
+        direction: 'outbound',
+        role: 'agent',
+        type: 'template',
+        providerMessageId: delivery.providerMessageId,
+        content: template.name,
+        metadata: this.toJsonObject({
+          delivery,
+          templateId: template.id,
+          templateName: template.name,
+          language: template.language,
+          components: input.components ?? [],
+          agentId: currentUser.sub,
+        }),
+      },
+    });
+    const updated = await this.claimForAgent(
+      conversation.id,
+      conversation.assignedAgentId ?? currentUser.sub,
+    );
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: conversation.organizationId,
+      action: 'whatsapp.template_sent',
+      entityType: 'whatsapp_conversation',
+      entityId: conversation.id,
+      metadata: {
+        messageId: message.id,
+        templateName: template.name,
+        language: template.language,
+      },
+    });
+    return {
+      conversation: this.toConversationResponse(updated),
+      message: this.toMessageResponse(message),
+      delivery,
+    };
+  }
+
+  async sendMediaMessage(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: SendWhatsAppMediaMessageDto,
+  ) {
+    const conversation = await this.findConversationForActor(currentUser, id);
+    await this.limitAgentOutbound(currentUser, conversation.id);
+    this.assertSessionWindowOpen(conversation.sessionExpiresAt);
+    const config = await this.prisma.whatsAppAssistantConfig.findUniqueOrThrow({
+      where: { id: conversation.configId },
+    });
+    const delivery = await this.outboundService.sendMedia({
+      config,
+      to: conversation.contactWaId,
+      ...input,
+    });
+    const message = await this.prisma.whatsAppMessage.create({
+      data: {
+        organizationId: conversation.organizationId,
+        conversationId: conversation.id,
+        direction: 'outbound',
+        role: 'agent',
+        type: input.type,
+        providerMessageId: delivery.providerMessageId,
+        content: input.caption,
+        mediaUrl: input.link,
+        metadata: this.toJsonObject({
+          delivery,
+          providerMediaId: input.mediaId,
+          filename: input.filename,
+          agentId: currentUser.sub,
+        }),
+      },
+    });
+    const updated = await this.claimForAgent(
+      conversation.id,
+      conversation.assignedAgentId ?? currentUser.sub,
+    );
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: conversation.organizationId,
+      action: 'whatsapp.media_sent',
+      entityType: 'whatsapp_conversation',
+      entityId: conversation.id,
+      metadata: { messageId: message.id, type: input.type },
+    });
+    return {
+      conversation: this.toConversationResponse(updated),
+      message: this.toMessageResponse(message),
       delivery,
     };
   }
@@ -390,9 +591,11 @@ export class WhatsAppAssistantService {
     payload: unknown,
     rawBody?: Buffer,
     headers?: Record<string, string | string[] | undefined>,
+    clientIp = 'unknown',
   ) {
     const config = await this.findActiveConfig(configId);
     this.assertWebhookSignature(config, rawBody, headers);
+    await this.limitWebhook(config.id, clientIp);
     await this.assertWhatsAppEnabled(config.organizationId);
 
     const parsed =
@@ -502,9 +705,41 @@ export class WhatsAppAssistantService {
 
     try {
       const metadata = this.toRecord(inboundMessage.metadata);
+      const isMedia = [
+        'image',
+        'audio',
+        'video',
+        'document',
+        'sticker',
+      ].includes(inboundMessage.type);
+      const mediaContext = isMedia
+        ? await this.mediaService.downloadStoreAndDescribe({
+            config: conversation.config,
+            message: inboundMessage,
+          })
+        : null;
+      if (isMedia && !mediaContext) {
+        await this.prisma.whatsAppConversation.update({
+          where: { id: conversation.id },
+          data: { status: 'waiting_for_agent' },
+        });
+        await this.markInboundProcessed(messageId);
+        return;
+      }
       const question =
-        inboundMessage.content ??
-        this.fallbackMediaQuestion(inboundMessage.type ?? 'unknown');
+        [inboundMessage.content, mediaContext].filter(Boolean).join('\n\n') ||
+        this.fallbackMediaQuestion(inboundMessage.type);
+      const locale = await this.chatService.detectLanguage(
+        conversation.organizationId,
+        question,
+        conversation.locale || conversation.config.defaultLocale,
+      );
+      if (locale !== conversation.locale) {
+        await this.prisma.whatsAppConversation.update({
+          where: { id: conversation.id },
+          data: { locale },
+        });
+      }
       await this.createAssistantReply(
         conversation.config,
         conversation.organizationId,
@@ -512,7 +747,7 @@ export class WhatsAppAssistantService {
         conversation.contactWaId,
         question,
         this.readAppointmentAction(metadata),
-        conversation.locale,
+        locale,
       );
       await this.markInboundProcessed(messageId);
     } catch (error) {
@@ -916,6 +1151,108 @@ export class WhatsAppAssistantService {
     return error instanceof Error ? error.message : String(error);
   }
 
+  private async selectApprovedTemplate(
+    config: WhatsAppAssistantConfig,
+    name: string,
+    requestedLanguage: string | undefined,
+    conversationLocale: string,
+  ) {
+    const templates = await this.prisma.whatsAppTemplate.findMany({
+      where: {
+        configId: config.id,
+        name,
+        status: { equals: 'APPROVED', mode: 'insensitive' },
+      },
+    });
+    if (!templates.length) {
+      throw new BadRequestException(
+        `No approved WhatsApp template named ${name} is synced`,
+      );
+    }
+    const preferences = [
+      requestedLanguage,
+      conversationLocale,
+      config.defaultLocale,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .flatMap((value) => [value, value.split(/[-_]/)[0]]);
+    const selected = preferences
+      .map((locale) =>
+        templates.find(
+          (template) =>
+            template.language.toLowerCase() === locale.toLowerCase(),
+        ),
+      )
+      .find(Boolean);
+    if (!selected) {
+      throw new BadRequestException(
+        `Template ${name} has no approved language for ${preferences[0] ?? 'the conversation locale'}`,
+      );
+    }
+    return selected;
+  }
+
+  private async limitWebhook(configId: string, clientIp: string) {
+    const windowSeconds = this.configService.get<number>(
+      'WHATSAPP_WEBHOOK_RATE_LIMIT_WINDOW_SECONDS',
+      60,
+    );
+    const limit = this.configService.get<number>(
+      'WHATSAPP_WEBHOOK_MAX_REQUESTS_PER_WINDOW',
+      300,
+    );
+    await Promise.all([
+      this.rateLimitService.consume(
+        `whatsapp-webhook:config:${configId}`,
+        limit,
+        windowSeconds,
+      ),
+      this.rateLimitService.consume(
+        `whatsapp-webhook:ip:${clientIp}`,
+        limit,
+        windowSeconds,
+      ),
+    ]);
+  }
+
+  private async limitAgentOutbound(
+    currentUser: AuthenticatedUser,
+    conversationId: string,
+  ) {
+    const windowSeconds = this.configService.get<number>(
+      'WHATSAPP_AGENT_RATE_LIMIT_WINDOW_SECONDS',
+      60,
+    );
+    const limit = this.configService.get<number>(
+      'WHATSAPP_AGENT_MAX_SENDS_PER_WINDOW',
+      30,
+    );
+    await Promise.all([
+      this.rateLimitService.consume(
+        `whatsapp-agent:user:${currentUser.sub}`,
+        limit,
+        windowSeconds,
+      ),
+      this.rateLimitService.consume(
+        `whatsapp-agent:conversation:${conversationId}`,
+        limit,
+        windowSeconds,
+      ),
+    ]);
+  }
+
+  private claimForAgent(conversationId: string, agentId: string) {
+    return this.prisma.whatsAppConversation.update({
+      where: { id: conversationId },
+      data: {
+        status: 'waiting_for_agent',
+        assignedAgentId: agentId,
+        lastMessageAt: new Date(),
+      },
+      include: this.conversationInclude(),
+    });
+  }
+
   private resolveOrganizationId(
     currentUser: AuthenticatedUser,
     organizationId?: string,
@@ -997,6 +1334,10 @@ export class WhatsAppAssistantService {
     value: Record<string, unknown> | undefined,
   ): Prisma.InputJsonObject {
     return (value ?? {}) as Prisma.InputJsonObject;
+  }
+
+  private toJsonArray(value: unknown[] | undefined): Prisma.InputJsonArray {
+    return (value ?? []) as Prisma.InputJsonArray;
   }
 
   private toRecord(value: Prisma.JsonValue): Record<string, unknown> {

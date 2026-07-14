@@ -22,6 +22,13 @@ export interface StoredObject {
   checksumSha256: string;
 }
 
+export interface StorageUploadFile {
+  buffer: Buffer;
+  originalname: string;
+  mimetype: string;
+  size: number;
+}
+
 type S3Body = {
   transformToByteArray?: () => Promise<Uint8Array>;
   [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array | Buffer | string>;
@@ -74,13 +81,32 @@ export class S3StorageService {
     organizationId: string;
     file: Express.Multer.File;
   }): Promise<StoredObject> {
+    return this.uploadFile({ ...input, namespace: 'knowledge' });
+  }
+
+  async uploadWhatsAppMedia(input: {
+    organizationId: string;
+    file: StorageUploadFile;
+  }): Promise<StoredObject> {
+    return this.uploadFile({ ...input, namespace: 'whatsapp' });
+  }
+
+  private async uploadFile(input: {
+    organizationId: string;
+    file: StorageUploadFile;
+    namespace: 'knowledge' | 'whatsapp';
+  }): Promise<StoredObject> {
     this.assertConfigured();
     this.assertAllowedSize(input.file);
 
     const checksumSha256 = createHash('sha256')
       .update(input.file.buffer)
       .digest('hex');
-    const key = this.buildObjectKey(input.organizationId, input.file);
+    const key = this.buildObjectKey(
+      input.organizationId,
+      input.file,
+      input.namespace,
+    );
 
     try {
       await this.client!.send(
@@ -121,6 +147,10 @@ export class S3StorageService {
     bucket?: string | null;
     key?: string | null;
   }) {
+    return this.getStoredFile(input);
+  }
+
+  async getStoredFile(input: { bucket?: string | null; key?: string | null }) {
     this.assertConfigured();
 
     if (!input.key) {
@@ -173,7 +203,7 @@ export class S3StorageService {
     );
   }
 
-  private assertAllowedSize(file: Express.Multer.File) {
+  private assertAllowedSize(file: StorageUploadFile) {
     if (file.size <= this.maxFileSizeBytes) {
       return;
     }
@@ -209,7 +239,8 @@ export class S3StorageService {
 
   private buildObjectKey(
     organizationId: string,
-    file: Express.Multer.File,
+    file: StorageUploadFile,
+    namespace: 'knowledge' | 'whatsapp',
   ): string {
     const cleanName = file.originalname
       .toLowerCase()
@@ -220,6 +251,7 @@ export class S3StorageService {
 
     return [
       this.prefix,
+      ...(namespace === 'whatsapp' ? ['whatsapp'] : []),
       organizationId,
       `${randomUUID()}-${baseName || 'upload'}${extension}`,
     ].join('/');

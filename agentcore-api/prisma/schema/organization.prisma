@@ -42,6 +42,7 @@ model Organization {
   whatsAppConfigs                 WhatsAppAssistantConfig[]
   whatsAppConversations           WhatsAppConversation[]
   whatsAppMessages                WhatsAppMessage[]
+  whatsAppTemplates               WhatsAppTemplate[]
   voiceReceptionistConfigs        VoiceReceptionistConfig[]
   voiceCalls                      VoiceCall[]
   voiceCallEvents                 VoiceCallEvent[]

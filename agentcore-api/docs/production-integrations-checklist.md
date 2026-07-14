@@ -13,7 +13,7 @@ Implemented in the codebase:
 - Customer Chat backend with RAG, conversation history, handoff, public widget APIs, and rate limits.
 - Appointment Booking with DST-safe IANA timezones, staff schedules/time off, shared resource capacity, conflict-safe booking, secure customer self-service, durable reminders, Google/Outlook OAuth sync, public rate limits, structured voice/WhatsApp/chat actions, and tests.
 - WhatsApp Assistant backend/frontend MVP with config, inbound webhook, conversations, RAG reply, handoff, transcript/history, and mock outbound send.
-- Voice Receptionist backend/frontend MVP with config, call events, transcript history, RAG reply, handoff, route/transfer/voicemail flow, barge-in event logging, and optional webhook signature verification.
+- Voice Receptionist turn-based Twilio flow with signed callbacks, transcript history, RAG reply, handoff, transfer fallback, voicemail capture, and lifecycle tracking.
 - Live outbound adapter switches for WhatsApp and Voice, disabled by default until provider credentials are configured.
 - Observability summary endpoint for module-level operational counts and process memory/uptime.
 
@@ -116,9 +116,9 @@ Provider API keys are stored through AI provider config APIs, encrypted using `A
 | `MICROSOFT_CALENDAR_CLIENT_SECRET`             | Microsoft Outlook OAuth           | Microsoft Entra client secret.                                                  |
 | `MICROSOFT_CALENDAR_REDIRECT_URI`              | Microsoft Outlook OAuth           | Must exactly match the provider callback registration.                          |
 | `APPOINTMENT_CALENDAR_OAUTH_SUCCESS_URL`       | Calendar OAuth UI return          | Frontend appointment URL after authorization.                                   |
-| `APPOINTMENT_CALENDAR_FAIL_OPEN`               | External conflict policy          | Default `false`; keep false to avoid unverified double bookings.                 |
+| `APPOINTMENT_CALENDAR_FAIL_OPEN`               | External conflict policy          | Default `false`; keep false to avoid unverified double bookings.                |
 | `APPOINTMENT_CALENDAR_SYNC_CONCURRENCY`        | Calendar worker throughput        | Current default `5`.                                                            |
-| `APPOINTMENT_CALENDAR_RECOVERY_INTERVAL_MS`    | Durable calendar sync recovery    | Re-publishes pending/failed sync records. Default `60000`.                       |
+| `APPOINTMENT_CALENDAR_RECOVERY_INTERVAL_MS`    | Durable calendar sync recovery    | Re-publishes pending/failed sync records. Default `60000`.                      |
 
 Provider configuration notes:
 
@@ -157,37 +157,44 @@ Production work remaining:
 
 Stored per organization through `/api/v1/voice-receptionist/configs`, not as plain env:
 
-| Config field             | Needed for                  | Notes                                                                   |
-| ------------------------ | --------------------------- | ----------------------------------------------------------------------- |
-| `provider`               | Provider selection          | `twilio`, `sip`, or `custom`.                                           |
-| `phoneNumber`            | PSTN calls                  | Twilio or provider-owned number.                                        |
-| `sipDomain`              | SIP calls                   | Required for SIP-based routing.                                         |
-| `apiKey`                 | Provider API/signing secret | Encrypted in DB. Currently used for mock signature verification secret. |
-| `webhookVerifyToken`     | Webhook setup verification  | Encrypted in DB.                                                        |
-| `sttProvider`            | Speech to text              | Example `openai`, `deepgram`, `assemblyai`.                             |
-| `sttModel`               | Speech to text model        | Provider-specific.                                                      |
-| `ttsProvider`            | Text to speech              | Example `openai`, `elevenlabs`, `polly`.                                |
-| `ttsVoice`               | Voice selection             | Provider-specific.                                                      |
-| `transferPhoneNumber`    | Human transfer              | Default human fallback number.                                          |
-| `voicemailEnabled`       | Voicemail fallback          | Boolean.                                                                |
-| `settings.businessHours` | Business-hours logic        | Example `{ enabled, days, startTime, endTime }`.                        |
+| Config field              | Needed for                  | Notes                                                                |
+| ------------------------- | --------------------------- | -------------------------------------------------------------------- |
+| `provider`                | Provider selection          | `twilio`, `sip`, or `custom`.                                        |
+| `phoneNumber`             | PSTN calls                  | Twilio or provider-owned number.                                     |
+| `sipDomain`               | SIP calls                   | Required for SIP-based routing.                                      |
+| `apiKey`                  | Provider API/signing secret | Encrypted in DB. For Twilio, use the Auth Token.                     |
+| `webhookVerifyToken`      | Webhook setup verification  | Encrypted in DB.                                                     |
+| `sttProvider`             | Speech to text              | Example `openai`, `deepgram`, `assemblyai`.                          |
+| `sttModel`                | Speech to text model        | Provider-specific.                                                   |
+| `ttsProvider`             | Text to speech              | Example `openai`, `elevenlabs`, `polly`.                             |
+| `ttsVoice`                | Voice selection             | Provider-specific.                                                   |
+| `transferPhoneNumber`     | Human transfer              | Default human fallback number.                                       |
+| `voicemailEnabled`        | Voicemail fallback          | Boolean.                                                             |
+| `settings.businessHours`  | Business-hours logic        | Supports IANA timezone, days, times, overnight ranges, and holidays. |
+| `settings.greeting`       | Initial caller greeting     | Played immediately before the first speech/DTMF gather.              |
+| `settings.dtmfRoutes`     | IVR routing                 | Maps digits to E.164 transfer targets.                               |
+| `settings.*Notification*` | Handoff/voicemail alerts    | Optional email and E.164 SMS destinations.                           |
 
 Voice env:
 
 | Env key                            | Needed for                   | Notes                                                                       |
 | ---------------------------------- | ---------------------------- | --------------------------------------------------------------------------- |
-| `VOICE_WEBHOOK_SIGNATURE_REQUIRED` | Webhook security             | Set `true` in production after provider signing is configured.              |
+| `VOICE_WEBHOOK_SIGNATURE_REQUIRED` | Webhook security             | Defaults to `true`; signed callbacks fail closed.                           |
+| `VOICE_WEBHOOK_PUBLIC_BASE_URL`    | Twilio callback URLs         | Public HTTPS API origin used for signatures and generated callback URLs.    |
 | `WHATSAPP_OUTBOUND_MODE`           | WhatsApp outbound delivery   | `mock` by default. Set `live` after Meta/Twilio credentials are configured. |
 | `VOICE_OUTBOUND_MODE`              | Voice provider call control  | `mock` by default. Set `live` after Twilio/SIP credentials are configured.  |
 | `TWILIO_ACCOUNT_SID`               | Twilio Voice fallback config | Optional global fallback. Prefer per-org config/settings where possible.    |
 
+Twilio endpoints under `/api/v1/voice-receptionist/webhook/:configId/twilio`
+provide incoming-call, gather, status, dial-result, and recording/transcription
+callbacks. Configure the Twilio number's voice URL to `/incoming` and status
+callback to `/status`; generated TwiML wires the other callbacks automatically.
+
 Production work remaining:
 
-- Implement real Twilio/SIP call control.
-- Implement real streaming STT.
-- Implement real TTS playback into the call.
-- Implement real transfer and voicemail provider actions.
-- Map provider-native webhooks into the internal call event format.
+- Add a bidirectional Media Streams or ConversationRelay WebSocket transport for streaming STT/TTS and true audio-level barge-in.
+- Implement native SIP call control and provider callbacks.
+- Optionally copy Twilio-hosted recordings into organization-owned object storage when independent retention is required.
 
 ## Deployment Notes
 

@@ -197,6 +197,7 @@ enum WhatsAppMessageRole {
 
 enum WhatsAppMessageType {
   text
+  template
   image
   audio
   video

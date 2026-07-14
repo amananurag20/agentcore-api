@@ -17,6 +17,16 @@ type TestableVoiceService = {
     headers?: Record<string, string | string[] | undefined>,
     requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
   ): void;
+  assertTwilioCallbackSignature(
+    config: VoiceReceptionistConfig,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ): void;
+  buildConversationQuestion(
+    call: { events: Array<{ role: string; type: string; content: string }> },
+    currentMessage: string,
+  ): string;
 };
 
 describe('VoiceReceptionistService hardening', () => {
@@ -56,6 +66,7 @@ describe('VoiceReceptionistService hardening', () => {
       {} as never,
       configService,
       cryptoService as never,
+      {} as never,
       {} as never,
       {} as never,
       {} as never,
@@ -130,5 +141,53 @@ describe('VoiceReceptionistService hardening', () => {
         { originalUrl: path },
       ),
     ).not.toThrow();
+  });
+
+  it('validates Twilio form callbacks against the raw signed parameters', () => {
+    const service = createService({
+      VOICE_WEBHOOK_SIGNATURE_REQUIRED: true,
+      VOICE_WEBHOOK_PUBLIC_BASE_URL: 'https://voice.example.com',
+    });
+    const path = '/api/v1/voice-receptionist/webhook/config-1/twilio/status';
+    const rawBody = Buffer.from('CallSid=CA123&CallStatus=completed');
+    const signed =
+      `https://voice.example.com${path}` + 'CallSidCA123CallStatuscompleted';
+    const signature = createHmac('sha1', secret)
+      .update(signed)
+      .digest('base64');
+
+    expect(() =>
+      service.assertTwilioCallbackSignature(
+        baseConfig,
+        rawBody,
+        { 'x-twilio-signature': signature },
+        { originalUrl: path },
+      ),
+    ).not.toThrow();
+  });
+
+  it('includes recent caller and receptionist turns in follow-up questions', () => {
+    const service = createService();
+    const question = service.buildConversationQuestion(
+      {
+        events: [
+          {
+            role: 'caller',
+            type: 'transcript',
+            content: 'What are your hours?',
+          },
+          {
+            role: 'assistant',
+            type: 'assistant_response',
+            content: 'We open at nine.',
+          },
+        ],
+      },
+      'What about Saturday?',
+    );
+
+    expect(question).toContain('Caller: What are your hours?');
+    expect(question).toContain('Receptionist: We open at nine.');
+    expect(question).toContain('Caller: What about Saturday?');
   });
 });

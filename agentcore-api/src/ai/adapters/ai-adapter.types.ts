@@ -3,9 +3,13 @@ export type AIAdapterKind =
 
 export type AIChatRole = 'system' | 'user' | 'assistant';
 
+export type AIChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 export interface AIChatMessage {
   role: AIChatRole;
-  content: string;
+  content: string | AIChatContentPart[];
 }
 
 export interface AIChatRequest {
@@ -36,10 +40,28 @@ export interface AIEmbeddingResponse {
   adapter: AIAdapterKind;
 }
 
+export interface AITranscriptionRequest {
+  apiKey?: string;
+  baseUrl?: string | null;
+  model: string;
+  buffer: Buffer;
+  mimeType: string;
+  fileName: string;
+}
+
+export interface AITranscriptionResponse {
+  text: string;
+  model: string;
+  adapter: AIAdapterKind;
+}
+
 export interface AIProviderAdapter {
   readonly kind: AIAdapterKind;
   createChatCompletion?(input: AIChatRequest): Promise<AIChatResponse>;
   createEmbedding?(input: AIEmbeddingRequest): Promise<AIEmbeddingResponse>;
+  createTranscription?(
+    input: AITranscriptionRequest,
+  ): Promise<AITranscriptionResponse>;
 }
 
 export interface AIProviderAdapterOptions {

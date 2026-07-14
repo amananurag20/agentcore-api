@@ -35,7 +35,7 @@ export class AnthropicAdapter implements AIProviderAdapter {
       .filter((message) => message.role !== 'system')
       .map((message) => ({
         role: message.role === 'assistant' ? 'assistant' : 'user',
-        content: message.content,
+        content: this.toAnthropicContent(message.content),
       }));
 
     const response = await this.fetchWithRetry(
@@ -50,7 +50,13 @@ export class AnthropicAdapter implements AIProviderAdapter {
         body: JSON.stringify({
           model: input.model,
           max_tokens: input.maxOutputTokens ?? this.options.maxOutputTokens,
-          system: system?.content,
+          system:
+            typeof system?.content === 'string'
+              ? system.content
+              : system?.content
+                  .filter((part) => part.type === 'text')
+                  .map((part) => part.text)
+                  .join('\n'),
           messages,
           temperature: input.temperature ?? 0.2,
         }),
@@ -83,6 +89,23 @@ export class AnthropicAdapter implements AIProviderAdapter {
 
   private resolveBaseUrl(baseUrl?: string | null): string {
     return (baseUrl || 'https://api.anthropic.com/v1').replace(/\/+$/, '');
+  }
+
+  private toAnthropicContent(
+    content: AIChatRequest['messages'][number]['content'],
+  ) {
+    if (typeof content === 'string') return content;
+    return content.map((part) => {
+      if (part.type === 'text') return part;
+      const match = /^data:([^;]+);base64,(.+)$/.exec(part.image_url.url);
+      if (!match) {
+        return { type: 'text', text: '[Image attachment unavailable]' };
+      }
+      return {
+        type: 'image',
+        source: { type: 'base64', media_type: match[1], data: match[2] },
+      };
+    });
   }
 
   private async fetchWithRetry(

@@ -353,3 +353,110 @@ export class RouteVoiceCallDto {
   @IsOptional()
   reason?: string;
 }
+
+export class TwilioIncomingCallDto {
+  @ApiProperty({ example: 'CA123456789' })
+  @IsString()
+  @MinLength(1)
+  CallSid: string;
+
+  @ApiPropertyOptional({ example: '+15551234567' })
+  @IsString()
+  @IsOptional()
+  From?: string;
+
+  @ApiPropertyOptional({ example: '+15557654321' })
+  @IsString()
+  @IsOptional()
+  To?: string;
+
+  @ApiPropertyOptional({ example: 'Ada Customer' })
+  @IsString()
+  @IsOptional()
+  CallerName?: string;
+}
+
+export class TwilioGatherCallbackDto extends TwilioIncomingCallDto {
+  @ApiPropertyOptional({ example: 'I need sales.' })
+  @IsString()
+  @IsOptional()
+  SpeechResult?: string;
+
+  @ApiPropertyOptional({ example: '1' })
+  @IsString()
+  @IsOptional()
+  Digits?: string;
+
+  @ApiPropertyOptional({ example: '0.95' })
+  @IsString()
+  @IsOptional()
+  Confidence?: string;
+}
+
+export class TwilioStatusCallbackDto {
+  @ApiProperty({ example: 'CA123456789' })
+  @IsString()
+  @MinLength(1)
+  CallSid: string;
+
+  @ApiProperty({ example: 'completed' })
+  @IsString()
+  CallStatus: string;
+
+  @ApiPropertyOptional({ example: '42' })
+  @IsString()
+  @IsOptional()
+  CallDuration?: string;
+}
+
+export class TwilioDialCallbackDto {
+  @ApiProperty({ example: 'CA123456789' })
+  @IsString()
+  @MinLength(1)
+  CallSid: string;
+
+  @ApiProperty({ example: 'no-answer' })
+  @IsString()
+  DialCallStatus: string;
+
+  @ApiPropertyOptional({ example: '18' })
+  @IsString()
+  @IsOptional()
+  DialCallDuration?: string;
+}
+
+export class TwilioRecordingCallbackDto {
+  @ApiProperty({ example: 'CA123456789' })
+  @IsString()
+  @MinLength(1)
+  CallSid: string;
+
+  @ApiProperty({ example: 'RE123456789' })
+  @IsString()
+  @MinLength(1)
+  RecordingSid: string;
+
+  @ApiProperty({ example: 'https://api.twilio.com/recordings/RE123' })
+  @IsString()
+  RecordingUrl: string;
+
+  @ApiPropertyOptional({ example: 'completed' })
+  @IsString()
+  @IsOptional()
+  RecordingStatus?: string;
+
+  @ApiPropertyOptional({ example: '24' })
+  @IsString()
+  @IsOptional()
+  RecordingDuration?: string;
+
+  @ApiPropertyOptional({ example: 'Please call me back.' })
+  @IsString()
+  @IsOptional()
+  TranscriptionText?: string;
+
+  @ApiPropertyOptional({ example: 'completed' })
+  @IsString()
+  @IsOptional()
+  TranscriptionStatus?: string;
+}

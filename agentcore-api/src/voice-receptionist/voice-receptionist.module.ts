@@ -11,6 +11,7 @@ import {
 } from './voice-receptionist.controller';
 import { VoiceReceptionistService } from './voice-receptionist.service';
 import { VoiceOutboundService } from './voice-outbound.service';
+import { VoiceNotificationService } from './voice-notification.service';
 
 @Module({
   imports: [
@@ -25,6 +26,10 @@ import { VoiceOutboundService } from './voice-outbound.service';
     VoiceReceptionistController,
     VoiceReceptionistWebhookController,
   ],
-  providers: [VoiceReceptionistService, VoiceOutboundService],
+  providers: [
+    VoiceReceptionistService,
+    VoiceOutboundService,
+    VoiceNotificationService,
+  ],
 })
 export class VoiceReceptionistModule {}

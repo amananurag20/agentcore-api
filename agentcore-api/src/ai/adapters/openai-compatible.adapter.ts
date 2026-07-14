@@ -6,6 +6,8 @@ import {
   AIEmbeddingResponse,
   AIProviderAdapter,
   AIProviderAdapterOptions,
+  AITranscriptionRequest,
+  AITranscriptionResponse,
 } from './ai-adapter.types';
 
 interface OpenAICompatibleChatResponse {
@@ -20,6 +22,10 @@ interface OpenAICompatibleEmbeddingResponse {
   data?: Array<{
     embedding?: number[];
   }>;
+}
+
+interface OpenAICompatibleTranscriptionResponse {
+  text?: string;
 }
 
 const RETRYABLE_STATUSES = [408, 425, 429, 500, 502, 503, 504];
@@ -103,6 +109,38 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
       model: input.model,
       adapter: this.kind,
     };
+  }
+
+  async createTranscription(
+    input: AITranscriptionRequest,
+  ): Promise<AITranscriptionResponse> {
+    const form = new FormData();
+    form.append('model', input.model);
+    form.append(
+      'file',
+      new Blob([new Uint8Array(input.buffer)], { type: input.mimeType }),
+      input.fileName,
+    );
+    const response = await this.fetchWithRetry(
+      `${this.resolveBaseUrl(input.baseUrl)}/audio/transcriptions`,
+      {
+        method: 'POST',
+        headers: input.apiKey
+          ? { Authorization: `Bearer ${input.apiKey}` }
+          : undefined,
+        body: form,
+      },
+    );
+    if (!response.ok) {
+      throw new Error(
+        `Transcription provider returned ${response.status}: ${await this.readProviderError(response)}`,
+      );
+    }
+    const body =
+      (await response.json()) as OpenAICompatibleTranscriptionResponse;
+    const text = body.text?.trim();
+    if (!text) throw new Error('Transcription provider returned empty text');
+    return { text, model: input.model, adapter: this.kind };
   }
 
   private resolveBaseUrl(baseUrl?: string | null): string {

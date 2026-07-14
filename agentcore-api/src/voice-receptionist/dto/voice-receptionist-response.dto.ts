@@ -125,6 +125,18 @@ export class VoiceCallResponseDto {
   @ApiPropertyOptional()
   endedAt?: Date | null;
 
+  @ApiPropertyOptional()
+  durationSeconds?: number | null;
+
+  @ApiPropertyOptional()
+  recordingSid?: string | null;
+
+  @ApiPropertyOptional()
+  recordingUrl?: string | null;
+
+  @ApiPropertyOptional()
+  recordingDurationSeconds?: number | null;
+
   @ApiProperty()
   lastEventAt: Date;
 

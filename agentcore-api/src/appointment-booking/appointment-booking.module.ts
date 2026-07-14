@@ -37,6 +37,10 @@ import { AppointmentReminderDeliveryService } from './appointment-reminder-deliv
     AppointmentTimezoneService,
     AppointmentCalendarService,
   ],
-  exports: [AppointmentBookingService, AppointmentCalendarService],
+  exports: [
+    AppointmentBookingService,
+    AppointmentCalendarService,
+    AppointmentReminderDeliveryService,
+  ],
 })
 export class AppointmentBookingModule {}

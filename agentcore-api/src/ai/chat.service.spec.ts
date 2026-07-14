@@ -39,6 +39,29 @@ function createService(
 }
 
 describe('ChatService safety boundaries', () => {
+  it('detects non-Latin customer languages without an extra provider call', async () => {
+    const completion = jest.fn();
+    const service = createService(completion, false);
+
+    await expect(
+      service.detectLanguage('org-a', 'मुझे सहायता चाहिए', 'en'),
+    ).resolves.toBe('hi');
+    expect(completion).not.toHaveBeenCalled();
+  });
+
+  it('uses the configured model to detect ambiguous Latin-script languages', async () => {
+    const completion = jest.fn().mockResolvedValue({
+      answer: 'es',
+      model: 'chat-model',
+      adapter: 'openai',
+    });
+    const service = createService(completion);
+
+    await expect(
+      service.detectLanguage('org-a', 'Necesito ayuda', 'en'),
+    ).resolves.toBe('es');
+  });
+
   it('uses a safe fallback by default when a provider fails', async () => {
     const service = createService(
       jest.fn().mockRejectedValue(new Error('provider unavailable')),

@@ -44,6 +44,32 @@ export class WhatsAppConfigResponseDto {
   settings: Record<string, unknown>;
 }
 
+export class WhatsAppTemplateResponseDto {
+  @ApiProperty()
+  id: string;
+
+  @ApiProperty()
+  configId: string;
+
+  @ApiProperty()
+  name: string;
+
+  @ApiProperty()
+  language: string;
+
+  @ApiProperty()
+  status: string;
+
+  @ApiPropertyOptional()
+  category?: string | null;
+
+  @ApiProperty()
+  components: unknown[];
+
+  @ApiProperty()
+  syncedAt: Date;
+}
+
 export class WhatsAppMessageResponseDto {
   @ApiProperty()
   id: string;

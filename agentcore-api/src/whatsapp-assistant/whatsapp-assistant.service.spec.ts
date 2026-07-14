@@ -3,7 +3,10 @@ import { WhatsAppAssistantConfig } from '@prisma/client';
 import { createHmac } from 'crypto';
 import { WhatsAppAssistantService } from './whatsapp-assistant.service';
 
-function createService(prisma: Record<string, unknown> = {}) {
+function createService(
+  prisma: Record<string, unknown> = {},
+  rateLimit: Record<string, unknown> = { consume: jest.fn() },
+) {
   return new WhatsAppAssistantService(
     {} as never,
     {} as never,
@@ -13,7 +16,12 @@ function createService(prisma: Record<string, unknown> = {}) {
     { sendText: jest.fn() } as never,
     prisma as never,
     { enqueue: jest.fn(), isEnabled: () => true } as never,
-    { get: () => 'test' } as never,
+    {
+      get: (key: string, fallback?: unknown) =>
+        key === 'NODE_ENV' ? 'test' : fallback,
+    } as never,
+    {} as never,
+    rateLimit as never,
   );
 }
 
@@ -23,6 +31,49 @@ const signedConfig = {
 } as WhatsAppAssistantConfig;
 
 describe('WhatsAppAssistantService hardening', () => {
+  it('selects an approved template using the detected conversation locale', async () => {
+    const service = createService({
+      whatsAppTemplate: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: 'en', name: 'order_update', language: 'en_US' },
+          { id: 'hi', name: 'order_update', language: 'hi' },
+        ]),
+      },
+    }) as unknown as {
+      selectApprovedTemplate(
+        config: WhatsAppAssistantConfig,
+        name: string,
+        requestedLanguage: string | undefined,
+        conversationLocale: string,
+      ): Promise<{ language: string }>;
+    };
+
+    await expect(
+      service.selectApprovedTemplate(
+        { id: 'config-1', defaultLocale: 'en_US' } as WhatsAppAssistantConfig,
+        'order_update',
+        undefined,
+        'hi',
+      ),
+    ).resolves.toMatchObject({ language: 'hi' });
+  });
+
+  it('rate limits valid webhook traffic by config and IP', async () => {
+    const consume = jest.fn().mockResolvedValue(undefined);
+    const service = createService({}, { consume }) as unknown as {
+      limitWebhook(configId: string, clientIp: string): Promise<void>;
+    };
+
+    await service.limitWebhook('config-1', '203.0.113.10');
+
+    expect(consume).toHaveBeenCalledTimes(2);
+    expect(consume).toHaveBeenCalledWith(
+      'whatsapp-webhook:config:config-1',
+      expect.any(Number),
+      expect.any(Number),
+    );
+  });
+
   it('accepts only an exact X-Hub-Signature-256 HMAC', () => {
     const service = createService() as unknown as {
       assertWebhookSignature(

@@ -30,23 +30,30 @@ export class VoiceOutboundService {
     content: string;
   }): Promise<VoiceProviderActionResult> {
     if (this.shouldUseLiveTwilio(input.config)) {
-      const gatherUrl = this.getTwilioCallbackUrl(
-        input.config,
-        'twilioGatherUrl',
-      );
-      if (!gatherUrl) {
-        throw new ServiceUnavailableException(
-          'settings.twilioGatherUrl is required for an interactive Twilio call',
-        );
-      }
       return this.updateTwilioCall({
         config: input.config,
         providerCallId: input.providerCallId,
-        twiml: this.gatherTwiml(input.content, gatherUrl),
+        twiml: this.buildGatherTwiml(input.config, input.content),
         actionPrefix: 'twilio-tts',
       });
     }
 
+    return this.mockSpeakText(input);
+  }
+
+  async hangupCall(input: {
+    config: VoiceReceptionistConfig;
+    providerCallId?: string | null;
+    content: string;
+  }): Promise<VoiceProviderActionResult> {
+    if (this.shouldUseLiveTwilio(input.config)) {
+      return this.updateTwilioCall({
+        config: input.config,
+        providerCallId: input.providerCallId,
+        twiml: this.buildCloseTwiml(input.config, input.content),
+        actionPrefix: 'twilio-hangup',
+      });
+    }
     return this.mockSpeakText(input);
   }
 
@@ -55,19 +62,10 @@ export class VoiceOutboundService {
     providerCallId?: string | null;
   }): Promise<VoiceProviderActionResult> {
     if (this.shouldUseLiveTwilio(input.config)) {
-      const gatherUrl = this.getTwilioCallbackUrl(
-        input.config,
-        'twilioGatherUrl',
-      );
-      if (!gatherUrl) {
-        throw new ServiceUnavailableException(
-          'settings.twilioGatherUrl is required to interrupt Twilio playback',
-        );
-      }
       return this.updateTwilioCall({
         config: input.config,
         providerCallId: input.providerCallId,
-        twiml: this.gatherTwiml('', gatherUrl),
+        twiml: this.buildGatherTwiml(input.config, ''),
         actionPrefix: 'twilio-interrupt',
       });
     }
@@ -91,7 +89,7 @@ export class VoiceOutboundService {
       return this.updateTwilioCall({
         config: input.config,
         providerCallId: input.providerCallId,
-        twiml: `<Response><Dial timeout="20">${this.escapeTwiml(input.transferTo)}</Dial></Response>`,
+        twiml: this.buildTransferTwiml(input.config, input.transferTo),
         actionPrefix: 'twilio-transfer',
       });
     }
@@ -104,19 +102,10 @@ export class VoiceOutboundService {
     providerCallId?: string | null;
   }): Promise<VoiceProviderActionResult> {
     if (this.shouldUseLiveTwilio(input.config)) {
-      const settings = this.toRecord(input.config.settings);
-      const prompt =
-        typeof settings.voicemailPrompt === 'string'
-          ? settings.voicemailPrompt
-          : 'Please leave a voicemail after the tone.';
-      const maxLength =
-        typeof settings.voicemailMaxLengthSeconds === 'number'
-          ? Math.min(600, Math.max(10, settings.voicemailMaxLengthSeconds))
-          : 120;
       return this.updateTwilioCall({
         config: input.config,
         providerCallId: input.providerCallId,
-        twiml: `<Response><Say>${this.escapeTwiml(prompt)}</Say><Record maxLength="${maxLength}" playBeep="true" /></Response>`,
+        twiml: this.buildVoicemailTwiml(input.config),
         actionPrefix: 'twilio-voicemail',
       });
     }
@@ -257,18 +246,110 @@ export class VoiceOutboundService {
       .replace(/'/g, '&apos;');
   }
 
-  private gatherTwiml(content: string, gatherUrl: string): string {
-    const prompt = content ? `<Say>${this.escapeTwiml(content)}</Say>` : '';
-    return `<Response><Gather input="speech dtmf" action="${this.escapeTwiml(gatherUrl)}" method="POST" speechTimeout="auto" actionOnEmptyResult="true">${prompt}</Gather></Response>`;
+  buildGatherTwiml(config: VoiceReceptionistConfig, content: string): string {
+    const gatherUrl = this.getTwilioCallbackUrl(
+      config,
+      'twilioGatherUrl',
+      'gather',
+    );
+    if (!gatherUrl) {
+      throw new ServiceUnavailableException(
+        'VOICE_WEBHOOK_PUBLIC_BASE_URL or settings.twilioGatherUrl is required',
+      );
+    }
+    const prompt = content ? this.sayTwiml(config, content) : '';
+    return `<Response><Gather input="speech dtmf" action="${this.escapeTwiml(gatherUrl)}" method="POST" speechTimeout="auto" actionOnEmptyResult="true">${prompt}</Gather>${this.sayTwiml(config, 'I did not hear anything. Goodbye.')}<Hangup/></Response>`;
+  }
+
+  buildTransferTwiml(
+    config: VoiceReceptionistConfig,
+    transferTo: string,
+  ): string {
+    const callbackUrl = this.getTwilioCallbackUrl(
+      config,
+      'twilioDialCallbackUrl',
+      'dial',
+    );
+    if (!callbackUrl) {
+      throw new ServiceUnavailableException(
+        'VOICE_WEBHOOK_PUBLIC_BASE_URL or settings.twilioDialCallbackUrl is required',
+      );
+    }
+    const action = ` action="${this.escapeTwiml(callbackUrl)}" method="POST"`;
+    return `<Response><Dial timeout="20" answerOnBridge="true"${action}>${this.escapeTwiml(transferTo)}</Dial></Response>`;
+  }
+
+  buildVoicemailTwiml(config: VoiceReceptionistConfig): string {
+    const settings = this.toRecord(config.settings);
+    const prompt =
+      typeof settings.voicemailPrompt === 'string'
+        ? settings.voicemailPrompt
+        : 'Please leave a voicemail after the tone.';
+    const maxLength =
+      typeof settings.voicemailMaxLengthSeconds === 'number'
+        ? Math.min(600, Math.max(10, settings.voicemailMaxLengthSeconds))
+        : 120;
+    const callbackUrl = this.getTwilioCallbackUrl(
+      config,
+      'twilioRecordingCallbackUrl',
+      'recording',
+    );
+    if (!callbackUrl) {
+      throw new ServiceUnavailableException(
+        'VOICE_WEBHOOK_PUBLIC_BASE_URL or settings.twilioRecordingCallbackUrl is required',
+      );
+    }
+    const callback = this.escapeTwiml(callbackUrl);
+    return `<Response>${this.sayTwiml(config, prompt)}<Record maxLength="${maxLength}" playBeep="true" action="${callback}" method="POST" recordingStatusCallback="${callback}" recordingStatusCallbackMethod="POST" transcribe="true" transcribeCallback="${callback}"/><Hangup/></Response>`;
+  }
+
+  buildCloseTwiml(config: VoiceReceptionistConfig, content: string): string {
+    return `<Response>${this.sayTwiml(config, content)}<Hangup/></Response>`;
+  }
+
+  private sayTwiml(config: VoiceReceptionistConfig, content: string): string {
+    const voice = config.ttsVoice
+      ? ` voice="${this.escapeTwiml(this.twilioVoice(config.ttsVoice))}"`
+      : '';
+    const language = ` language="${this.escapeTwiml(this.twilioLanguage(config.defaultLocale))}"`;
+    return `<Say${voice}${language}>${this.escapeTwiml(content)}</Say>`;
+  }
+
+  private twilioVoice(voice: string): string {
+    const aliases: Record<string, string> = {
+      alloy: 'Polly.Joanna',
+      echo: 'Polly.Matthew',
+      fable: 'Polly.Amy',
+      nova: 'Polly.Joanna',
+      onyx: 'Polly.Matthew',
+      shimmer: 'Polly.Joanna',
+    };
+    return aliases[voice] ?? voice;
+  }
+
+  private twilioLanguage(locale: string): string {
+    const aliases: Record<string, string> = {
+      en: 'en-US',
+      es: 'es-ES',
+      fr: 'fr-FR',
+      de: 'de-DE',
+      hi: 'hi-IN',
+    };
+    return aliases[locale] ?? locale;
   }
 
   private getTwilioCallbackUrl(
     config: VoiceReceptionistConfig,
     key: string,
+    callback: 'gather' | 'dial' | 'recording',
   ): string | undefined {
     const value = this.toRecord(config.settings)[key];
-    return typeof value === 'string' && /^https:\/\//.test(value)
-      ? value
+    if (typeof value === 'string' && /^https:\/\//.test(value)) return value;
+    const baseUrl = this.configService
+      .get<string>('VOICE_WEBHOOK_PUBLIC_BASE_URL')
+      ?.replace(/\/$/, '');
+    return baseUrl
+      ? `${baseUrl}/api/v1/voice-receptionist/webhook/${config.id}/twilio/${callback}`
       : undefined;
   }
 

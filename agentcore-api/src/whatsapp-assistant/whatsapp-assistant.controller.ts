@@ -8,6 +8,7 @@ import {
   Post,
   Query,
   Req,
+  StreamableFile,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -26,6 +27,8 @@ import {
   CreateWhatsAppConfigDto,
   ListWhatsAppConversationsDto,
   SendWhatsAppAgentMessageDto,
+  SendWhatsAppMediaMessageDto,
+  SendWhatsAppTemplateMessageDto,
   UpdateWhatsAppConfigDto,
   UpdateWhatsAppConversationStatusDto,
 } from './dto/whatsapp-assistant.dto';
@@ -34,12 +37,14 @@ import {
   WhatsAppConversationListResponseDto,
   WhatsAppConversationResponseDto,
   WhatsAppInboundWebhookResponseDto,
+  WhatsAppTemplateResponseDto,
 } from './dto/whatsapp-assistant-response.dto';
 import { WhatsAppAssistantService } from './whatsapp-assistant.service';
 
 type RawBodyRequest = {
   rawBody?: Buffer;
   headers: Record<string, string | string[] | undefined>;
+  ip?: string;
 };
 
 @ApiTags('WhatsApp Assistant')
@@ -87,6 +92,29 @@ export class WhatsAppAssistantController {
     return this.whatsAppAssistantService.updateConfig(user, id, body);
   }
 
+  @Get('configs/:id/templates')
+  @Roles('super_admin', 'org_admin', 'product_admin', 'agent')
+  @ApiOperation({ summary: 'List synced WhatsApp templates' })
+  @ApiOkResponse({ type: WhatsAppTemplateResponseDto, isArray: true })
+  listTemplates(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.whatsAppAssistantService.listTemplates(user, id);
+  }
+
+  @Post('configs/:id/templates/sync')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('whatsapp_assistant', 'configure')
+  @ApiOperation({ summary: 'Sync approved templates from Meta' })
+  @ApiOkResponse({ type: WhatsAppTemplateResponseDto, isArray: true })
+  syncTemplates(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.whatsAppAssistantService.syncTemplates(user, id);
+  }
+
   @Get('conversations')
   @ApiOperation({ summary: 'List WhatsApp conversations' })
   @ApiOkResponse({ type: WhatsAppConversationListResponseDto })
@@ -107,6 +135,20 @@ export class WhatsAppAssistantController {
     return this.whatsAppAssistantService.getConversation(user, id);
   }
 
+  @Get('messages/:id/media')
+  @ApiOperation({ summary: 'Download securely stored inbound WhatsApp media' })
+  async getMessageMedia(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    const media = await this.whatsAppAssistantService.getMessageMedia(user, id);
+    const safeName = media.fileName.replace(/[^a-zA-Z0-9._-]+/g, '-');
+    return new StreamableFile(media.buffer, {
+      type: media.mimeType,
+      disposition: `attachment; filename="${safeName}"`,
+    });
+  }
+
   @Post('conversations/:id/agent-messages')
   @ApiOperation({ summary: 'Send a human agent WhatsApp reply' })
   @ApiCreatedResponse({ type: WhatsAppInboundWebhookResponseDto })
@@ -116,6 +158,28 @@ export class WhatsAppAssistantController {
     @Body() body: SendWhatsAppAgentMessageDto,
   ) {
     return this.whatsAppAssistantService.sendAgentMessage(user, id, body);
+  }
+
+  @Post('conversations/:id/template-messages')
+  @ApiOperation({ summary: 'Send an approved WhatsApp template message' })
+  sendTemplateMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: SendWhatsAppTemplateMessageDto,
+  ) {
+    return this.whatsAppAssistantService.sendTemplateMessage(user, id, body);
+  }
+
+  @Post('conversations/:id/media-messages')
+  @ApiOperation({
+    summary: 'Send a WhatsApp media message inside the 24h window',
+  })
+  sendMediaMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: SendWhatsAppMediaMessageDto,
+  ) {
+    return this.whatsAppAssistantService.sendMediaMessage(user, id, body);
   }
 
   @Patch('conversations/:id/assignment')
@@ -194,6 +258,7 @@ export class WhatsAppAssistantWebhookController {
       body,
       request.rawBody,
       request.headers,
+      request.ip,
     );
   }
 }
