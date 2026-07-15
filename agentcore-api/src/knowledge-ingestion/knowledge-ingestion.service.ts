@@ -87,6 +87,7 @@ export class KnowledgeIngestionService {
 
       for (const document of documents) {
         const chunks = this.chunker.chunk(document.contentText ?? '');
+        const documentMetadata = this.toRecord(document.metadata);
 
         await this.prisma.knowledgeChunk.deleteMany({
           where: { documentId: document.id },
@@ -113,6 +114,14 @@ export class KnowledgeIngestionService {
               metadata: this.toJsonObject({
                 sourceType: source.type,
                 uri: document.uri,
+                pageNumber:
+                  typeof documentMetadata.pageNumber === 'number'
+                    ? documentMetadata.pageNumber
+                    : undefined,
+                extractionMethod:
+                  typeof documentMetadata.extractionMethod === 'string'
+                    ? documentMetadata.extractionMethod
+                    : undefined,
               }),
               embeddingModel: embedding.model,
               embeddingProvider: embedding.provider,
@@ -367,39 +376,86 @@ export class KnowledgeIngestionService {
         buffer: fileBuffer,
         fileName: source.fileName,
         mimeType: source.mimeType,
+        organizationId: source.organizationId,
       });
 
       await this.prisma.knowledgeDocument.deleteMany({
         where: { sourceId: source.id },
       });
 
-      const document = await this.prisma.knowledgeDocument.create({
-        data: {
-          organizationId: source.organizationId,
-          sourceId: source.id,
-          title: source.fileName ?? source.name,
-          sensitivityLevel: source.sensitivityLevel,
-          productVisibility: source.productVisibility,
-          categories: source.categories,
-          isQuarantined: source.isQuarantined,
-          uri: source.storageKey,
-          contentText: extracted.text,
-          metadata: this.toJsonObject({
-            ...this.toRecord(source.metadata),
-            ...extracted.metadata,
-            sourceType: source.type,
-            mimeType: source.mimeType,
-            fileName: source.fileName,
-            storageProvider: source.storageProvider,
-            storageBucket: source.storageBucket,
-            storageKey: source.storageKey,
-            checksumSha256: source.checksumSha256,
-            extractedAt: new Date().toISOString(),
-          }),
-        },
-      });
+      source.metadata = this.mergeMetadata(source.metadata, {
+        extraction: extracted.metadata,
+      }) as Prisma.JsonObject;
+      const baseMetadata = {
+        sourceType: source.type,
+        mimeType: source.mimeType,
+        fileName: source.fileName,
+        storageProvider: source.storageProvider,
+        storageBucket: source.storageBucket,
+        storageKey: source.storageKey,
+        checksumSha256: source.checksumSha256,
+        extractedAt: new Date().toISOString(),
+      };
+      if (!extracted.pages?.length) {
+        const document = await this.prisma.knowledgeDocument.create({
+          data: {
+            organizationId: source.organizationId,
+            sourceId: source.id,
+            title: source.fileName ?? source.name,
+            sensitivityLevel: source.sensitivityLevel,
+            productVisibility: source.productVisibility,
+            categories: source.categories,
+            isQuarantined: source.isQuarantined,
+            uri: source.storageKey,
+            contentText: extracted.text,
+            metadata: this.toJsonObject({
+              ...baseMetadata,
+              ...extracted.metadata,
+            }),
+          },
+        });
+        return [document];
+      }
 
-      return [document];
+      const documents: KnowledgeDocument[] = [];
+      const batchSize = 100;
+      for (
+        let offset = 0;
+        offset < extracted.pages.length;
+        offset += batchSize
+      ) {
+        const pageBatch = extracted.pages.slice(offset, offset + batchSize);
+        const created = await this.prisma.$transaction(
+          pageBatch.map((page) =>
+            this.prisma.knowledgeDocument.create({
+              data: {
+                organizationId: source.organizationId,
+                sourceId: source.id,
+                title: `${source.fileName ?? source.name} - Page ${page.pageNumber}`,
+                sensitivityLevel: source.sensitivityLevel,
+                productVisibility: source.productVisibility,
+                categories: source.categories,
+                isQuarantined: source.isQuarantined,
+                uri: `${source.storageKey}#page=${page.pageNumber}`,
+                contentText: page.text,
+                metadata: this.toJsonObject({
+                  ...baseMetadata,
+                  pageNumber: page.pageNumber,
+                  extractionMethod: page.extractionMethod,
+                  ocrConfidence: page.confidence,
+                  ocrProvider: page.provider,
+                  ocrModel: page.model,
+                  ocrCacheHit: page.cacheHit,
+                  ...page.metadata,
+                }),
+              },
+            }),
+          ),
+        );
+        documents.push(...created);
+      }
+
+      return documents;
     }
 
     const document =

@@ -21,6 +21,9 @@ model Organization {
   knowledgeSourceVersions         KnowledgeSourceVersion[]
   knowledgeDocuments              KnowledgeDocument[]
   knowledgeChunks                 KnowledgeChunk[]
+  knowledgeOcrPageCache           KnowledgeOcrPageCache[]
+  knowledgeOcrProviders           KnowledgeOcrProviderConfig[]
+  knowledgeExtractionConfig       KnowledgeExtractionConfig?
   customerChatConversations       CustomerChatConversation[]
   customerChatMessages            CustomerChatMessage[]
   customerChatWidgetConfigs       CustomerChatWidgetConfig[]

@@ -3,34 +3,77 @@ import { ConfigService } from '@nestjs/config';
 import { PDFParse } from 'pdf-parse';
 import * as mammoth from 'mammoth';
 import * as ExcelJS from 'exceljs';
+import {
+  KnowledgeExtractionRuntimePolicy,
+  KnowledgeOcrPageResult,
+  KnowledgeOcrService,
+} from './knowledge-ocr.service';
+
+export interface ExtractedKnowledgePage {
+  pageNumber: number;
+  text: string;
+  extractionMethod: 'native' | 'ocr' | 'unprocessed';
+  confidence: number | null;
+  provider: string | null;
+  model: string | null;
+  cacheHit: boolean;
+  metadata: Record<string, unknown>;
+}
 
 export interface ExtractedKnowledgeFile {
   text: string;
   metadata: Record<string, unknown>;
+  pages?: ExtractedKnowledgePage[];
 }
 
 @Injectable()
 export class KnowledgeFileExtractorService {
   private readonly maxCharacters: number;
+  private readonly maxPdfPages: number;
+  private readonly nativeTextMinimumCharacters: number;
+  private readonly nativeTextMinimumRatio: number;
+  private readonly ocrPageConcurrency: number;
+  private readonly ocrRenderWidth: number;
 
-  constructor(@Optional() private readonly configService?: ConfigService) {
+  constructor(
+    @Optional() private readonly configService?: ConfigService,
+    @Optional() private readonly ocrService?: KnowledgeOcrService,
+  ) {
     this.maxCharacters =
       this.configService?.get<number>('KNOWLEDGE_MAX_EXTRACTED_CHARACTERS') ??
-      5_000_000;
+      25_000_000;
+    this.maxPdfPages =
+      this.configService?.get<number>('KNOWLEDGE_PDF_MAX_PAGES') ?? 5_000;
+    this.nativeTextMinimumCharacters =
+      this.configService?.get<number>(
+        'KNOWLEDGE_PDF_NATIVE_TEXT_MIN_CHARACTERS_PER_PAGE',
+      ) ?? 40;
+    this.nativeTextMinimumRatio =
+      this.configService?.get<number>(
+        'KNOWLEDGE_PDF_NATIVE_TEXT_MIN_ALPHANUMERIC_RATIO',
+      ) ?? 0.5;
+    this.ocrPageConcurrency =
+      this.configService?.get<number>('KNOWLEDGE_OCR_PAGE_CONCURRENCY') ?? 4;
+    this.ocrRenderWidth =
+      this.configService?.get<number>('KNOWLEDGE_OCR_RENDER_WIDTH') ?? 1_800;
   }
 
   async extract(input: {
     buffer: Buffer;
     fileName?: string | null;
     mimeType?: string | null;
+    organizationId?: string;
   }): Promise<ExtractedKnowledgeFile> {
+    const policy = this.ocrService
+      ? await this.ocrService.resolveRuntimePolicy(input.organizationId)
+      : this.defaultRuntimePolicy();
     const mimeType = input.mimeType?.toLowerCase() ?? '';
 
     if (
       mimeType === 'application/pdf' ||
       this.hasExtension(input.fileName, '.pdf')
     ) {
-      return this.extractPdf(input.buffer);
+      return this.extractPdf(input, policy);
     }
 
     if (
@@ -42,6 +85,7 @@ export class KnowledgeFileExtractorService {
       return {
         text: this.assertWithinLimit(
           this.cleanText(input.buffer.toString('utf8')),
+          policy.maxExtractedCharacters,
         ),
         metadata: { extractor: 'text' },
       };
@@ -52,7 +96,7 @@ export class KnowledgeFileExtractorService {
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
       this.hasExtension(input.fileName, '.docx')
     ) {
-      return this.extractDocx(input.buffer);
+      return this.extractDocx(input.buffer, policy.maxExtractedCharacters);
     }
 
     if (
@@ -60,7 +104,10 @@ export class KnowledgeFileExtractorService {
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
       this.hasExtension(input.fileName, '.xlsx')
     ) {
-      return this.extractSpreadsheet(input.buffer);
+      return this.extractSpreadsheet(
+        input.buffer,
+        policy.maxExtractedCharacters,
+      );
     }
 
     throw new BadRequestException(
@@ -68,24 +115,134 @@ export class KnowledgeFileExtractorService {
     );
   }
 
-  private async extractPdf(buffer: Buffer): Promise<ExtractedKnowledgeFile> {
-    const parser = new PDFParse({ data: buffer });
+  private async extractPdf(
+    input: {
+      buffer: Buffer;
+      fileName?: string | null;
+      organizationId?: string;
+    },
+    policy: KnowledgeExtractionRuntimePolicy,
+  ): Promise<ExtractedKnowledgeFile> {
+    const parser = new PDFParse({ data: input.buffer });
 
     try {
       const result = await parser.getText({
-        pageJoiner: '\n\n',
+        pageJoiner: '',
       });
-      const text = this.cleanText(result.text);
-
-      if (text.length < 10) {
-        return this.extractPdfWithOcr(buffer, result.total);
+      if (result.total > policy.maxPdfPages) {
+        throw new BadRequestException(
+          `PDF exceeds the ${policy.maxPdfPages} page ingestion limit`,
+        );
       }
 
+      const nativePages = result.pages?.length
+        ? result.pages.map((page) => ({
+            pageNumber: page.num,
+            text: this.cleanText(page.text),
+          }))
+        : [{ pageNumber: 1, text: this.cleanText(result.text) }];
+      const mode = policy.mode;
+      const pages: ExtractedKnowledgePage[] = nativePages.map((page) => {
+        const nativeTextUsable = this.hasUsableNativeText(page.text, policy);
+        const useNative = mode !== 'always' && nativeTextUsable;
+        return {
+          pageNumber: page.pageNumber,
+          text: useNative ? page.text : '',
+          extractionMethod: useNative ? 'native' : 'unprocessed',
+          confidence: useNative ? 1 : null,
+          provider: useNative ? 'pdf-parse' : null,
+          model: null,
+          cacheHit: false,
+          metadata: {
+            nativeCharacterCount: page.text.length,
+            nativeAlphanumericRatio: this.alphanumericRatio(page.text),
+          },
+        };
+      });
+      const pagesNeedingOcr = pages.filter(
+        (page) => page.extractionMethod === 'unprocessed',
+      );
+
+      if (pagesNeedingOcr.length && this.ocrService?.isConfigured(policy)) {
+        for (
+          let offset = 0;
+          offset < pagesNeedingOcr.length;
+          offset += policy.ocrPageConcurrency
+        ) {
+          const batch = pagesNeedingOcr.slice(
+            offset,
+            offset + policy.ocrPageConcurrency,
+          );
+          const screenshots = await parser.getScreenshot({
+            partial: batch.map((page) => page.pageNumber),
+            desiredWidth: policy.ocrRenderWidth,
+            imageDataUrl: false,
+            imageBuffer: true,
+          });
+          const screenshotByPage = new Map(
+            screenshots.pages.map((page) => [page.pageNumber, page]),
+          );
+          const recognized = await Promise.all(
+            batch.map(async (page) => {
+              const screenshot = screenshotByPage.get(page.pageNumber);
+              if (!screenshot?.data?.length) {
+                throw new BadRequestException(
+                  `Could not render PDF page ${page.pageNumber} for OCR`,
+                );
+              }
+              return this.ocrService!.recognizePage({
+                organizationId: input.organizationId,
+                image: Buffer.from(screenshot.data),
+                pageNumber: page.pageNumber,
+                documentName: input.fileName,
+                policy,
+              });
+            }),
+          );
+          recognized.forEach((ocr, index) =>
+            this.applyOcrResult(batch[index], ocr),
+          );
+        }
+      }
+
+      const extractedPages = pages.filter((page) => page.text.length > 0);
+      const text = this.assertWithinLimit(
+        extractedPages
+          .map(
+            (page) => `[Page ${page.pageNumber}]\n${this.cleanText(page.text)}`,
+          )
+          .join('\n\n'),
+        policy.maxExtractedCharacters,
+      );
+      if (!text) {
+        throw new BadRequestException(
+          pagesNeedingOcr.length
+            ? 'PDF has no extractable text. Configure an OCR provider for scanned pages.'
+            : 'PDF contains no extractable text',
+        );
+      }
+
+      const ocrPages = pages.filter((page) => page.extractionMethod === 'ocr');
+      const emptyOcrPages = ocrPages.filter((page) => page.text.length === 0);
+      const unprocessedPages = pages.filter(
+        (page) => page.extractionMethod === 'unprocessed',
+      );
       return {
-        text: this.assertWithinLimit(text),
+        text,
+        pages: extractedPages,
         metadata: {
-          extractor: 'pdf-parse',
+          extractor: ocrPages.length ? 'hybrid-pdf' : 'pdf-parse',
           pageCount: result.total,
+          extractedPageCount: extractedPages.length,
+          nativePageCount: pages.filter(
+            (page) => page.extractionMethod === 'native',
+          ).length,
+          ocrPageCount: ocrPages.length,
+          ocrCacheHitCount: ocrPages.filter((page) => page.cacheHit).length,
+          emptyOcrPageCount: emptyOcrPages.length,
+          emptyOcrPages: emptyOcrPages.map((page) => page.pageNumber),
+          unprocessedPageCount: unprocessedPages.length,
+          unprocessedPages: unprocessedPages.map((page) => page.pageNumber),
         },
       };
     } finally {
@@ -93,14 +250,17 @@ export class KnowledgeFileExtractorService {
     }
   }
 
-  private async extractDocx(buffer: Buffer): Promise<ExtractedKnowledgeFile> {
+  private async extractDocx(
+    buffer: Buffer,
+    maxCharacters: number,
+  ): Promise<ExtractedKnowledgeFile> {
     const result = await mammoth.extractRawText({ buffer });
     const text = this.cleanText(result.value);
     if (!text) {
       throw new BadRequestException('DOCX contains no extractable text');
     }
     return {
-      text: this.assertWithinLimit(text),
+      text: this.assertWithinLimit(text, maxCharacters),
       metadata: {
         extractor: 'mammoth',
         warnings: result.messages.map((message) => message.message),
@@ -110,6 +270,7 @@ export class KnowledgeFileExtractorService {
 
   private async extractSpreadsheet(
     buffer: Buffer,
+    maxCharacters: number,
   ): Promise<ExtractedKnowledgeFile> {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(
@@ -140,7 +301,7 @@ export class KnowledgeFileExtractorService {
       );
     }
     return {
-      text: this.assertWithinLimit(text),
+      text: this.assertWithinLimit(text, maxCharacters),
       metadata: {
         extractor: 'exceljs',
         sheetCount: workbook.worksheets.length,
@@ -159,57 +320,45 @@ export class KnowledgeFileExtractorService {
       .trim();
   }
 
-  private async extractPdfWithOcr(
-    buffer: Buffer,
-    parsedPageCount: number,
-  ): Promise<ExtractedKnowledgeFile> {
-    const endpoint = this.configService?.get<string>('KNOWLEDGE_OCR_ENDPOINT');
-    if (!endpoint) {
-      throw new BadRequestException(
-        'PDF appears to be scanned. Configure KNOWLEDGE_OCR_ENDPOINT to enable OCR.',
-      );
-    }
-    const form = new FormData();
-    form.set(
-      'file',
-      new Blob([Uint8Array.from(buffer)], { type: 'application/pdf' }),
-      'scan.pdf',
-    );
-    const apiKey = this.configService?.get<string>('KNOWLEDGE_OCR_API_KEY');
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
-      body: form,
-      signal: AbortSignal.timeout(
-        this.configService?.get<number>('KNOWLEDGE_OCR_TIMEOUT_MS') ?? 60_000,
-      ),
-    });
-    if (!response.ok) {
-      throw new BadRequestException(
-        `OCR service returned HTTP ${response.status}`,
-      );
-    }
-    const result = (await response.json()) as {
-      text?: string;
-      pageCount?: number;
-    };
-    const text = this.assertWithinLimit(this.cleanText(result.text ?? ''));
-    if (!text) {
-      throw new BadRequestException('OCR service returned no readable text');
-    }
-    return {
-      text,
-      metadata: {
-        extractor: 'ocr',
-        pageCount: result.pageCount ?? parsedPageCount,
-      },
-    };
+  private applyOcrResult(
+    page: ExtractedKnowledgePage,
+    ocr: KnowledgeOcrPageResult,
+  ) {
+    page.text = this.cleanText(ocr.text);
+    page.extractionMethod = 'ocr';
+    page.confidence = ocr.confidence;
+    page.provider = ocr.provider;
+    page.model = ocr.model;
+    page.cacheHit = ocr.cacheHit;
+    page.metadata = { ...page.metadata, ...ocr.metadata };
   }
 
-  private assertWithinLimit(text: string): string {
-    if (text.length > this.maxCharacters) {
+  private hasUsableNativeText(
+    text: string,
+    policy: KnowledgeExtractionRuntimePolicy,
+  ): boolean {
+    return (
+      text.length >= policy.nativeTextMinimumCharacters &&
+      this.alphanumericRatio(text) >= policy.nativeTextMinimumRatio
+    );
+  }
+
+  private alphanumericRatio(text: string): number {
+    const nonWhitespace = text.replace(/\s/g, '');
+    if (!nonWhitespace.length) return 0;
+    return (
+      (nonWhitespace.match(/[\p{L}\p{N}]/gu)?.length ?? 0) /
+      nonWhitespace.length
+    );
+  }
+
+  private assertWithinLimit(
+    text: string,
+    maxCharacters = this.maxCharacters,
+  ): string {
+    if (text.length > maxCharacters) {
       throw new BadRequestException(
-        `Extracted content exceeds the ${this.maxCharacters} character limit`,
+        `Extracted content exceeds the ${maxCharacters} character limit`,
       );
     }
     return text;
@@ -217,5 +366,23 @@ export class KnowledgeFileExtractorService {
 
   private hasExtension(fileName: string | null | undefined, extension: string) {
     return fileName?.toLowerCase().endsWith(extension) ?? false;
+  }
+
+  private defaultRuntimePolicy(): KnowledgeExtractionRuntimePolicy {
+    return {
+      mode: 'disabled',
+      primary: null,
+      fallback: null,
+      minimumConfidence: 0.75,
+      timeoutMs: 60_000,
+      maxRetries: 2,
+      nativeTextMinimumCharacters: this.nativeTextMinimumCharacters,
+      nativeTextMinimumRatio: this.nativeTextMinimumRatio,
+      ocrPageConcurrency: this.ocrPageConcurrency,
+      ocrRenderWidth: this.ocrRenderWidth,
+      maxPdfPages: this.maxPdfPages,
+      maxExtractedCharacters: this.maxCharacters,
+      pipelineSignature: 'disabled',
+    };
   }
 }

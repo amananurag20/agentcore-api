@@ -8,6 +8,9 @@ function createService(config: Record<string, unknown>) {
   } as unknown as ConfigService;
   const prisma = {
     aIProviderConfig: { findFirst: jest.fn().mockResolvedValue(null) },
+    knowledgeExtractionConfig: {
+      findUnique: jest.fn().mockResolvedValue(null),
+    },
   };
   return new EmbeddingsService(
     configService,

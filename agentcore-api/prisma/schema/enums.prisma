@@ -67,6 +67,25 @@ enum KnowledgeSourceStatus {
   failed
 }
 
+enum KnowledgeOcrMode {
+  disabled
+  fallback
+  always
+}
+
+enum KnowledgeOcrProviderType {
+  local_tesseract
+  aws_textract
+  google_document_ai
+  azure_document_intelligence
+  custom
+}
+
+enum KnowledgeOcrProviderStatus {
+  active
+  inactive
+}
+
 enum StorageProvider {
   s3
   r2

@@ -156,3 +156,76 @@ model KnowledgeChunk {
   @@index([embeddingProvider])
   @@map("knowledge_chunks")
 }
+
+model KnowledgeOcrPageCache {
+  id                String       @id @default(uuid())
+  organizationId    String       @map("organization_id")
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pageFingerprint   String       @map("page_fingerprint")
+  pipelineSignature String       @map("pipeline_signature")
+  provider          String
+  model             String?
+  confidence        Float?
+  text              String
+  metadata          Json         @default("{}")
+  hitCount          Int          @default(0) @map("hit_count")
+  lastAccessedAt    DateTime     @default(now()) @map("last_accessed_at")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  updatedAt         DateTime     @updatedAt @map("updated_at")
+
+  @@unique([organizationId, pageFingerprint, pipelineSignature])
+  @@index([organizationId, lastAccessedAt])
+  @@index([lastAccessedAt])
+  @@map("knowledge_ocr_page_cache")
+}
+
+model KnowledgeOcrProviderConfig {
+  id                 String                      @id @default(uuid())
+  organizationId     String                      @map("organization_id")
+  organization       Organization                @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name               String
+  provider           KnowledgeOcrProviderType
+  status             KnowledgeOcrProviderStatus  @default(active)
+  endpoint           String
+  apiKeyEncrypted    String?                     @map("api_key_encrypted")
+  settings           Json                        @default("{}")
+  primaryForConfigs  KnowledgeExtractionConfig[] @relation("PrimaryOcrProvider")
+  fallbackForConfigs KnowledgeExtractionConfig[] @relation("FallbackOcrProvider")
+  createdAt          DateTime                    @default(now()) @map("created_at")
+  updatedAt          DateTime                    @updatedAt @map("updated_at")
+
+  @@unique([organizationId, name])
+  @@index([organizationId, status])
+  @@index([provider])
+  @@map("knowledge_ocr_provider_configs")
+}
+
+model KnowledgeExtractionConfig {
+  id                             String                      @id @default(uuid())
+  organizationId                 String                      @unique @map("organization_id")
+  organization                   Organization                @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ocrMode                        KnowledgeOcrMode            @default(fallback) @map("ocr_mode")
+  primaryOcrProviderId           String?                     @map("primary_ocr_provider_id")
+  primaryOcrProvider             KnowledgeOcrProviderConfig? @relation("PrimaryOcrProvider", fields: [primaryOcrProviderId], references: [id], onDelete: SetNull)
+  fallbackOcrProviderId          String?                     @map("fallback_ocr_provider_id")
+  fallbackOcrProvider            KnowledgeOcrProviderConfig? @relation("FallbackOcrProvider", fields: [fallbackOcrProviderId], references: [id], onDelete: SetNull)
+  embeddingProviderId            String?                     @map("embedding_provider_id")
+  embeddingProvider              AIProviderConfig?           @relation(fields: [embeddingProviderId], references: [id], onDelete: SetNull)
+  nativeTextMinCharacters        Int                         @default(40) @map("native_text_min_characters")
+  nativeTextMinAlphanumericRatio Float                       @default(0.5) @map("native_text_min_alphanumeric_ratio")
+  ocrMinConfidence               Float                       @default(0.75) @map("ocr_min_confidence")
+  ocrTimeoutMs                   Int                         @default(60000) @map("ocr_timeout_ms")
+  ocrMaxRetries                  Int                         @default(2) @map("ocr_max_retries")
+  ocrPageConcurrency             Int                         @default(4) @map("ocr_page_concurrency")
+  ocrRenderWidth                 Int                         @default(1800) @map("ocr_render_width")
+  maxPdfPages                    Int                         @default(5000) @map("max_pdf_pages")
+  maxExtractedCharacters         Int                         @default(25000000) @map("max_extracted_characters")
+  settings                       Json                        @default("{}")
+  createdAt                      DateTime                    @default(now()) @map("created_at")
+  updatedAt                      DateTime                    @updatedAt @map("updated_at")
+
+  @@index([primaryOcrProviderId])
+  @@index([fallbackOcrProviderId])
+  @@index([embeddingProviderId])
+  @@map("knowledge_extraction_configs")
+}

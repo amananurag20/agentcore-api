@@ -123,6 +123,20 @@ export class AIProvidersService {
     const organizationId = input.organizationId
       ? this.resolveOrganizationId(currentUser, input.organizationId)
       : existing.organizationId;
+    const selectedBy = await this.prisma.knowledgeExtractionConfig.findFirst({
+      where: { embeddingProviderId: id },
+      select: { organizationId: true },
+    });
+    if (
+      selectedBy &&
+      (organizationId !== existing.organizationId ||
+        (input.status ?? existing.status) !== 'active' ||
+        !(input.embeddingModel ?? existing.embeddingModel))
+    ) {
+      throw new BadRequestException(
+        'Select a different knowledge embedding provider before moving or deactivating this provider',
+      );
+    }
     const settings = input.settings ?? this.toRecord(existing.settings);
     this.validateEmbeddingModel(
       input.embeddingModel ?? existing.embeddingModel ?? undefined,
@@ -197,6 +211,15 @@ export class AIProvidersService {
 
   async delete(currentUser: AuthenticatedUser, id: string) {
     const config = await this.findConfigForActor(currentUser, id);
+    const selectedBy = await this.prisma.knowledgeExtractionConfig.findFirst({
+      where: { embeddingProviderId: id },
+      select: { id: true },
+    });
+    if (selectedBy) {
+      throw new BadRequestException(
+        'Select a different knowledge embedding provider before deleting this provider',
+      );
+    }
     const previousEmbeddingConfig = await this.findActiveEmbeddingConfig(
       config.organizationId,
     );
@@ -265,9 +288,23 @@ export class AIProvidersService {
     }
   }
 
-  private findActiveEmbeddingConfig(
+  private async findActiveEmbeddingConfig(
     organizationId: string,
   ): Promise<AIProviderConfig | null> {
+    const selection = await this.prisma.knowledgeExtractionConfig.findUnique({
+      where: { organizationId },
+      select: { embeddingProviderId: true },
+    });
+    if (selection?.embeddingProviderId) {
+      return this.prisma.aIProviderConfig.findFirst({
+        where: {
+          id: selection.embeddingProviderId,
+          organizationId,
+          status: 'active',
+          embeddingModel: { not: null },
+        },
+      });
+    }
     return this.prisma.aIProviderConfig.findFirst({
       where: {
         organizationId,

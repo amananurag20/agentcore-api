@@ -235,6 +235,7 @@ export class WhatsAppMediaService {
           buffer,
           fileName,
           mimeType,
+          organizationId: message.organizationId,
         });
         return `Customer attachment text:\n${extracted.text.slice(0, 4_000)}`;
       } catch {

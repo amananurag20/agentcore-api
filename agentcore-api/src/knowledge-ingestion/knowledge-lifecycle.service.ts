@@ -15,6 +15,7 @@ export class KnowledgeLifecycleService
   private readonly logger = new Logger(KnowledgeLifecycleService.name);
   private timer?: NodeJS.Timeout;
   private running = false;
+  private lastOcrCacheCleanupAt = 0;
 
   constructor(
     private readonly configService: ConfigService,
@@ -71,12 +72,31 @@ export class KnowledgeLifecycleService
         queued += 1;
       }
       if (queued) this.logger.log(`Queued ${queued} website recrawls`);
+      await this.cleanupOcrCache(now);
     } catch (error) {
       this.logger.error(
         `Knowledge lifecycle scan failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
       this.running = false;
+    }
+  }
+
+  private async cleanupOcrCache(now: Date) {
+    const cleanupIntervalMs = 24 * 60 * 60_000;
+    if (now.getTime() - this.lastOcrCacheCleanupAt < cleanupIntervalMs) return;
+    const retentionDays =
+      this.configService.get<number>('KNOWLEDGE_OCR_CACHE_RETENTION_DAYS') ??
+      90;
+    const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60_000);
+    const deleted = await this.prisma.knowledgeOcrPageCache.deleteMany({
+      where: { lastAccessedAt: { lt: cutoff } },
+    });
+    this.lastOcrCacheCleanupAt = now.getTime();
+    if (deleted.count) {
+      this.logger.log(
+        `Removed ${deleted.count} expired OCR page cache entries`,
+      );
     }
   }
 }

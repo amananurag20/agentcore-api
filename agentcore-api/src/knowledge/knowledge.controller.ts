@@ -34,6 +34,7 @@ import { SearchKnowledgeDto } from './dto/search-knowledge.dto';
 import { UpdateKnowledgeSourceDto } from './dto/update-knowledge-source.dto';
 import { UploadKnowledgeFileDto } from './dto/upload-knowledge-file.dto';
 import { KnowledgeService } from './knowledge.service';
+import { KnowledgeSettingsService } from './knowledge-settings.service';
 import { InternalMemoryRetrieveDto } from './dto/internal-memory-retrieve.dto';
 import {
   CreateKnowledgeCategoryDto,
@@ -43,13 +44,85 @@ import {
 } from './dto/knowledge-taxonomy.dto';
 import { ListKnowledgeSourcesDto } from './dto/list-knowledge-sources.dto';
 import { PolicyService } from '../policy/policy.service';
+import {
+  CreateKnowledgeOcrProviderDto,
+  UpdateKnowledgeExtractionSettingsDto,
+  UpdateKnowledgeOcrProviderDto,
+} from './dto/knowledge-extraction-settings.dto';
 
 @ApiTags('Knowledge')
 @ApiBearerAuth('bearer')
 @Controller('knowledge')
 @Roles('super_admin', 'org_admin', 'product_admin')
 export class KnowledgeController {
-  constructor(private readonly knowledgeService: KnowledgeService) {}
+  constructor(
+    private readonly knowledgeService: KnowledgeService,
+    private readonly knowledgeSettingsService: KnowledgeSettingsService,
+  ) {}
+
+  @Get('settings/extraction')
+  @Roles('super_admin', 'org_admin')
+  @ApiOperation({ summary: 'Get workspace extraction and embedding policy' })
+  getExtractionSettings(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.knowledgeSettingsService.getExtractionSettings(
+      user,
+      organizationId,
+    );
+  }
+
+  @Patch('settings/extraction')
+  @Roles('super_admin', 'org_admin')
+  @ApiOperation({ summary: 'Update workspace extraction and embedding policy' })
+  updateExtractionSettings(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: UpdateKnowledgeExtractionSettingsDto,
+  ) {
+    return this.knowledgeSettingsService.updateExtractionSettings(user, body);
+  }
+
+  @Get('settings/ocr-providers')
+  @Roles('super_admin', 'org_admin')
+  @ApiOperation({ summary: 'List workspace OCR provider configs' })
+  listOcrProviders(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.knowledgeSettingsService.listOcrProviders(user, organizationId);
+  }
+
+  @Post('settings/ocr-providers')
+  @Roles('super_admin', 'org_admin')
+  @ApiOperation({ summary: 'Create a workspace OCR provider config' })
+  createOcrProvider(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateKnowledgeOcrProviderDto,
+  ) {
+    return this.knowledgeSettingsService.createOcrProvider(user, body);
+  }
+
+  @Patch('settings/ocr-providers/:id')
+  @Roles('super_admin', 'org_admin')
+  @ApiOperation({ summary: 'Update a workspace OCR provider config' })
+  updateOcrProvider(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: UpdateKnowledgeOcrProviderDto,
+  ) {
+    return this.knowledgeSettingsService.updateOcrProvider(user, id, body);
+  }
+
+  @Delete('settings/ocr-providers/:id')
+  @Roles('super_admin', 'org_admin')
+  @ApiOperation({ summary: 'Delete a workspace OCR provider config' })
+  deleteOcrProvider(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.knowledgeSettingsService.deleteOcrProvider(user, id);
+  }
 
   @Get('sources')
   @ApiOperation({

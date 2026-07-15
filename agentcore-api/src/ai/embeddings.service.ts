@@ -74,6 +74,26 @@ export class EmbeddingsService {
   private async findProviderConfig(
     organizationId: string,
   ): Promise<AIProviderConfig | null> {
+    const selection = await this.prisma.knowledgeExtractionConfig.findUnique({
+      where: { organizationId },
+      select: { embeddingProviderId: true },
+    });
+    if (selection?.embeddingProviderId) {
+      const selected = await this.prisma.aIProviderConfig.findFirst({
+        where: {
+          id: selection.embeddingProviderId,
+          organizationId,
+          status: 'active',
+          embeddingModel: { not: null },
+        },
+      });
+      if (!selected) {
+        throw new ServiceUnavailableException(
+          'The selected embedding provider is unavailable or inactive',
+        );
+      }
+      return selected;
+    }
     return this.prisma.aIProviderConfig.findFirst({
       where: {
         organizationId,

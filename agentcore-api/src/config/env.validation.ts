@@ -2,7 +2,9 @@ import { plainToInstance, Transform } from 'class-transformer';
 import {
   Equals,
   IsBoolean,
+  IsIn,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   IsUrl,
@@ -419,12 +421,16 @@ class EnvironmentVariables {
   @IsOptional()
   CUSTOMER_CHAT_PROCESSING_FAILURE_MESSAGE?: string;
 
-  @Transform(({ value }) => Number(value ?? 5000000))
+  @Transform(({ value }) => Number(value ?? 25000000))
   @IsInt()
   @Min(1000)
   @Max(50000000)
   @IsOptional()
-  KNOWLEDGE_MAX_EXTRACTED_CHARACTERS = 5000000;
+  KNOWLEDGE_MAX_EXTRACTED_CHARACTERS = 25000000;
+
+  @IsIn(['disabled', 'fallback', 'always'])
+  @IsOptional()
+  KNOWLEDGE_OCR_MODE: 'disabled' | 'fallback' | 'always' = 'fallback';
 
   @IsString()
   @IsOptional()
@@ -434,12 +440,96 @@ class EnvironmentVariables {
   @IsOptional()
   KNOWLEDGE_OCR_API_KEY?: string;
 
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_OCR_PRIMARY_PROVIDER?: string;
+
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_OCR_PRIMARY_ENDPOINT?: string;
+
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_OCR_PRIMARY_API_KEY?: string;
+
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_OCR_FALLBACK_PROVIDER?: string;
+
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_OCR_FALLBACK_ENDPOINT?: string;
+
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_OCR_FALLBACK_API_KEY?: string;
+
+  @IsString()
+  @IsOptional()
+  KNOWLEDGE_OCR_ALLOWED_HOSTS?: string;
+
   @Transform(({ value }) => Number(value ?? 60000))
   @IsInt()
   @Min(1000)
   @Max(300000)
   @IsOptional()
   KNOWLEDGE_OCR_TIMEOUT_MS = 60000;
+
+  @Transform(({ value }) => Number(value ?? 2))
+  @IsInt()
+  @Min(0)
+  @Max(5)
+  @IsOptional()
+  KNOWLEDGE_OCR_MAX_RETRIES = 2;
+
+  @Transform(({ value }) => Number(value ?? 0.75))
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  @IsOptional()
+  KNOWLEDGE_OCR_MIN_CONFIDENCE = 0.75;
+
+  @Transform(({ value }) => Number(value ?? 4))
+  @IsInt()
+  @Min(1)
+  @Max(32)
+  @IsOptional()
+  KNOWLEDGE_OCR_PAGE_CONCURRENCY = 4;
+
+  @Transform(({ value }) => Number(value ?? 1800))
+  @IsInt()
+  @Min(800)
+  @Max(4000)
+  @IsOptional()
+  KNOWLEDGE_OCR_RENDER_WIDTH = 1800;
+
+  @Transform(({ value }) => Number(value ?? 5000))
+  @IsInt()
+  @Min(1)
+  @Max(20000)
+  @IsOptional()
+  KNOWLEDGE_PDF_MAX_PAGES = 5000;
+
+  @Transform(({ value }) => Number(value ?? 40))
+  @IsInt()
+  @Min(0)
+  @Max(1000)
+  @IsOptional()
+  KNOWLEDGE_PDF_NATIVE_TEXT_MIN_CHARACTERS_PER_PAGE = 40;
+
+  @Transform(({ value }) => Number(value ?? 0.5))
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  @IsOptional()
+  KNOWLEDGE_PDF_NATIVE_TEXT_MIN_ALPHANUMERIC_RATIO = 0.5;
+
+  @Transform(({ value }) => Number(value ?? 90))
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  @IsOptional()
+  KNOWLEDGE_OCR_CACHE_RETENTION_DAYS = 90;
 
   @IsString()
   @IsOptional()
