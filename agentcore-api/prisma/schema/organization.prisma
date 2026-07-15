@@ -24,6 +24,7 @@ model Organization {
   knowledgeOcrPageCache           KnowledgeOcrPageCache[]
   knowledgeOcrProviders           KnowledgeOcrProviderConfig[]
   knowledgeExtractionConfig       KnowledgeExtractionConfig?
+  knowledgeIngestionRuns          KnowledgeIngestionRun[]
   customerChatConversations       CustomerChatConversation[]
   customerChatMessages            CustomerChatMessage[]
   customerChatWidgetConfigs       CustomerChatWidgetConfig[]

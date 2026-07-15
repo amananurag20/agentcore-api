@@ -138,3 +138,41 @@ Source versions are retained by both count and age. Configure `KNOWLEDGE_SOURCE_
 ## Release check
 
 Run migrations before deploying workers, then deploy API and workers from the same build. Confirm ClamAV, OCR, Redis, storage, and the embedding provider before enabling uploads. Roll back application processes first; additive migrations can remain during rollback.
+# Large-document scaling
+
+Large knowledge files use two paths:
+
+- Files up to 20 MB may use the authenticated API upload endpoint.
+- The console automatically uses a 15-minute presigned object-storage URL above 20 MB, verifies the stored object, creates the source, and queues malware scanning and ingestion asynchronously.
+
+Every queued attempt is persisted in `knowledge_ingestion_runs`. The run stores its BullMQ job ID, stage, percentage, item counts, attempt count, cancellation request, terminal error, and timestamps. A source cannot have two uncancelled active runs. Workers check cancellation between extraction and embedding batches, and exhausted jobs are marked `dead_letter` for operations review.
+
+Recommended production settings:
+
+```env
+MAX_UPLOAD_FILE_SIZE_MB=25
+KNOWLEDGE_DIRECT_UPLOAD_MAX_MB=2048
+KNOWLEDGE_INGESTION_QUEUE_CONCURRENCY=2
+KNOWLEDGE_EMBEDDING_BATCH_SIZE=32
+KNOWLEDGE_EMBEDDING_CONCURRENCY=4
+KNOWLEDGE_OCR_PAGE_CONCURRENCY=4
+KNOWLEDGE_PDF_MAX_PAGES=5000
+```
+
+Run API and worker deployments independently. Scale workers from BullMQ waiting count and oldest-job age, not API traffic. Start with 2 ingestion jobs per worker pod and at least 2 GiB memory per pod; tune from representative PDFs because PDF render memory depends on image density and page dimensions. Keep OCR page concurrency and embedding concurrency below provider account limits.
+
+The object-storage bucket must allow browser `PUT` from console origins. A minimal S3 CORS rule is:
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://console.example.com"],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["content-type", "x-amz-*"],
+    "ExposeHeaders": ["etag", "x-amz-checksum-sha256"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Alert on queue waiting age, dead-letter count, ingestion failure rate, OCR fallback rate, provider throttling, and p95 completion time. Validate capacity before increasing tenant limits with 100, 1,000, and 5,000-page fixtures containing both native and scanned pages.

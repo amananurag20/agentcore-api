@@ -71,6 +71,39 @@ export class EmbeddingsService {
     return embedding;
   }
 
+  async embedManyForIndexing(input: {
+    organizationId: string;
+    texts: string[];
+  }): Promise<EmbeddingResult[]> {
+    if (!input.texts.length) return [];
+    const providerConfig = await this.findProviderConfig(input.organizationId);
+    if (!providerConfig?.apiKeyEncrypted) {
+      throw new ServiceUnavailableException(
+        'Knowledge ingestion requires a configured embedding provider',
+      );
+    }
+    const concurrency = Math.max(
+      1,
+      this.configService.get<number>('KNOWLEDGE_EMBEDDING_CONCURRENCY') ?? 4,
+    );
+    const results: EmbeddingResult[] = [];
+    for (let offset = 0; offset < input.texts.length; offset += concurrency) {
+      const batch = input.texts.slice(offset, offset + concurrency);
+      const embedded = await Promise.all(
+        batch.map((text) => this.embedWithProvider(providerConfig, text)),
+      );
+      embedded.forEach((result, index) => {
+        if (result.isFallback) {
+          throw new ServiceUnavailableException(
+            'Knowledge ingestion cannot persist fallback embeddings',
+          );
+        }
+        results[offset + index] = result;
+      });
+    }
+    return results;
+  }
+
   private async findProviderConfig(
     organizationId: string,
   ): Promise<AIProviderConfig | null> {

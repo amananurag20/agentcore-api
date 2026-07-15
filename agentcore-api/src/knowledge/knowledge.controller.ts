@@ -49,6 +49,10 @@ import {
   UpdateKnowledgeExtractionSettingsDto,
   UpdateKnowledgeOcrProviderDto,
 } from './dto/knowledge-extraction-settings.dto';
+import {
+  CompleteKnowledgeDirectUploadDto,
+  CreateKnowledgeUploadUrlDto,
+} from './dto/knowledge-direct-upload.dto';
 
 @ApiTags('Knowledge')
 @ApiBearerAuth('bearer')
@@ -197,6 +201,24 @@ export class KnowledgeController {
     return this.knowledgeService.uploadFileSource(user, body, file);
   }
 
+  @Post('sources/uploads/presign')
+  @ApiOperation({ summary: 'Create a direct object-storage upload URL' })
+  createDirectUploadUrl(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateKnowledgeUploadUrlDto,
+  ) {
+    return this.knowledgeService.createDirectUploadUrl(user, body);
+  }
+
+  @Post('sources/uploads/complete')
+  @ApiOperation({ summary: 'Verify and enqueue a direct knowledge upload' })
+  completeDirectUpload(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CompleteKnowledgeDirectUploadDto,
+  ) {
+    return this.knowledgeService.completeDirectUpload(user, body);
+  }
+
   @Get('sources/:id')
   @ApiOperation({ summary: 'Get a knowledge source by id' })
   @ApiOkResponse({ type: KnowledgeSourceResponseDto })
@@ -215,6 +237,15 @@ export class KnowledgeController {
     @Param('id') id: string,
   ) {
     return this.knowledgeService.ingestSource(user, id);
+  }
+
+  @Post('sources/:id/ingestion/cancel')
+  @ApiOperation({ summary: 'Cancel queued or active source ingestion' })
+  cancelIngestion(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.knowledgeService.cancelIngestion(user, id);
   }
 
   @Patch('sources/:id')

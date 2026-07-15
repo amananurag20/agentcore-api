@@ -8,6 +8,7 @@ import {
 import {
   KnowledgeChunk,
   KnowledgeDocument,
+  KnowledgeIngestionRun,
   KnowledgeSource,
   Prisma,
 } from '@prisma/client';
@@ -34,6 +35,10 @@ import {
   UpdateKnowledgeFolderDto,
 } from './dto/knowledge-taxonomy.dto';
 import { ListKnowledgeSourcesDto } from './dto/list-knowledge-sources.dto';
+import {
+  CompleteKnowledgeDirectUploadDto,
+  CreateKnowledgeUploadUrlDto,
+} from './dto/knowledge-direct-upload.dto';
 
 type SafeKnowledgeSource = Omit<
   KnowledgeSource,
@@ -41,6 +46,7 @@ type SafeKnowledgeSource = Omit<
 > & {
   metadata: Record<string, unknown>;
   fileSizeBytes: number | null;
+  latestIngestionRun?: KnowledgeIngestionRun | null;
 };
 
 type SafeKnowledgeDocument = Omit<KnowledgeDocument, 'metadata'> & {
@@ -112,6 +118,9 @@ export class KnowledgeService {
     const [sources, total] = await Promise.all([
       this.prisma.knowledgeSource.findMany({
         where,
+        include: {
+          ingestionRuns: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
@@ -119,7 +128,10 @@ export class KnowledgeService {
       this.prisma.knowledgeSource.count({ where }),
     ]);
     return {
-      data: sources.map((source) => this.toSafeSource(source)),
+      data: sources.map((source) => ({
+        ...this.toSafeSource(source),
+        latestIngestionRun: source.ingestionRuns[0] ?? null,
+      })),
       pageInfo: {
         page,
         limit,
@@ -300,6 +312,64 @@ export class KnowledgeService {
     return this.toSafeSource(source);
   }
 
+  async createDirectUploadUrl(
+    currentUser: AuthenticatedUser,
+    input: CreateKnowledgeUploadUrlDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    this.assertSupportedFileName(input.fileName, input.mimeType);
+    return this.storageService.createKnowledgeUploadUrl({
+      organizationId,
+      fileName: input.fileName,
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+    });
+  }
+
+  async completeDirectUpload(
+    currentUser: AuthenticatedUser,
+    input: CompleteKnowledgeDirectUploadDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    await this.assertFolderBelongsToOrganization(
+      input.folderId,
+      organizationId,
+    );
+    this.assertSupportedFileName(input.fileName, input.mimeType);
+    const stored = await this.storageService.verifyKnowledgeUpload({
+      organizationId,
+      key: input.key,
+      expectedSizeBytes: input.sizeBytes,
+    });
+    let source = await this.prisma.knowledgeSource.create({
+      data: {
+        organizationId,
+        type: 'uploaded_file',
+        status: 'pending',
+        name: input.name,
+        folderId: input.folderId,
+        categories: input.categories ?? [],
+        fileName: input.fileName,
+        mimeType: stored.contentType ?? input.mimeType,
+        storageProvider: stored.provider,
+        storageBucket: stored.bucket,
+        storageKey: stored.key,
+        fileSizeBytes: stored.sizeBytes,
+        checksumSha256: stored.checksumSha256,
+        malwareScanStatus: 'pending',
+        metadata: this.toJsonObject({ directUpload: true }),
+      },
+    });
+    source = await this.enqueueIngestion(source, 'file_uploaded');
+    return this.toSafeSource(source);
+  }
+
   async getSourceById(
     currentUser: AuthenticatedUser,
     id: string,
@@ -346,6 +416,30 @@ export class KnowledgeService {
     });
 
     return this.getSourceById(currentUser, id);
+  }
+
+  async cancelIngestion(currentUser: AuthenticatedUser, id: string) {
+    const source = await this.findSourceForActor(currentUser, id);
+    await this.assertCanManageProducts(currentUser, source.productVisibility);
+    const cancelledRuns = await this.ingestionQueueService.requestCancellation(
+      source.id,
+    );
+    if (!cancelledRuns) {
+      throw new BadRequestException('This source has no active ingestion');
+    }
+    await this.prisma.knowledgeSource.update({
+      where: { id: source.id },
+      data: { status: 'pending', errorMessage: null },
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: source.organizationId,
+      action: 'knowledge_source.ingestion_cancelled',
+      entityType: 'knowledge_source',
+      entityId: source.id,
+      metadata: { cancelledRuns },
+    });
+    return { cancelled: true, cancelledRuns };
   }
 
   async updateSource(
@@ -1107,8 +1201,12 @@ export class KnowledgeService {
       throw new BadRequestException('Uploaded file is empty');
     }
 
-    const extension = extname(file.originalname).toLowerCase();
-    const mimeType = file.mimetype.toLowerCase();
+    this.assertSupportedFileName(file.originalname, file.mimetype);
+  }
+
+  private assertSupportedFileName(fileName: string, inputMimeType: string) {
+    const extension = extname(fileName).toLowerCase();
+    const mimeType = inputMimeType.toLowerCase();
     const allowedExtensions = new Set([
       '.pdf',
       '.docx',

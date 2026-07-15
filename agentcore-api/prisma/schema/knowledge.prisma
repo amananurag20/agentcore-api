@@ -35,6 +35,7 @@ model KnowledgeSource {
   documents            KnowledgeDocument[]
   chunks               KnowledgeChunk[]
   versions             KnowledgeSourceVersion[]
+  ingestionRuns        KnowledgeIngestionRun[]
   createdAt            DateTime                 @default(now()) @map("created_at")
   updatedAt            DateTime                 @updatedAt @map("updated_at")
 
@@ -46,6 +47,35 @@ model KnowledgeSource {
   @@index([staleAfterAt])
   @@index([storageProvider, storageBucket])
   @@map("knowledge_sources")
+}
+
+model KnowledgeIngestionRun {
+  id                      String                      @id @default(uuid())
+  organizationId          String                      @map("organization_id")
+  organization            Organization                @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceId                String                      @map("source_id")
+  source                  KnowledgeSource             @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  queueJobId              String?                     @unique @map("queue_job_id")
+  reason                  String
+  status                  KnowledgeIngestionRunStatus @default(queued)
+  stage                   String                      @default("queued")
+  progressPercent         Int                         @default(0) @map("progress_percent")
+  processedItems          Int                         @default(0) @map("processed_items")
+  totalItems              Int                         @default(0) @map("total_items")
+  attempt                 Int                         @default(0)
+  maxAttempts             Int                         @default(3) @map("max_attempts")
+  cancellationRequestedAt DateTime?                   @map("cancellation_requested_at")
+  startedAt               DateTime?                   @map("started_at")
+  completedAt             DateTime?                   @map("completed_at")
+  errorMessage            String?                     @map("error_message")
+  metadata                Json                        @default("{}")
+  createdAt               DateTime                    @default(now()) @map("created_at")
+  updatedAt               DateTime                    @updatedAt @map("updated_at")
+
+  @@index([organizationId, status, createdAt])
+  @@index([sourceId, createdAt])
+  @@index([status, updatedAt])
+  @@map("knowledge_ingestion_runs")
 }
 
 model KnowledgeSourceVersion {

@@ -1,9 +1,11 @@
 import {
   GetObjectCommand,
+  HeadObjectCommand,
   HeadBucketCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   BadRequestException,
   Injectable,
@@ -82,6 +84,93 @@ export class S3StorageService {
     file: Express.Multer.File;
   }): Promise<StoredObject> {
     return this.uploadFile({ ...input, namespace: 'knowledge' });
+  }
+
+  async createKnowledgeUploadUrl(input: {
+    organizationId: string;
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+  }) {
+    this.assertConfigured();
+    const maxBytes =
+      (this.configService.get<number>('KNOWLEDGE_DIRECT_UPLOAD_MAX_MB') ??
+        2048) *
+      1024 *
+      1024;
+    if (input.sizeBytes < 1 || input.sizeBytes > maxBytes) {
+      throw new BadRequestException(
+        `Direct upload exceeds the ${maxBytes} byte limit`,
+      );
+    }
+    const key = this.buildObjectKey(
+      input.organizationId,
+      {
+        buffer: Buffer.alloc(0),
+        originalname: input.fileName,
+        mimetype: input.mimeType,
+        size: input.sizeBytes,
+      },
+      'knowledge',
+    );
+    const expiresIn = 15 * 60;
+    const uploadUrl = await getSignedUrl(
+      this.client!,
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        ContentType: input.mimeType,
+        Metadata: {
+          organizationId: input.organizationId,
+          originalNameEncoded: this.encodeMetadataValue(input.fileName),
+          expectedSize: String(input.sizeBytes),
+        },
+      }),
+      { expiresIn },
+    );
+    return {
+      uploadUrl,
+      key,
+      bucket: this.bucket!,
+      provider: this.provider,
+      expiresAt: new Date(Date.now() + expiresIn * 1000),
+      requiredHeaders: { 'Content-Type': input.mimeType },
+    };
+  }
+
+  async verifyKnowledgeUpload(input: {
+    organizationId: string;
+    key: string;
+    expectedSizeBytes: number;
+  }) {
+    this.assertConfigured();
+    const expectedPrefix = `${this.prefix}/${input.organizationId}/`;
+    if (!input.key.startsWith(expectedPrefix)) {
+      throw new BadRequestException(
+        'Uploaded object is outside this workspace',
+      );
+    }
+    const object = await this.client!.send(
+      new HeadObjectCommand({ Bucket: this.bucket, Key: input.key }),
+    );
+    if (Number(object.ContentLength ?? -1) !== input.expectedSizeBytes) {
+      throw new BadRequestException(
+        'Uploaded object size does not match the upload request',
+      );
+    }
+    if (object.Metadata?.organizationid !== input.organizationId) {
+      throw new BadRequestException(
+        'Uploaded object workspace metadata is invalid',
+      );
+    }
+    return {
+      provider: this.provider,
+      bucket: this.bucket!,
+      key: input.key,
+      sizeBytes: input.expectedSizeBytes,
+      checksumSha256: object.ChecksumSHA256 ?? null,
+      contentType: object.ContentType ?? null,
+    };
   }
 
   async uploadWhatsAppMedia(input: {

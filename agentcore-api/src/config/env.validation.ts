@@ -127,6 +127,13 @@ class EnvironmentVariables {
   @IsOptional()
   MAX_UPLOAD_FILE_SIZE_MB = 25;
 
+  @Transform(({ value }) => Number(value ?? 2048))
+  @IsInt()
+  @Min(1)
+  @Max(10240)
+  @IsOptional()
+  KNOWLEDGE_DIRECT_UPLOAD_MAX_MB = 2048;
+
   @IsString()
   @IsOptional()
   REDIS_URL?: string;
@@ -141,6 +148,20 @@ class EnvironmentVariables {
   @Max(20)
   @IsOptional()
   KNOWLEDGE_INGESTION_QUEUE_CONCURRENCY = 2;
+
+  @Transform(({ value }) => Number(value ?? 32))
+  @IsInt()
+  @Min(1)
+  @Max(256)
+  @IsOptional()
+  KNOWLEDGE_EMBEDDING_BATCH_SIZE = 32;
+
+  @Transform(({ value }) => Number(value ?? 4))
+  @IsInt()
+  @Min(1)
+  @Max(32)
+  @IsOptional()
+  KNOWLEDGE_EMBEDDING_CONCURRENCY = 4;
 
   @Transform(({ value }) => Number(value ?? 720))
   @IsInt()

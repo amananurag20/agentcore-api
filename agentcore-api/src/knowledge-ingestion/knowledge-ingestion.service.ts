@@ -9,9 +9,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import { S3StorageService } from '../storage/s3-storage.service';
 import { KnowledgeFileExtractorService } from './knowledge-file-extractor.service';
 import { KnowledgeClassificationService } from './knowledge-classification.service';
-import { KnowledgeIngestionJobData } from './knowledge-ingestion.types';
+import {
+  KnowledgeIngestionCancelledError,
+  KnowledgeIngestionJobData,
+} from './knowledge-ingestion.types';
 import { TextChunkerService } from './text-chunker.service';
 import { UrlScraperService } from './url-scraper.service';
+import { FileSecurityService } from '../storage/file-security.service';
 
 @Injectable()
 export class KnowledgeIngestionService {
@@ -25,6 +29,7 @@ export class KnowledgeIngestionService {
     private readonly prisma: PrismaService,
     private readonly storageService: S3StorageService,
     private readonly urlScraper: UrlScraperService,
+    private readonly fileSecurity: FileSecurityService,
   ) {}
 
   async ingestSource(data: KnowledgeIngestionJobData) {
@@ -38,6 +43,8 @@ export class KnowledgeIngestionService {
     }
 
     try {
+      await this.updateProgress(data, 'preparing', 2);
+      await this.assertNotCancelled(data);
       await this.prisma.knowledgeSource.update({
         where: { id: source.id },
         data: {
@@ -61,7 +68,16 @@ export class KnowledgeIngestionService {
         return;
       }
 
+      await this.updateProgress(data, 'extracting', 8);
       const documents = await this.prepareDocuments(source);
+      await this.updateProgress(
+        data,
+        'extracted',
+        35,
+        documents.length,
+        documents.length,
+      );
+      await this.assertNotCancelled(data);
       const contentText = documents
         .map((document) => `${document.title}\n${document.contentText ?? ''}`)
         .join('\n\n');
@@ -82,63 +98,97 @@ export class KnowledgeIngestionService {
           `Duplicate content already exists in source “${duplicate.name}” (${duplicate.id})`,
         );
       }
+      await this.updateProgress(data, 'classifying', 40);
       const effectiveSource = await this.classifyIfNeeded(source, documents);
       let totalChunks = 0;
+      const documentChunks = documents.map((document) => ({
+        document,
+        chunks: this.chunker.chunk(document.contentText ?? ''),
+      }));
+      const expectedChunks = documentChunks.reduce(
+        (total, entry) => total + entry.chunks.length,
+        0,
+      );
+      const embeddingBatchSize =
+        this.configService.get<number>('KNOWLEDGE_EMBEDDING_BATCH_SIZE') ?? 32;
 
-      for (const document of documents) {
-        const chunks = this.chunker.chunk(document.contentText ?? '');
+      await this.updateProgress(data, 'embedding', 45, 0, expectedChunks);
+      for (const { document, chunks } of documentChunks) {
         const documentMetadata = this.toRecord(document.metadata);
 
         await this.prisma.knowledgeChunk.deleteMany({
           where: { documentId: document.id },
         });
 
-        for (const [index, chunk] of chunks.entries()) {
-          const embedding = await this.embeddingsService.embedForIndexing({
+        for (
+          let offset = 0;
+          offset < chunks.length;
+          offset += embeddingBatchSize
+        ) {
+          await this.assertNotCancelled(data);
+          const batch = chunks.slice(offset, offset + embeddingBatchSize);
+          const embeddings = await this.embeddingsService.embedManyForIndexing({
             organizationId: source.organizationId,
-            text: chunk.content,
+            texts: batch.map((chunk) => chunk.content),
           });
-          const createdChunk = await this.prisma.knowledgeChunk.create({
-            data: {
-              organizationId: source.organizationId,
-              sourceId: source.id,
-              documentId: document.id,
-              sensitivityLevel: effectiveSource.sensitivityLevel,
-              productVisibility: effectiveSource.productVisibility,
-              categories: effectiveSource.categories,
-              isQuarantined: effectiveSource.isQuarantined,
-              chunkIndex: index,
-              content: chunk.content,
-              charCount: chunk.charCount,
-              tokenEstimate: chunk.tokenEstimate,
-              metadata: this.toJsonObject({
-                sourceType: source.type,
-                uri: document.uri,
-                pageNumber:
-                  typeof documentMetadata.pageNumber === 'number'
-                    ? documentMetadata.pageNumber
-                    : undefined,
-                extractionMethod:
-                  typeof documentMetadata.extractionMethod === 'string'
-                    ? documentMetadata.extractionMethod
-                    : undefined,
-              }),
-              embeddingModel: embedding.model,
-              embeddingProvider: embedding.provider,
-              embeddedAt: new Date(),
-            },
-          });
+          for (const [batchIndex, chunk] of batch.entries()) {
+            const index = offset + batchIndex;
+            const embedding = embeddings[batchIndex];
+            const createdChunk = await this.prisma.knowledgeChunk.create({
+              data: {
+                organizationId: source.organizationId,
+                sourceId: source.id,
+                documentId: document.id,
+                sensitivityLevel: effectiveSource.sensitivityLevel,
+                productVisibility: effectiveSource.productVisibility,
+                categories: effectiveSource.categories,
+                isQuarantined: effectiveSource.isQuarantined,
+                chunkIndex: index,
+                content: chunk.content,
+                charCount: chunk.charCount,
+                tokenEstimate: chunk.tokenEstimate,
+                metadata: this.toJsonObject({
+                  sourceType: source.type,
+                  uri: document.uri,
+                  pageNumber:
+                    typeof documentMetadata.pageNumber === 'number'
+                      ? documentMetadata.pageNumber
+                      : undefined,
+                  extractionMethod:
+                    typeof documentMetadata.extractionMethod === 'string'
+                      ? documentMetadata.extractionMethod
+                      : undefined,
+                }),
+                embeddingModel: embedding.model,
+                embeddingProvider: embedding.provider,
+                embeddedAt: new Date(),
+              },
+            });
 
-          await this.prisma.$executeRaw`
-            UPDATE "knowledge_chunks"
-            SET "embedding" = ${toPgVector(embedding.vector)}::vector
-            WHERE "id" = ${createdChunk.id}
-          `;
+            await this.prisma.$executeRaw`
+              UPDATE "knowledge_chunks"
+              SET "embedding" = ${toPgVector(embedding.vector)}::vector
+              WHERE "id" = ${createdChunk.id}
+            `;
+          }
+          totalChunks += batch.length;
+          await this.updateProgress(
+            data,
+            'embedding',
+            45 + Math.floor((totalChunks / Math.max(1, expectedChunks)) * 45),
+            totalChunks,
+            expectedChunks,
+          );
         }
-
-        totalChunks += chunks.length;
       }
 
+      await this.updateProgress(
+        data,
+        'finalizing',
+        95,
+        totalChunks,
+        expectedChunks,
+      );
       const now = new Date();
       const changed = source.contentFingerprint !== contentFingerprint;
       const version = changed ? source.version + 1 : source.version;
@@ -193,7 +243,32 @@ export class KnowledgeIngestionService {
         });
       });
       await this.trimVersionHistory(source.id);
+      await this.updateProgress(
+        data,
+        'completed',
+        100,
+        totalChunks,
+        expectedChunks,
+        true,
+      );
     } catch (error) {
+      if (error instanceof KnowledgeIngestionCancelledError) {
+        await this.prisma.knowledgeSource.update({
+          where: { id: data.sourceId },
+          data: { status: 'pending', errorMessage: null },
+        });
+        if (data.runId) {
+          await this.prisma.knowledgeIngestionRun.update({
+            where: { id: data.runId },
+            data: {
+              status: 'cancelled',
+              stage: 'cancelled',
+              completedAt: new Date(),
+            },
+          });
+        }
+        throw error;
+      }
       await this.prisma.knowledgeSource.update({
         where: { id: data.sourceId },
         data: {
@@ -207,6 +282,40 @@ export class KnowledgeIngestionService {
 
       throw error;
     }
+  }
+
+  private async assertNotCancelled(data: KnowledgeIngestionJobData) {
+    if (!data.runId) return;
+    const run = await this.prisma.knowledgeIngestionRun.findUnique({
+      where: { id: data.runId },
+      select: { cancellationRequestedAt: true },
+    });
+    if (run?.cancellationRequestedAt) {
+      throw new KnowledgeIngestionCancelledError();
+    }
+  }
+
+  private async updateProgress(
+    data: KnowledgeIngestionJobData,
+    stage: string,
+    progressPercent: number,
+    processedItems = 0,
+    totalItems = 0,
+    completed = false,
+  ) {
+    if (!data.runId) return;
+    await this.prisma.knowledgeIngestionRun.update({
+      where: { id: data.runId },
+      data: {
+        stage,
+        progressPercent: Math.max(0, Math.min(100, progressPercent)),
+        processedItems,
+        totalItems,
+        ...(completed
+          ? { status: 'completed' as const, completedAt: new Date() }
+          : { status: 'processing' as const }),
+      },
+    });
   }
 
   private async classifyIfNeeded(
@@ -372,6 +481,16 @@ export class KnowledgeIngestionService {
         bucket: source.storageBucket,
         key: source.storageKey,
       });
+      if (source.malwareScanStatus === 'pending') {
+        const scan = await this.fileSecurity.scan(fileBuffer);
+        await this.prisma.knowledgeSource.update({
+          where: { id: source.id },
+          data: {
+            malwareScanStatus: scan.status,
+            malwareScanMessage: scan.message,
+          },
+        });
+      }
       const extracted = await this.fileExtractor.extract({
         buffer: fileBuffer,
         fileName: source.fileName,
