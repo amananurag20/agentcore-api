@@ -10,6 +10,7 @@ function createService(
         organizationId: 'org-a',
         provider: 'openai',
         status: 'active',
+        validationStatus: 'verified',
         chatModel: 'chat-model',
         embeddingModel: null,
         apiKeyEncrypted: 'encrypted',
@@ -27,6 +28,9 @@ function createService(
     {
       aIProviderConfig: {
         findFirst: jest.fn().mockResolvedValue(providerConfig),
+        findMany: jest
+          .fn()
+          .mockResolvedValue(providerConfig ? [providerConfig] : []),
       },
     } as never,
     {
@@ -76,6 +80,68 @@ describe('ChatService safety boundaries', () => {
     expect(result.usedFallback).toBe(true);
     expect(result.answer).toContain('human agent');
     expect(result.answer).not.toContain('RAW PRIVATE CHUNK');
+  });
+
+  it('fails over to the next verified provider in priority order', async () => {
+    const providers = [
+      {
+        id: 'primary',
+        organizationId: 'org-a',
+        provider: 'openai',
+        status: 'active',
+        validationStatus: 'verified',
+        priority: 0,
+        chatModel: 'primary-model',
+        apiKeyEncrypted: 'primary-key',
+        baseUrl: null,
+        settings: {},
+      },
+      {
+        id: 'secondary',
+        organizationId: 'org-a',
+        provider: 'anthropic',
+        status: 'active',
+        validationStatus: 'verified',
+        priority: 10,
+        chatModel: 'secondary-model',
+        apiKeyEncrypted: 'secondary-key',
+        baseUrl: null,
+        settings: {},
+      },
+    ];
+    const primaryCall = jest
+      .fn()
+      .mockRejectedValue(new Error('primary unavailable'));
+    const secondaryCall = jest.fn().mockResolvedValue({
+      answer: 'Answer from secondary',
+      model: 'secondary-model',
+      adapter: 'anthropic',
+    });
+    const findMany = jest.fn().mockResolvedValue(providers);
+    const service = new ChatService(
+      { get: jest.fn() } as never,
+      { decrypt: jest.fn().mockReturnValue('decrypted') } as never,
+      { aIProviderConfig: { findMany } } as never,
+      {
+        getAdapter: jest.fn((provider: { id: string }) => ({
+          kind: provider.id === 'primary' ? 'openai' : 'anthropic',
+          createChatCompletion:
+            provider.id === 'primary' ? primaryCall : secondaryCall,
+        })),
+      } as never,
+    );
+
+    const result = await service.answerWithContext({
+      organizationId: 'org-a',
+      question: 'What is the refund policy?',
+      context: [{ content: 'Refunds are available for 30 days.', score: 0.9 }],
+    });
+
+    expect(result.answer).toBe('Answer from secondary');
+    expect(result.usedFallback).toBe(false);
+    expect(primaryCall).toHaveBeenCalledTimes(1);
+    expect(secondaryCall).toHaveBeenCalledTimes(1);
+    expect(findMany).toHaveBeenCalledTimes(1);
   });
 
   it('escapes prompt delimiters in knowledge and customer input', async () => {

@@ -9,18 +9,26 @@ import { ConnectionOptions, Job, Worker } from 'bullmq';
 import {
   KNOWLEDGE_INGESTION_JOB,
   KNOWLEDGE_INGESTION_QUEUE,
+  KNOWLEDGE_REEMBED_ORGANIZATION_JOB,
 } from '../queue/queue.constants';
 import { parseRedisConnection } from '../queue/redis-connection';
 import { KnowledgeIngestionService } from './knowledge-ingestion.service';
-import { KnowledgeIngestionJobData } from './knowledge-ingestion.types';
+import {
+  KnowledgeIngestionJobData,
+  KnowledgeOrganizationReembeddingJobData,
+} from './knowledge-ingestion.types';
 import { KnowledgeAlertService } from './knowledge-alert.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { KnowledgeIngestionCancelledError } from './knowledge-ingestion.types';
+import { KnowledgeIngestionQueueService } from './knowledge-ingestion-queue.service';
+
+type KnowledgeWorkerJobData =
+  KnowledgeIngestionJobData | KnowledgeOrganizationReembeddingJobData;
 
 @Injectable()
 export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KnowledgeIngestionWorker.name);
-  private worker: Worker<KnowledgeIngestionJobData> | null = null;
+  private worker: Worker<KnowledgeWorkerJobData> | null = null;
   private connection: ConnectionOptions | null = null;
 
   constructor(
@@ -28,6 +36,7 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     private readonly ingestionService: KnowledgeIngestionService,
     private readonly alertService: KnowledgeAlertService,
     private readonly prisma: PrismaService,
+    private readonly ingestionQueue: KnowledgeIngestionQueueService,
   ) {}
 
   onModuleInit() {
@@ -38,7 +47,7 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     }
 
     this.connection = parseRedisConnection(redisUrl);
-    this.worker = new Worker<KnowledgeIngestionJobData>(
+    this.worker = new Worker<KnowledgeWorkerJobData>(
       KNOWLEDGE_INGESTION_QUEUE,
       (job) => this.process(job),
       {
@@ -56,8 +65,11 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
         `Knowledge ingestion job failed: ${job?.id ?? 'unknown'}`,
         error.stack,
       );
-      if (job?.data) void this.alertService.ingestionFailed(job.data, error);
-      if (job?.data.runId) void this.markFailed(job, error);
+      if (job?.name === KNOWLEDGE_INGESTION_JOB && 'sourceId' in job.data) {
+        void this.alertService.ingestionFailed(job.data, error);
+        if (job.data.runId)
+          void this.markFailed(job as Job<KnowledgeIngestionJobData>, error);
+      }
     });
   }
 
@@ -65,14 +77,20 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     await this.worker?.close();
   }
 
-  private async process(job: Job<KnowledgeIngestionJobData>) {
+  private async process(job: Job<KnowledgeWorkerJobData>) {
+    if (job.name === KNOWLEDGE_REEMBED_ORGANIZATION_JOB) {
+      return this.scheduleOrganizationReembedding(
+        job.data as KnowledgeOrganizationReembeddingJobData,
+      );
+    }
     if (job.name !== KNOWLEDGE_INGESTION_JOB) {
       return;
     }
+    const ingestionData = job.data as KnowledgeIngestionJobData;
 
-    if (job.data.runId) {
+    if (ingestionData.runId) {
       await this.prisma.knowledgeIngestionRun.update({
-        where: { id: job.data.runId },
+        where: { id: ingestionData.runId },
         data: {
           status: 'processing',
           stage: 'starting',
@@ -84,7 +102,7 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      await this.ingestionService.ingestSource(job.data);
+      await this.ingestionService.ingestSource(ingestionData);
     } catch (error) {
       if (error instanceof KnowledgeIngestionCancelledError) {
         job.discard();
@@ -93,7 +111,50 @@ export class KnowledgeIngestionWorker implements OnModuleInit, OnModuleDestroy {
       throw error;
     }
 
-    this.logger.log(`Ingested knowledge source ${job.data.sourceId}`);
+    this.logger.log(`Ingested knowledge source ${ingestionData.sourceId}`);
+  }
+
+  private async scheduleOrganizationReembedding(
+    data: KnowledgeOrganizationReembeddingJobData,
+  ): Promise<void> {
+    const batchSize = 100;
+    let scheduled = 0;
+    while (true) {
+      const sources = await this.prisma.knowledgeSource.findMany({
+        where: { organizationId: data.organizationId, status: 'ready' },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+        take: batchSize,
+      });
+      if (sources.length === 0) break;
+
+      for (const source of sources) {
+        const claimed = await this.prisma.knowledgeSource.updateMany({
+          where: { id: source.id, status: 'ready' },
+          data: { status: 'pending', errorMessage: null },
+        });
+        if (claimed.count !== 1) continue;
+        try {
+          await this.ingestionQueue.enqueue({
+            organizationId: data.organizationId,
+            sourceId: source.id,
+            reason: data.reason,
+          });
+          scheduled += 1;
+        } catch (error) {
+          await this.prisma.knowledgeSource.update({
+            where: { id: source.id },
+            data: {
+              status: 'failed',
+              errorMessage: `Knowledge re-embedding could not be scheduled: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          });
+        }
+      }
+    }
+    this.logger.log(
+      `Scheduled ${scheduled} sources for re-embedding in organization ${data.organizationId}`,
+    );
   }
 
   private async markFailed(job: Job<KnowledgeIngestionJobData>, error: Error) {

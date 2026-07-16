@@ -4,6 +4,7 @@ model AIProviderConfig {
   organization      Organization                @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   provider          AIProviderType
   status            AIProviderStatus            @default(active)
+  priority          Int                         @default(100)
   name              String
   baseUrl           String?                     @map("base_url")
   apiKeyEncrypted   String?                     @map("api_key_encrypted")
@@ -14,10 +15,42 @@ model AIProviderConfig {
   ttsModel          String?                     @map("tts_model")
   settings          Json                        @default("{}")
   extractionConfigs KnowledgeExtractionConfig[]
+  usageDaily        AIProviderUsageDaily[]
+  lastValidatedAt   DateTime?                   @map("last_validated_at")
+  validationStatus  String                      @default("untested") @map("validation_status")
+  validationLatency Int?                        @map("validation_latency_ms")
+  validationError   String?                     @map("validation_error")
+  validatedModels   Json                        @default("[]") @map("validated_models")
   createdAt         DateTime                    @default(now()) @map("created_at")
   updatedAt         DateTime                    @updatedAt @map("updated_at")
 
-  @@index([organizationId, status])
+  @@index([organizationId, status, priority])
   @@index([provider])
   @@map("ai_provider_configs")
+}
+
+model AIProviderUsageDaily {
+  id                  String           @id @default(uuid())
+  organizationId      String           @map("organization_id")
+  organization        Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  providerConfigId    String           @map("provider_config_id")
+  providerConfig      AIProviderConfig @relation(fields: [providerConfigId], references: [id], onDelete: Cascade)
+  usageDate           DateTime         @map("usage_date") @db.Date
+  capability          String
+  model               String
+  requestCount        Int              @default(0) @map("request_count")
+  successCount        Int              @default(0) @map("success_count")
+  failureCount        Int              @default(0) @map("failure_count")
+  inputTokens         BigInt           @default(0) @map("input_tokens")
+  outputTokens        BigInt           @default(0) @map("output_tokens")
+  totalTokens         BigInt           @default(0) @map("total_tokens")
+  estimatedCostMicros BigInt           @default(0) @map("estimated_cost_micros")
+  totalLatencyMs      BigInt           @default(0) @map("total_latency_ms")
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+
+  @@unique([providerConfigId, usageDate, capability, model])
+  @@index([organizationId, usageDate])
+  @@index([providerConfigId, usageDate])
+  @@map("ai_provider_usage_daily")
 }

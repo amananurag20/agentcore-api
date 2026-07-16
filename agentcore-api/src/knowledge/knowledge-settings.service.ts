@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import {
   KnowledgeExtractionConfig,
   KnowledgeOcrProviderConfig,
@@ -444,49 +445,51 @@ export class KnowledgeSettingsService {
   }
 
   private async scheduleReembedding(organizationId: string) {
-    const sources = await this.prisma.knowledgeSource.findMany({
-      where: { organizationId, status: 'ready' },
-      select: { id: true },
-    });
-    if (!sources.length) return;
     if (this.ingestionQueue.isEnabled()) {
-      await this.prisma.knowledgeSource.updateMany({
-        where: { id: { in: sources.map((source) => source.id) } },
-        data: { status: 'pending', errorMessage: null },
+      const fingerprint = createHash('sha256')
+        .update(`${organizationId}:${Date.now()}`)
+        .digest('hex')
+        .slice(0, 16);
+      await this.ingestionQueue.enqueueOrganizationReembedding({
+        organizationId,
+        fingerprint,
+        reason: 'embedding_model_changed',
       });
+      return;
     }
-    const results = await Promise.allSettled(
-      sources.map((source) => {
-        const job = {
-          organizationId,
-          sourceId: source.id,
-          reason: 'embedding_model_changed' as const,
-        };
-        return this.ingestionQueue.isEnabled()
-          ? this.ingestionQueue.enqueue(job)
-          : this.ingestionService.ingestSource(job);
-      }),
+
+    this.logger.warn(
+      `Redis is disabled; re-indexing organization ${organizationId} in bounded local batches`,
     );
-    const failures = results.flatMap((result, index) =>
-      result.status === 'rejected'
-        ? [{ sourceId: sources[index].id, reason: result.reason as unknown }]
-        : [],
-    );
-    if (failures.length) {
-      await Promise.all(
-        failures.map((failure) =>
-          this.prisma.knowledgeSource.update({
-            where: { id: failure.sourceId },
+    while (true) {
+      const sources = await this.prisma.knowledgeSource.findMany({
+        where: { organizationId, status: 'ready' },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+        take: 10,
+      });
+      if (!sources.length) return;
+      for (const source of sources) {
+        await this.prisma.knowledgeSource.update({
+          where: { id: source.id },
+          data: { status: 'pending', errorMessage: null },
+        });
+        try {
+          await this.ingestionService.ingestSource({
+            organizationId,
+            sourceId: source.id,
+            reason: 'embedding_model_changed' as const,
+          });
+        } catch (error) {
+          await this.prisma.knowledgeSource.update({
+            where: { id: source.id },
             data: {
               status: 'failed',
-              errorMessage: `Knowledge re-indexing could not be scheduled: ${this.errorMessage(failure.reason)}`,
+              errorMessage: `Knowledge re-indexing failed: ${this.errorMessage(error)}`,
             },
-          }),
-        ),
-      );
-      this.logger.error(
-        `Failed to schedule ${failures.length}/${sources.length} sources after embedding provider selection changed for ${organizationId}`,
-      );
+          });
+        }
+      }
     }
   }
 

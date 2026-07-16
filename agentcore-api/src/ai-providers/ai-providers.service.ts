@@ -6,14 +6,17 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import { AIProviderConfig, Prisma } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { AIUsageService } from '../ai-usage/ai-usage.service';
 import { resolveEmbeddingDimensions } from '../ai/embedding-model-dimensions';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
 import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-ingestion.service';
+import { ProviderEndpointPolicyService } from '../ai/provider-endpoint-policy.service';
 import { CreateAIProviderDto } from './dto/create-ai-provider.dto';
 import { UpdateAIProviderDto } from './dto/update-ai-provider.dto';
 
@@ -23,6 +26,7 @@ type SafeAIProviderConfig = Omit<
 > & {
   hasApiKey: boolean;
   settings: Record<string, unknown>;
+  usage?: Awaited<ReturnType<AIUsageService['summarize']>>;
 };
 
 @Injectable()
@@ -31,11 +35,13 @@ export class AIProvidersService {
 
   constructor(
     private readonly auditService: AuditService,
+    private readonly aiUsageService: AIUsageService,
     private readonly configService: ConfigService,
     private readonly cryptoService: CryptoService,
     private readonly ingestionQueue: KnowledgeIngestionQueueService,
     private readonly ingestionService: KnowledgeIngestionService,
     private readonly prisma: PrismaService,
+    private readonly endpointPolicy: ProviderEndpointPolicyService,
   ) {}
 
   async list(
@@ -48,10 +54,13 @@ export class AIProvidersService {
     );
     const configs = await this.prisma.aIProviderConfig.findMany({
       where: { organizationId },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }],
     });
-
-    return configs.map((config) => this.toSafeConfig(config));
+    const summaries = await this.aiUsageService.summarizeMany(configs);
+    return configs.map((config) => ({
+      ...this.toSafeConfig(config),
+      usage: summaries.get(config.id),
+    }));
   }
 
   async create(
@@ -63,6 +72,14 @@ export class AIProvidersService {
       input.organizationId,
     );
     this.validateEmbeddingModel(input.embeddingModel, input.settings ?? {});
+    await this.endpointPolicy.assertProviderAllowed({
+      provider: input.provider,
+      baseUrl: input.baseUrl ?? null,
+      settings: input.settings ?? {},
+    });
+    const providerCount = await this.prisma.aIProviderConfig.count({
+      where: { organizationId },
+    });
     const previousEmbeddingConfig =
       await this.findActiveEmbeddingConfig(organizationId);
 
@@ -70,7 +87,8 @@ export class AIProvidersService {
       data: {
         organizationId,
         provider: input.provider,
-        status: input.status ?? 'active',
+        status: 'inactive',
+        priority: providerCount === 0 ? 0 : 100,
         name: input.name,
         baseUrl: input.baseUrl,
         apiKeyEncrypted: input.apiKey
@@ -111,7 +129,91 @@ export class AIProvidersService {
     id: string,
   ): Promise<SafeAIProviderConfig> {
     const config = await this.findConfigForActor(currentUser, id);
-    return this.toSafeConfig(config);
+    return this.withUsage(config);
+  }
+
+  async validate(currentUser: AuthenticatedUser, id: string) {
+    const config = await this.findConfigForActor(currentUser, id);
+    const startedAt = Date.now();
+
+    try {
+      const result = await this.validateProvider(config);
+      const updated = await this.prisma.aIProviderConfig.update({
+        where: { id },
+        data: {
+          lastValidatedAt: new Date(),
+          validationStatus: 'verified',
+          validationLatency: Date.now() - startedAt,
+          validationError: null,
+          validatedModels: result.models,
+        },
+      });
+      await this.auditService.record({
+        actor: currentUser,
+        organizationId: config.organizationId,
+        action: 'ai_provider.validated',
+        entityType: 'ai_provider',
+        entityId: id,
+        metadata: { status: 'verified', modelCount: result.models.length },
+      });
+      return this.withUsage(updated);
+    } catch (error) {
+      const message = this.toErrorMessage(error).slice(0, 500);
+      const updated = await this.prisma.aIProviderConfig.update({
+        where: { id },
+        data: {
+          lastValidatedAt: new Date(),
+          validationStatus: 'failed',
+          validationLatency: Date.now() - startedAt,
+          validationError: message,
+          validatedModels: [],
+        },
+      });
+      await this.auditService.record({
+        actor: currentUser,
+        organizationId: config.organizationId,
+        action: 'ai_provider.validation_failed',
+        entityType: 'ai_provider',
+        entityId: id,
+        metadata: { status: 'failed', error: message },
+      });
+      return this.withUsage(updated);
+    }
+  }
+
+  async setPrimary(currentUser: AuthenticatedUser, id: string) {
+    const existing = await this.findConfigForActor(currentUser, id);
+    if (existing.validationStatus !== 'verified' || !existing.chatModel) {
+      throw new BadRequestException(
+        'Test this provider and configure a chat model before making it primary',
+      );
+    }
+    const previousEmbeddingConfig = await this.findActiveEmbeddingConfig(
+      existing.organizationId,
+    );
+    const config = await this.prisma.$transaction(async (client) => {
+      await client.aIProviderConfig.updateMany({
+        where: { organizationId: existing.organizationId },
+        data: { priority: 100 },
+      });
+      return client.aIProviderConfig.update({
+        where: { id },
+        data: { priority: 0, status: 'active' },
+      });
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'ai_provider.primary_changed',
+      entityType: 'ai_provider',
+      entityId: id,
+      metadata: { provider: config.provider, name: config.name },
+    });
+    await this.reembedIfActiveSpaceChanged(
+      existing.organizationId,
+      previousEmbeddingConfig,
+    );
+    return this.withUsage(config);
   }
 
   async update(
@@ -138,6 +240,11 @@ export class AIProvidersService {
       );
     }
     const settings = input.settings ?? this.toRecord(existing.settings);
+    await this.endpointPolicy.assertProviderAllowed({
+      provider: input.provider ?? existing.provider,
+      baseUrl: input.baseUrl === undefined ? existing.baseUrl : input.baseUrl,
+      settings: settings,
+    });
     this.validateEmbeddingModel(
       input.embeddingModel ?? existing.embeddingModel ?? undefined,
       settings,
@@ -156,6 +263,22 @@ export class AIProvidersService {
         ),
       ),
     );
+    const requiresRevalidation =
+      input.apiKey !== undefined ||
+      input.baseUrl !== undefined ||
+      input.provider !== undefined ||
+      input.chatModel !== undefined ||
+      input.embeddingModel !== undefined ||
+      (input.settings !== undefined &&
+        this.toRecord(existing.settings).adapter !== input.settings.adapter);
+    if (
+      input.status === 'active' &&
+      (requiresRevalidation || existing.validationStatus !== 'verified')
+    ) {
+      throw new BadRequestException(
+        'Test this provider successfully before activating it',
+      );
+    }
 
     const config = await this.prisma.aIProviderConfig.update({
       where: { id },
@@ -164,7 +287,7 @@ export class AIProvidersService {
           ? this.resolveOrganizationId(currentUser, input.organizationId)
           : undefined,
         provider: input.provider,
-        status: input.status,
+        status: requiresRevalidation ? 'inactive' : input.status,
         name: input.name,
         baseUrl: input.baseUrl,
         apiKeyEncrypted:
@@ -179,6 +302,11 @@ export class AIProvidersService {
         settings: input.settings
           ? this.toJsonObject(input.settings)
           : undefined,
+        validationStatus: requiresRevalidation ? 'untested' : undefined,
+        lastValidatedAt: requiresRevalidation ? null : undefined,
+        validationLatency: requiresRevalidation ? null : undefined,
+        validationError: requiresRevalidation ? null : undefined,
+        validatedModels: requiresRevalidation ? [] : undefined,
       },
     });
 
@@ -301,6 +429,7 @@ export class AIProvidersService {
           id: selection.embeddingProviderId,
           organizationId,
           status: 'active',
+          validationStatus: 'verified',
           embeddingModel: { not: null },
         },
       });
@@ -309,9 +438,10 @@ export class AIProvidersService {
       where: {
         organizationId,
         status: 'active',
+        validationStatus: 'verified',
         embeddingModel: { not: null },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }],
     });
   }
 
@@ -328,51 +458,51 @@ export class AIProvidersService {
       return;
     }
 
-    const sources = await this.prisma.knowledgeSource.findMany({
-      where: { organizationId, status: 'ready' },
-      select: { id: true },
-    });
-    if (sources.length === 0) return;
-
     if (this.ingestionQueue.isEnabled()) {
-      await this.prisma.knowledgeSource.updateMany({
-        where: { id: { in: sources.map((source) => source.id) } },
-        data: { status: 'pending', errorMessage: null },
+      const fingerprint = createHash('sha256')
+        .update(`${this.embeddingSpaceIdentity(activeConfig)}:${Date.now()}`)
+        .digest('hex')
+        .slice(0, 16);
+      await this.ingestionQueue.enqueueOrganizationReembedding({
+        organizationId,
+        fingerprint,
+        reason: 'embedding_model_changed',
       });
+      return;
     }
 
-    const results = await Promise.allSettled(
-      sources.map((source) => {
-        const job = {
-          organizationId,
-          sourceId: source.id,
-          reason: 'embedding_model_changed' as const,
-        };
-        return this.ingestionQueue.isEnabled()
-          ? this.ingestionQueue.enqueue(job)
-          : this.ingestionService.ingestSource(job);
-      }),
+    this.logger.warn(
+      `Redis is disabled; re-embedding organization ${organizationId} in bounded local batches`,
     );
-    const failures = results.flatMap((result, index) =>
-      result.status === 'rejected'
-        ? [{ sourceId: sources[index].id, reason: result.reason as unknown }]
-        : [],
-    );
-    if (failures.length > 0) {
-      await Promise.all(
-        failures.map((failure) =>
-          this.prisma.knowledgeSource.update({
-            where: { id: failure.sourceId },
+    while (true) {
+      const sources = await this.prisma.knowledgeSource.findMany({
+        where: { organizationId, status: 'ready' },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+        take: 10,
+      });
+      if (sources.length === 0) return;
+      for (const source of sources) {
+        await this.prisma.knowledgeSource.update({
+          where: { id: source.id },
+          data: { status: 'pending', errorMessage: null },
+        });
+        try {
+          await this.ingestionService.ingestSource({
+            organizationId,
+            sourceId: source.id,
+            reason: 'embedding_model_changed' as const,
+          });
+        } catch (error) {
+          await this.prisma.knowledgeSource.update({
+            where: { id: source.id },
             data: {
               status: 'failed',
-              errorMessage: `Knowledge re-embedding could not be scheduled: ${this.toErrorMessage(failure.reason)}`,
+              errorMessage: `Knowledge re-embedding failed: ${this.toErrorMessage(error)}`,
             },
-          }),
-        ),
-      );
-      this.logger.error(
-        `Failed to schedule ${failures.length}/${sources.length} knowledge sources for re-embedding in organization ${organizationId}`,
-      );
+          });
+        }
+      }
     }
   }
 
@@ -418,6 +548,144 @@ export class AIProvidersService {
       settings: this.toRecord(safeConfig.settings),
       hasApiKey: Boolean(apiKeyEncrypted),
     };
+  }
+
+  private async withUsage(
+    config: AIProviderConfig,
+  ): Promise<SafeAIProviderConfig> {
+    return {
+      ...this.toSafeConfig(config),
+      usage: await this.aiUsageService.summarize(config),
+    };
+  }
+
+  private async validateProvider(
+    config: AIProviderConfig,
+  ): Promise<{ models: Prisma.InputJsonArray }> {
+    const settings = this.toRecord(config.settings);
+    const adapter =
+      typeof settings.adapter === 'string' ? settings.adapter : '';
+    const isOllama = config.provider === 'local' || adapter === 'ollama';
+    const isAnthropic =
+      config.provider === 'anthropic' || adapter === 'anthropic';
+    const apiKey = config.apiKeyEncrypted
+      ? this.cryptoService.decrypt(config.apiKeyEncrypted)
+      : undefined;
+
+    if (!isOllama && !apiKey) {
+      throw new Error('API key is missing');
+    }
+
+    if (isAnthropic) {
+      if (!config.chatModel) {
+        throw new Error('A chat model is required to validate Anthropic');
+      }
+      const baseUrl = this.validBaseUrl(
+        config.baseUrl ?? 'https://api.anthropic.com/v1',
+      );
+      const response = await fetch(`${baseUrl}/messages`, {
+        method: 'POST',
+        headers: {
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          'x-api-key': apiKey!,
+        },
+        body: JSON.stringify({
+          model: config.chatModel,
+          max_tokens: 1,
+          messages: [{ role: 'user', content: 'Reply OK' }],
+        }),
+        signal: AbortSignal.timeout(10_000),
+        redirect: 'manual',
+      });
+      if (!response.ok) {
+        throw new Error(
+          `Provider returned ${response.status}: ${await this.providerError(response)}`,
+        );
+      }
+      return { models: [config.chatModel] };
+    }
+
+    const baseUrl = this.validBaseUrl(
+      config.baseUrl ??
+        (isOllama
+          ? 'http://localhost:11434'
+          : config.provider === 'openai'
+            ? 'https://api.openai.com/v1'
+            : ''),
+    );
+    const response = await fetch(
+      isOllama ? `${baseUrl}/api/tags` : `${baseUrl}/models`,
+      {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+        signal: AbortSignal.timeout(10_000),
+        redirect: 'manual',
+      },
+    );
+    if (!response.ok) {
+      throw new Error(
+        `Provider returned ${response.status}: ${await this.providerError(response)}`,
+      );
+    }
+    const body = (await response.json()) as Record<string, unknown>;
+    const entries = Array.isArray(body.data)
+      ? body.data
+      : Array.isArray(body.models)
+        ? body.models
+        : [];
+    const availableModels = entries
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const record = entry as Record<string, unknown>;
+        return typeof record.id === 'string'
+          ? record.id
+          : typeof record.name === 'string'
+            ? record.name
+            : null;
+      })
+      .filter((model): model is string => Boolean(model));
+    const configuredModels = [config.chatModel, config.embeddingModel].filter(
+      (model): model is string => Boolean(model),
+    );
+    const missingModels =
+      availableModels.length > 0
+        ? configuredModels.filter((model) => !availableModels.includes(model))
+        : [];
+    if (missingModels.length > 0) {
+      throw new Error(
+        `Credentials are valid, but configured model access was not found: ${missingModels.join(', ')}`,
+      );
+    }
+    return { models: availableModels.slice(0, 200) };
+  }
+
+  private validBaseUrl(value: string): string {
+    if (!value) throw new Error('Base URL is required');
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new Error('Base URL must be a valid HTTP or HTTPS URL');
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      throw new Error('Base URL must use HTTP or HTTPS');
+    }
+    return url.toString().replace(/\/+$/, '');
+  }
+
+  private async providerError(response: Response): Promise<string> {
+    const text = (await response.text()).slice(0, 300);
+    try {
+      const body = JSON.parse(text) as Record<string, unknown>;
+      const nested = body.error;
+      if (nested && typeof nested === 'object') {
+        const message = (nested as Record<string, unknown>).message;
+        if (typeof message === 'string') return message;
+      }
+      return typeof body.message === 'string' ? body.message : text;
+    } catch {
+      return text || response.statusText;
+    }
   }
 
   private toJsonObject(

@@ -4,6 +4,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUrl,
   MinLength,
 } from 'class-validator';
 
@@ -37,8 +38,9 @@ export class CreateAIProviderDto {
 
   @ApiPropertyOptional({ example: 'https://api.openai.com/v1' })
   @IsString()
+  @IsUrl({ require_protocol: true, protocols: ['http', 'https'] })
   @IsOptional()
-  baseUrl?: string;
+  baseUrl?: string | null;
 
   @ApiPropertyOptional({ example: 'sk-...' })
   @IsString()

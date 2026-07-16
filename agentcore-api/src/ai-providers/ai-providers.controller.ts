@@ -59,6 +59,22 @@ export class AIProvidersController {
     return this.aiProvidersService.getById(user, id);
   }
 
+  @Post(':id/test')
+  @ApiOperation({
+    summary: 'Validate provider credentials and configured model access',
+  })
+  @ApiOkResponse({ type: AIProviderResponseDto })
+  validate(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.aiProvidersService.validate(user, id);
+  }
+
+  @Post(':id/primary')
+  @ApiOperation({ summary: 'Make this the primary active AI provider' })
+  @ApiOkResponse({ type: AIProviderResponseDto })
+  setPrimary(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.aiProvidersService.setPrimary(user, id);
+  }
+
   @Patch(':id')
   @ApiOperation({ summary: 'Update an AI provider config' })
   @ApiOkResponse({ type: AIProviderResponseDto })

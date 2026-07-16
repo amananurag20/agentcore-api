@@ -25,6 +25,7 @@ export interface AIChatResponse {
   answer: string;
   model: string;
   adapter: AIAdapterKind;
+  usage?: AIUsage;
 }
 
 export interface AIEmbeddingRequest {
@@ -38,6 +39,13 @@ export interface AIEmbeddingResponse {
   vector: number[];
   model: string;
   adapter: AIAdapterKind;
+  usage?: AIUsage;
+}
+
+export interface AIUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
 }
 
 export interface AITranscriptionRequest {
@@ -53,6 +61,7 @@ export interface AITranscriptionResponse {
   text: string;
   model: string;
   adapter: AIAdapterKind;
+  usage?: AIUsage;
 }
 
 export interface AIProviderAdapter {

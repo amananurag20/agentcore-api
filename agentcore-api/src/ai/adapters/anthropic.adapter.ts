@@ -10,6 +10,10 @@ interface AnthropicResponse {
     type?: string;
     text?: string;
   }>;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+  };
 }
 
 const RETRYABLE_STATUSES = [408, 425, 429, 500, 502, 503, 504];
@@ -84,6 +88,14 @@ export class AnthropicAdapter implements AIProviderAdapter {
       answer,
       model: input.model,
       adapter: this.kind,
+      usage: body.usage
+        ? {
+            inputTokens: body.usage.input_tokens ?? 0,
+            outputTokens: body.usage.output_tokens ?? 0,
+            totalTokens:
+              (body.usage.input_tokens ?? 0) + (body.usage.output_tokens ?? 0),
+          }
+        : undefined,
     };
   }
 
@@ -118,6 +130,7 @@ export class AnthropicAdapter implements AIProviderAdapter {
       try {
         const response = await fetch(url, {
           ...init,
+          redirect: 'manual',
           signal: AbortSignal.timeout(this.options.timeoutMs),
         });
 

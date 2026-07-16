@@ -2186,9 +2186,10 @@ describe('AppController (e2e)', () => {
       .post('/api/v1/auth/login')
       .send({ email: basicUserEmail, password: 'StrongPassword@123' })
       .expect(201);
+    const basicLoginBody = basicLogin.body as AuthResponseBody;
     await request(app.getHttpServer())
       .get('/api/v1/customer-chat/conversations')
-      .set('Authorization', `Bearer ${basicLogin.body.accessToken as string}`)
+      .set('Authorization', `Bearer ${basicLoginBody.accessToken}`)
       .expect(403);
 
     const source = await request(app.getHttpServer())
@@ -2352,9 +2353,14 @@ describe('AppController (e2e)', () => {
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .expect(200)
       .expect((response) => {
-        expect(response.body.data).toHaveLength(2);
-        expect(response.body.total).toBeGreaterThanOrEqual(4);
-        expect(response.body.limit).toBe(2);
+        const body = response.body as {
+          data: unknown[];
+          total: number;
+          limit: number;
+        };
+        expect(body.data).toHaveLength(2);
+        expect(body.total).toBeGreaterThanOrEqual(4);
+        expect(body.limit).toBe(2);
       });
 
     await request(app.getHttpServer())
@@ -2499,7 +2505,8 @@ describe('AppController (e2e)', () => {
       .set('Origin', allowedOrigin)
       .expect(200)
       .expect((response) => {
-        expect(response.body.status).toBe('waiting_for_agent');
+        const body = response.body as { status: string };
+        expect(body.status).toBe('waiting_for_agent');
       });
 
     await request(app.getHttpServer())
@@ -2604,7 +2611,7 @@ describe('AppController (e2e)', () => {
         .send({ visitorId: `scope-test-${suffix}` })
         .expect(201);
       const body = created.body as PublicCustomerChatConversationCreatedBody;
-      const sent = await request(app.getHttpServer())
+      await request(app.getHttpServer())
         .post(
           `/api/v1/customer-chat/widget/conversations/${body.conversation.id}/messages`,
         )

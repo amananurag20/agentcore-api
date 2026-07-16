@@ -17,6 +17,7 @@ model Organization {
   userProductAccess               UserProductAccess[]
   products                        OrganizationProduct[]
   aiProviders                     AIProviderConfig[]
+  aiProviderUsageDaily            AIProviderUsageDaily[]
   knowledgeSources                KnowledgeSource[]
   knowledgeSourceVersions         KnowledgeSourceVersion[]
   knowledgeDocuments              KnowledgeDocument[]

@@ -12,6 +12,8 @@ interface OllamaChatResponse {
     content?: string;
   };
   response?: string;
+  prompt_eval_count?: number;
+  eval_count?: number;
 }
 
 interface OllamaEmbeddingResponse {
@@ -68,6 +70,11 @@ export class OllamaAdapter implements AIProviderAdapter {
       answer,
       model: input.model,
       adapter: this.kind,
+      usage: {
+        inputTokens: body.prompt_eval_count ?? 0,
+        outputTokens: body.eval_count ?? 0,
+        totalTokens: (body.prompt_eval_count ?? 0) + (body.eval_count ?? 0),
+      },
     };
   }
 
@@ -134,6 +141,7 @@ export class OllamaAdapter implements AIProviderAdapter {
       try {
         const response = await fetch(url, {
           ...init,
+          redirect: 'manual',
           signal: AbortSignal.timeout(this.options.timeoutMs),
         });
 

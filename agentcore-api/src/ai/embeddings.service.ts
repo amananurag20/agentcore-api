@@ -1,6 +1,7 @@
 import {
   Injectable,
   Logger,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -8,7 +9,9 @@ import { AIProviderConfig, AIProviderType } from '@prisma/client';
 import { createHash } from 'crypto';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { AIUsageService } from '../ai-usage/ai-usage.service';
 import { AIAdapterRegistryService } from './adapters/ai-adapter-registry.service';
+import { ProviderEndpointPolicyService } from './provider-endpoint-policy.service';
 
 export interface EmbeddingResult {
   vector: number[];
@@ -29,6 +32,9 @@ export class EmbeddingsService {
     private readonly cryptoService: CryptoService,
     private readonly prisma: PrismaService,
     private readonly adapterRegistry: AIAdapterRegistryService,
+    @Optional() private readonly usageService?: AIUsageService,
+    @Optional()
+    private readonly endpointPolicy?: ProviderEndpointPolicyService,
   ) {
     this.defaultDimensions =
       this.configService.get<number>('DEFAULT_EMBEDDING_DIMENSIONS') ?? 1536;
@@ -117,6 +123,7 @@ export class EmbeddingsService {
           id: selection.embeddingProviderId,
           organizationId,
           status: 'active',
+          validationStatus: 'verified',
           embeddingModel: { not: null },
         },
       });
@@ -131,9 +138,10 @@ export class EmbeddingsService {
       where: {
         organizationId,
         status: 'active',
+        validationStatus: 'verified',
         embeddingModel: { not: null },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }],
     });
   }
 
@@ -154,13 +162,24 @@ export class EmbeddingsService {
 
     const apiKey = this.cryptoService.decrypt(providerConfig.apiKeyEncrypted!);
     const model = providerConfig.embeddingModel ?? this.defaultModel;
+    const startedAt = Date.now();
 
     try {
+      await this.usageService?.assertBudgetAvailable(providerConfig);
+      await this.endpointPolicy?.assertProviderAllowed(providerConfig);
       const result = await adapter.createEmbedding({
         apiKey,
         baseUrl: providerConfig.baseUrl,
         model,
         text,
+      });
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'embedding',
+        model: result.model,
+        usage: result.usage,
+        latencyMs: Date.now() - startedAt,
+        success: true,
       });
 
       return {
@@ -170,6 +189,13 @@ export class EmbeddingsService {
         isFallback: false,
       };
     } catch (error) {
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'embedding',
+        model,
+        latencyMs: Date.now() - startedAt,
+        success: false,
+      });
       if (!this.allowLocalFallback) {
         throw new ServiceUnavailableException(
           `Embedding provider failed: ${this.toErrorMessage(error)}`,

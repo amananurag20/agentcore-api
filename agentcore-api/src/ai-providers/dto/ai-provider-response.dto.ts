@@ -16,6 +16,9 @@ export class AIProviderResponseDto {
   @ApiProperty({ enum: ['active', 'inactive'], example: 'active' })
   status: 'active' | 'inactive';
 
+  @ApiProperty({ example: 0 })
+  priority: number;
+
   @ApiProperty({ example: 'Primary OpenAI' })
   name: string;
 
@@ -42,6 +45,24 @@ export class AIProviderResponseDto {
 
   @ApiProperty({ example: {} })
   settings: Record<string, unknown>;
+
+  @ApiProperty({ example: 'verified' })
+  validationStatus: string;
+
+  @ApiPropertyOptional({ example: '2026-07-16T06:00:00.000Z' })
+  lastValidatedAt?: Date | null;
+
+  @ApiPropertyOptional({ example: 243 })
+  validationLatency?: number | null;
+
+  @ApiPropertyOptional({ example: null })
+  validationError?: string | null;
+
+  @ApiProperty({ example: [] })
+  validatedModels: unknown[];
+
+  @ApiPropertyOptional({ example: { requests: 42, totalTokens: 12000 } })
+  usage?: Record<string, unknown>;
 
   @ApiProperty({ example: '2026-07-07T06:00:00.000Z' })
   createdAt: Date;

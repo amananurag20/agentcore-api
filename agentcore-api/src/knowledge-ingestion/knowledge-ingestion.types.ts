@@ -10,6 +10,12 @@ export interface KnowledgeIngestionJobData {
     | 'embedding_model_changed';
 }
 
+export interface KnowledgeOrganizationReembeddingJobData {
+  organizationId: string;
+  fingerprint: string;
+  reason: 'embedding_model_changed';
+}
+
 export class KnowledgeIngestionCancelledError extends Error {
   constructor() {
     super('Knowledge ingestion was cancelled');

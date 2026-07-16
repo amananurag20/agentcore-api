@@ -1,9 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AIProviderConfig, AIProviderType } from '@prisma/client';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { AIUsageService } from '../ai-usage/ai-usage.service';
 import { AIAdapterRegistryService } from './adapters/ai-adapter-registry.service';
+import { ProviderEndpointPolicyService } from './provider-endpoint-policy.service';
 
 export interface ChatContextChunk {
   content: string;
@@ -30,6 +32,9 @@ export class ChatService {
     private readonly cryptoService: CryptoService,
     private readonly prisma: PrismaService,
     private readonly adapterRegistry: AIAdapterRegistryService,
+    @Optional() private readonly usageService?: AIUsageService,
+    @Optional()
+    private readonly endpointPolicy?: ProviderEndpointPolicyService,
   ) {
     this.defaultModel =
       this.configService.get<string>('DEFAULT_CHAT_MODEL') ?? 'gpt-4.1-mini';
@@ -58,30 +63,34 @@ export class ChatService {
       };
     }
 
-    const providerConfig = await this.findProviderConfig(input.organizationId);
-
-    if (providerConfig?.apiKeyEncrypted) {
-      return this.chatWithProvider(
+    const providerConfigs = await this.findProviderConfigs(
+      input.organizationId,
+    );
+    let lastFailure: ChatResult | null = null;
+    for (const providerConfig of providerConfigs) {
+      if (!providerConfig.apiKeyEncrypted) continue;
+      const result = await this.chatWithProvider(
         providerConfig,
         input.question,
         input.context,
         input.safeFallback,
       );
+      if (!result.usedFallback) return result;
+      lastFailure = result;
     }
 
+    if (lastFailure) return lastFailure;
     return {
       answer: this.createFallbackAnswer(
         input.question,
         input.context,
         input.safeFallback,
       ),
-      model: providerConfig?.chatModel ?? this.defaultModel,
-      provider: providerConfig?.provider ?? 'local',
-      adapter: providerConfig ? 'none' : 'local',
+      model: this.defaultModel,
+      provider: 'local',
+      adapter: 'local',
       usedFallback: true,
-      error: providerConfig
-        ? 'Provider has no API key configured'
-        : 'No active chat provider configured',
+      error: 'No active verified chat provider configured',
     };
   }
 
@@ -97,13 +106,15 @@ export class ChatService {
     if (!providerConfig?.apiKeyEncrypted) return fallbackLocale;
     const adapter = this.adapterRegistry.getAdapter(providerConfig);
     if (!adapter.createChatCompletion) return fallbackLocale;
+    const model = providerConfig.chatModel ?? this.defaultModel;
+    const startedAt = Date.now();
 
     try {
       const result = await adapter.createChatCompletion({
         apiKey: this.cryptoService.decrypt(providerConfig.apiKeyEncrypted),
         baseUrl: providerConfig.baseUrl,
         maxOutputTokens: 16,
-        model: providerConfig.chatModel ?? this.defaultModel,
+        model,
         messages: [
           {
             role: 'system',
@@ -114,8 +125,23 @@ export class ChatService {
         ],
         temperature: 0,
       });
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'chat',
+        model: result.model,
+        usage: result.usage,
+        latencyMs: Date.now() - startedAt,
+        success: true,
+      });
       return this.normalizeLocale(result.answer) ?? fallbackLocale;
     } catch {
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'chat',
+        model,
+        latencyMs: Date.now() - startedAt,
+        success: false,
+      });
       return fallbackLocale;
     }
   }
@@ -130,13 +156,15 @@ export class ChatService {
     if (!providerConfig?.apiKeyEncrypted) return null;
     const adapter = this.adapterRegistry.getAdapter(providerConfig);
     if (!adapter.createChatCompletion) return null;
+    const model = providerConfig.chatModel ?? this.defaultModel;
+    const startedAt = Date.now();
 
     try {
       const result = await adapter.createChatCompletion({
         apiKey: this.cryptoService.decrypt(providerConfig.apiKeyEncrypted),
         baseUrl: providerConfig.baseUrl,
         maxOutputTokens: 300,
-        model: providerConfig.chatModel ?? this.defaultModel,
+        model,
         messages: [
           {
             role: 'system',
@@ -163,8 +191,23 @@ export class ChatService {
         ],
         temperature: 0,
       });
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'chat',
+        model: result.model,
+        usage: result.usage,
+        latencyMs: Date.now() - startedAt,
+        success: true,
+      });
       return result.answer.trim() || null;
     } catch {
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'chat',
+        model,
+        latencyMs: Date.now() - startedAt,
+        success: false,
+      });
       return null;
     }
   }
@@ -179,19 +222,37 @@ export class ChatService {
     if (!providerConfig?.apiKeyEncrypted) return null;
     const adapter = this.adapterRegistry.getAdapter(providerConfig);
     if (!adapter.createTranscription) return null;
+    const model =
+      providerConfig.sttModel ??
+      this.configService.get<string>('AI_TRANSCRIPTION_MODEL') ??
+      'whisper-1';
+    const startedAt = Date.now();
     try {
       const result = await adapter.createTranscription({
         apiKey: this.cryptoService.decrypt(providerConfig.apiKeyEncrypted),
         baseUrl: providerConfig.baseUrl,
-        model:
-          this.configService.get<string>('AI_TRANSCRIPTION_MODEL') ??
-          'whisper-1',
+        model,
         buffer: input.buffer,
         mimeType: input.mimeType,
         fileName: input.fileName,
       });
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'transcription',
+        model: result.model,
+        usage: result.usage,
+        latencyMs: Date.now() - startedAt,
+        success: true,
+      });
       return result.text;
     } catch {
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'transcription',
+        model,
+        latencyMs: Date.now() - startedAt,
+        success: false,
+      });
       return null;
     }
   }
@@ -203,9 +264,24 @@ export class ChatService {
       where: {
         organizationId,
         status: 'active',
+        validationStatus: 'verified',
         chatModel: { not: null },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }],
+    });
+  }
+
+  private async findProviderConfigs(
+    organizationId: string,
+  ): Promise<AIProviderConfig[]> {
+    return this.prisma.aIProviderConfig.findMany({
+      where: {
+        organizationId,
+        status: 'active',
+        validationStatus: 'verified',
+        chatModel: { not: null },
+      },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }],
     });
   }
 
@@ -230,8 +306,11 @@ export class ChatService {
 
     const apiKey = this.cryptoService.decrypt(providerConfig.apiKeyEncrypted!);
     const model = providerConfig.chatModel ?? this.defaultModel;
+    const startedAt = Date.now();
 
     try {
+      await this.usageService?.assertBudgetAvailable(providerConfig);
+      await this.endpointPolicy?.assertProviderAllowed(providerConfig);
       const result = await adapter.createChatCompletion({
         apiKey,
         baseUrl: providerConfig.baseUrl,
@@ -250,6 +329,14 @@ export class ChatService {
         ],
         temperature: this.readTemperature(providerConfig),
       });
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'chat',
+        model: result.model,
+        usage: result.usage,
+        latencyMs: Date.now() - startedAt,
+        success: true,
+      });
 
       return {
         answer: result.answer,
@@ -259,6 +346,13 @@ export class ChatService {
         usedFallback: false,
       };
     } catch (error) {
+      await this.usageService?.record({
+        provider: providerConfig,
+        capability: 'chat',
+        model,
+        latencyMs: Date.now() - startedAt,
+        success: false,
+      });
       const errorMessage = this.toErrorMessage(error);
       this.logger.warn(
         `AI chat adapter failed for provider ${providerConfig.id}; using fallback answer. ${errorMessage}`,

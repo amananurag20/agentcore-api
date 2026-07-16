@@ -3,9 +3,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   KNOWLEDGE_INGESTION_JOB,
   KNOWLEDGE_INGESTION_QUEUE,
+  KNOWLEDGE_REEMBED_ORGANIZATION_JOB,
 } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
-import { KnowledgeIngestionJobData } from './knowledge-ingestion.types';
+import {
+  KnowledgeIngestionJobData,
+  KnowledgeOrganizationReembeddingJobData,
+} from './knowledge-ingestion.types';
 
 @Injectable()
 export class KnowledgeIngestionQueueService {
@@ -57,6 +61,25 @@ export class KnowledgeIngestionQueueService {
       });
       throw error;
     }
+  }
+
+  async enqueueOrganizationReembedding(
+    data: KnowledgeOrganizationReembeddingJobData,
+  ) {
+    const safeOrganizationId = data.organizationId.replace(
+      /[^A-Za-z0-9_-]/g,
+      '_',
+    );
+    const safeFingerprint = data.fingerprint.replace(/[^A-Za-z0-9_-]/g, '_');
+    return this.queueService.add(
+      KNOWLEDGE_INGESTION_QUEUE,
+      KNOWLEDGE_REEMBED_ORGANIZATION_JOB,
+      data,
+      {
+        jobId: `knowledge-reembed-${safeOrganizationId}-${safeFingerprint}`,
+        attempts: 1,
+      },
+    );
   }
 
   async requestCancellation(sourceId: string) {

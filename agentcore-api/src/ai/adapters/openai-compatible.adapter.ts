@@ -16,12 +16,21 @@ interface OpenAICompatibleChatResponse {
       content?: string | Array<{ text?: string; type?: string }>;
     };
   }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
 }
 
 interface OpenAICompatibleEmbeddingResponse {
   data?: Array<{
     embedding?: number[];
   }>;
+  usage?: {
+    prompt_tokens?: number;
+    total_tokens?: number;
+  };
 }
 
 interface OpenAICompatibleTranscriptionResponse {
@@ -73,6 +82,7 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
       answer,
       model: input.model,
       adapter: this.kind,
+      usage: this.toUsage(body.usage),
     };
   }
 
@@ -108,6 +118,22 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
       vector,
       model: input.model,
       adapter: this.kind,
+      usage: this.toUsage(body.usage),
+    };
+  }
+
+  private toUsage(usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  }) {
+    if (!usage) return undefined;
+    const inputTokens = usage.prompt_tokens ?? 0;
+    const outputTokens = usage.completion_tokens ?? 0;
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens: usage.total_tokens ?? inputTokens + outputTokens,
     };
   }
 
@@ -181,6 +207,7 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
       try {
         const response = await fetch(url, {
           ...init,
+          redirect: 'manual',
           signal: AbortSignal.timeout(this.options.timeoutMs),
         });
 

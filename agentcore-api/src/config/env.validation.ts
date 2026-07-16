@@ -64,6 +64,10 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
+  AI_CONFIG_ENCRYPTION_KEYS?: string;
+
+  @IsString()
+  @IsOptional()
   CORS_ORIGINS?: string;
 
   @Transform(({ value }) => Number(value ?? 15000))
@@ -86,6 +90,15 @@ class EnvironmentVariables {
   @Max(8192)
   @IsOptional()
   AI_PROVIDER_MAX_OUTPUT_TOKENS = 1024;
+
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  @IsOptional()
+  AI_PROVIDER_ALLOW_PRIVATE_NETWORKS = false;
+
+  @IsString()
+  @IsOptional()
+  AI_PROVIDER_ALLOWED_HOSTS?: string;
 
   @IsString()
   @IsOptional()
