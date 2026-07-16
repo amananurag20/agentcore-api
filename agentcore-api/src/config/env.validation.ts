@@ -818,6 +818,29 @@ class EnvironmentVariables {
   @IsOptional()
   WHATSAPP_INBOUND_QUEUE_CONCURRENCY = 5;
 
+  @Transform(({ value }) => Number(value ?? 0.35))
+  @Min(0)
+  @Max(1)
+  @IsOptional()
+  WHATSAPP_MIN_SIMILARITY_SCORE = 0.35;
+
+  @Transform(({ value }) => Number(value ?? 0.05))
+  @Min(0)
+  @Max(1)
+  @IsOptional()
+  WHATSAPP_LEXICAL_RESCUE_MARGIN = 0.05;
+
+  @Transform(
+    ({ value }) => value === undefined || value === 'true' || value === true,
+  )
+  @IsBoolean()
+  @IsOptional()
+  WHATSAPP_AUTO_HANDOFF_ON_FAILURE = true;
+
+  @IsString()
+  @IsOptional()
+  WHATSAPP_PROCESSING_FAILURE_MESSAGE?: string;
+
   @IsString()
   @IsOptional()
   VOICE_OUTBOUND_MODE?: 'mock' | 'live';

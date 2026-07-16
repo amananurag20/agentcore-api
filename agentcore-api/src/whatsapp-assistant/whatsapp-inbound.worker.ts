@@ -55,6 +55,16 @@ export class WhatsAppInboundWorker implements OnModuleInit, OnModuleDestroy {
 
   private async process(job: Job<WhatsAppInboundJobData>) {
     if (job.name !== WHATSAPP_INBOUND_JOB) return;
-    await this.whatsAppService.processInboundMessage(job.data.messageId);
+    try {
+      await this.whatsAppService.processInboundMessage(job.data.messageId);
+    } catch (error) {
+      const attempts = job.opts.attempts ?? 1;
+      const isFinalAttempt = job.attemptsMade + 1 >= attempts;
+      if (!isFinalAttempt) throw error;
+      await this.whatsAppService.recoverInboundFailure(
+        job.data.messageId,
+        error,
+      );
+    }
   }
 }

@@ -12,13 +12,18 @@ function createService(
   rateLimit: Record<string, unknown> = { consume: jest.fn() },
   outbound: Record<string, unknown> = { sendText: jest.fn() },
   audit: Record<string, unknown> = { record: jest.fn() },
+  chat: Record<string, unknown> = {
+    answerWithContext: jest.fn(),
+    answerConversationally: jest.fn().mockReturnValue(null),
+  },
+  knowledge: Record<string, unknown> = { search: jest.fn() },
 ) {
   return new WhatsAppAssistantService(
     audit as never,
     {} as never,
-    { answerWithContext: jest.fn() } as never,
+    chat as never,
     { decrypt: () => 'app-secret' } as never,
-    { search: jest.fn() } as never,
+    knowledge as never,
     outbound as never,
     prisma as never,
     { enqueue: jest.fn(), isEnabled: () => true } as never,
@@ -201,6 +206,320 @@ describe('WhatsAppAssistantService hardening', () => {
       processed: true,
     });
     expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('uses the active topic, recent history, folder scope, and confidence filter for follow-ups', async () => {
+    const answerWithContext = jest.fn().mockResolvedValue({
+      answer: 'The premium plan includes priority support.',
+      model: 'test-model',
+      provider: 'openai',
+      adapter: 'openai',
+      usedFallback: false,
+    });
+    const search = jest.fn().mockResolvedValue([
+      {
+        id: 'chunk-strong',
+        content: 'Premium pricing includes priority support.',
+        score: 0.82,
+      },
+      {
+        id: 'chunk-weak',
+        content: 'An unrelated document.',
+        score: 0.1,
+      },
+    ]);
+    const sendText = jest.fn().mockResolvedValue({
+      provider: 'meta',
+      status: 'sent',
+      providerMessageId: 'wamid.reply',
+    });
+    const findUnique = jest
+      .fn()
+      .mockResolvedValueOnce({
+        metadata: {
+          memory: {
+            activeTopicQuery: 'premium pricing',
+            clarificationRequested: false,
+            clarificationAttempts: 0,
+          },
+        },
+      })
+      .mockResolvedValueOnce({ status: 'open', assignedAgentId: null });
+    const findMany = jest.fn().mockResolvedValue([
+      {
+        role: 'assistant',
+        content: 'Our plans start at $20.',
+        metadata: {},
+      },
+      { role: 'contact', content: 'Tell me about pricing.', metadata: {} },
+    ]);
+    let updateInput: { data: { status: string } } | undefined;
+    const updateMany = jest.fn((input: { data: { status: string } }) => {
+      updateInput = input;
+      return Promise.resolve({ count: 1 });
+    });
+    const create = jest
+      .fn()
+      .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ id: 'assistant-message', ...data }),
+      );
+    const service = createService(
+      {
+        whatsAppConversation: { findUnique, updateMany },
+        whatsAppMessage: { findMany, create },
+      },
+      { consume: jest.fn() },
+      { sendText },
+      { record: jest.fn().mockResolvedValue(undefined) },
+      {
+        answerConversationally: jest.fn().mockReturnValue(null),
+        answerWithContext,
+      },
+      { search },
+    ) as unknown as {
+      createAssistantReply(
+        config: WhatsAppAssistantConfig,
+        organizationId: string,
+        conversationId: string,
+        contactWaId: string,
+        content: string,
+        appointmentAction: undefined,
+        locale: string,
+        inboundMessageId: string,
+      ): Promise<unknown>;
+    };
+
+    await service.createAssistantReply(
+      {
+        id: 'config-1',
+        settings: {
+          memoryEnabled: true,
+          recentMessageLimit: 8,
+          knowledgeScope: 'folders',
+          folderIds: ['folder-1'],
+        },
+      } as WhatsAppAssistantConfig,
+      'org-1',
+      'conversation-1',
+      '15551234567',
+      'What about that?',
+      undefined,
+      'en',
+      'current-inbound',
+    );
+
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId: 'org-1' }),
+      expect.objectContaining({
+        query: 'premium pricing\nFollow-up request: What about that?',
+        limit: 10,
+        productKey: 'whatsapp_assistant',
+        folderIds: ['folder-1'],
+      }),
+    );
+    expect(answerWithContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        history: [
+          { role: 'user', content: 'Tell me about pricing.' },
+          { role: 'assistant', content: 'Our plans start at $20.' },
+        ],
+        context: [
+          {
+            content: 'Premium pricing includes priority support.',
+            score: 0.82,
+          },
+        ],
+      }),
+    );
+    expect(updateInput?.data).toMatchObject({ status: 'open' });
+  });
+
+  it('hands off after the configured number of low-confidence clarifications', () => {
+    const service = createService() as unknown as {
+      resolveLowConfidenceDecision(
+        policy: {
+          enabled: boolean;
+          recentMessageLimit: number;
+          lowConfidenceAction: 'clarify' | 'handoff';
+          maxClarificationAttempts: number;
+        },
+        previous: {
+          clarificationRequested: boolean;
+          clarificationAttempts: number;
+        },
+      ): { attempts: number; shouldHandoff: boolean };
+    };
+    const policy = {
+      enabled: true,
+      recentMessageLimit: 8,
+      lowConfidenceAction: 'clarify' as const,
+      maxClarificationAttempts: 2,
+    };
+
+    expect(
+      service.resolveLowConfidenceDecision(policy, {
+        clarificationRequested: false,
+        clarificationAttempts: 0,
+      }),
+    ).toEqual({ attempts: 1, shouldHandoff: false });
+    expect(
+      service.resolveLowConfidenceDecision(policy, {
+        clarificationRequested: true,
+        clarificationAttempts: 1,
+      }),
+    ).toEqual({ attempts: 2, shouldHandoff: true });
+  });
+
+  it('sends a guarded response and suppresses future AI replies after repeated low confidence', async () => {
+    let sentInput: { content: string } | undefined;
+    const sendText = jest.fn((input: { content: string }) => {
+      sentInput = input;
+      return Promise.resolve({
+        provider: 'meta',
+        status: 'sent',
+        providerMessageId: 'wamid.handoff',
+      });
+    });
+    const auditRecord = jest.fn().mockResolvedValue(undefined);
+    let updateInput: { data: { status: string } } | undefined;
+    const updateMany = jest.fn((input: { data: { status: string } }) => {
+      updateInput = input;
+      return Promise.resolve({ count: 1 });
+    });
+    const service = createService(
+      {
+        whatsAppConversation: {
+          findUnique: jest
+            .fn()
+            .mockResolvedValueOnce({
+              metadata: {
+                memory: {
+                  activeTopicQuery: 'refund policy',
+                  clarificationRequested: true,
+                  clarificationAttempts: 1,
+                },
+              },
+            })
+            .mockResolvedValueOnce({ status: 'open', assignedAgentId: null }),
+          updateMany,
+        },
+        whatsAppMessage: {
+          findMany: jest.fn().mockResolvedValue([]),
+          create: jest
+            .fn()
+            .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+              Promise.resolve({ id: 'assistant-message', ...data }),
+            ),
+        },
+      },
+      { consume: jest.fn() },
+      { sendText },
+      { record: auditRecord },
+      {
+        answerConversationally: jest.fn().mockReturnValue(null),
+        answerWithContext: jest.fn(),
+      },
+      { search: jest.fn().mockResolvedValue([]) },
+    ) as unknown as {
+      createAssistantReply(
+        config: WhatsAppAssistantConfig,
+        organizationId: string,
+        conversationId: string,
+        contactWaId: string,
+        content: string,
+        appointmentAction: undefined,
+        locale: string,
+        inboundMessageId: string,
+      ): Promise<unknown>;
+    };
+
+    await service.createAssistantReply(
+      {
+        id: 'config-1',
+        settings: {
+          memoryEnabled: true,
+          lowConfidenceAction: 'clarify',
+          maxClarificationAttempts: 2,
+        },
+      } as WhatsAppAssistantConfig,
+      'org-1',
+      'conversation-1',
+      '15551234567',
+      'I still do not understand it',
+      undefined,
+      'en',
+      'current-inbound',
+    );
+
+    expect(sentInput?.content).toContain('human agent');
+    expect(updateInput?.data.status).toBe('waiting_for_agent');
+    expect(auditRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'whatsapp.auto_handoff_requested' }),
+    );
+  });
+
+  it('persists a final processing-failure handoff and marks the inbound message processed', async () => {
+    let conversationUpdate: { data: { status: string } } | undefined;
+    let inboundUpdate:
+      { data: { processedAt: Date; processingError: string } } | undefined;
+    const create = jest.fn().mockResolvedValue({ id: 'failure-notice' });
+    const auditRecord = jest.fn().mockResolvedValue(undefined);
+    const service = createService(
+      {
+        whatsAppConversation: {
+          updateMany: jest.fn((input: { data: { status: string } }) => {
+            conversationUpdate = input;
+            return Promise.resolve({ count: 1 });
+          }),
+        },
+        whatsAppMessage: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'inbound-1',
+            direction: 'inbound',
+            processedAt: null,
+            conversation: {
+              id: 'conversation-1',
+              organizationId: 'org-1',
+              contactWaId: '15551234567',
+              config: { id: 'config-1' },
+            },
+          }),
+          create,
+          update: jest.fn(
+            (input: {
+              data: { processedAt: Date; processingError: string };
+            }) => {
+              inboundUpdate = input;
+              return Promise.resolve({});
+            },
+          ),
+        },
+      },
+      { consume: jest.fn() },
+      {
+        sendText: jest.fn().mockResolvedValue({
+          provider: 'meta',
+          status: 'sent',
+          providerMessageId: 'wamid.failure-notice',
+        }),
+      },
+      { record: auditRecord },
+    );
+
+    await service.recoverInboundFailure(
+      'inbound-1',
+      new Error('knowledge provider unavailable'),
+    );
+
+    expect(conversationUpdate?.data.status).toBe('waiting_for_agent');
+    expect(create).toHaveBeenCalled();
+    expect(inboundUpdate?.data.processedAt).toBeInstanceOf(Date);
+    expect(inboundUpdate?.data.processingError).toContain(
+      'knowledge provider unavailable',
+    );
+    expect(auditRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'whatsapp.auto_handoff_requested' }),
+    );
   });
 
   it('marks assigned inbound messages processed without invoking AI', async () => {

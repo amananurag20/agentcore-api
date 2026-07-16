@@ -9,13 +9,16 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Prisma, WhatsAppAssistantConfig } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
-import { ChatService } from '../ai/chat.service';
+import { ChatService, type ChatHistoryMessage } from '../ai/chat.service';
 import { AuditService } from '../audit/audit.service';
 import { AppointmentBookingService } from '../appointment-booking/appointment-booking.service';
 import { AppointmentActionDto } from '../appointment-booking/dto/appointment-action.dto';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
-import { KnowledgeService } from '../knowledge/knowledge.service';
+import {
+  KnowledgeSearchRow,
+  KnowledgeService,
+} from '../knowledge/knowledge.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
 import {
@@ -48,6 +51,13 @@ type WhatsAppConversationWithMessages = Prisma.WhatsAppConversationGetPayload<{
 
 type AgentOutboundMessageType =
   'text' | 'template' | 'image' | 'audio' | 'video' | 'document';
+
+type WhatsAppMemoryPolicy = {
+  enabled: boolean;
+  recentMessageLimit: number;
+  lowConfidenceAction: 'clarify' | 'handoff';
+  maxClarificationAttempts: number;
+};
 
 class HumanOwnedConversationError extends Error {}
 
@@ -96,6 +106,11 @@ export class WhatsAppAssistantService {
     );
     await this.assertWhatsAppEnabled(organizationId);
 
+    const settings = await this.normalizeWhatsAppSettings(
+      organizationId,
+      input.settings,
+    );
+
     const config = await this.prisma.whatsAppAssistantConfig.create({
       data: {
         organizationId,
@@ -114,7 +129,7 @@ export class WhatsAppAssistantService {
           ? this.cryptoService.encrypt(input.appSecret)
           : undefined,
         defaultLocale: input.defaultLocale ?? 'en',
-        settings: this.toJsonObject(input.settings),
+        settings: this.toJsonObject(settings),
       },
     });
 
@@ -139,6 +154,13 @@ export class WhatsAppAssistantService {
     input: UpdateWhatsAppConfigDto,
   ) {
     const existing = await this.findConfigForActor(currentUser, id);
+    const settings = input.settings
+      ? await this.normalizeWhatsAppSettings(
+          existing.organizationId,
+          input.settings,
+          this.toRecord(existing.settings),
+        )
+      : undefined;
 
     const config = await this.prisma.whatsAppAssistantConfig.update({
       where: { id: existing.id },
@@ -167,9 +189,7 @@ export class WhatsAppAssistantService {
               ? this.cryptoService.encrypt(input.appSecret)
               : null,
         defaultLocale: input.defaultLocale,
-        settings: input.settings
-          ? this.toJsonObject(input.settings)
-          : undefined,
+        settings: settings ? this.toJsonObject(settings) : undefined,
       },
     });
 
@@ -851,6 +871,7 @@ export class WhatsAppAssistantService {
         question,
         this.readAppointmentAction(metadata),
         locale,
+        inboundMessage.id,
       );
       await this.markInboundProcessed(messageId);
     } catch (error) {
@@ -867,6 +888,110 @@ export class WhatsAppAssistantService {
       });
       throw error;
     }
+  }
+
+  async recoverInboundFailure(
+    messageId: string,
+    error: unknown,
+  ): Promise<void> {
+    const inboundMessage = await this.prisma.whatsAppMessage.findUnique({
+      where: { id: messageId },
+      include: { conversation: { include: { config: true } } },
+    });
+    if (
+      !inboundMessage ||
+      inboundMessage.direction !== 'inbound' ||
+      inboundMessage.processedAt
+    ) {
+      return;
+    }
+
+    const { conversation } = inboundMessage;
+    const claimed = await this.prisma.whatsAppConversation.updateMany({
+      where: {
+        id: conversation.id,
+        status: 'open',
+        assignedAgentId: null,
+      },
+      data: { status: 'waiting_for_agent' },
+    });
+    if (claimed.count === 0) {
+      await this.markInboundProcessed(messageId);
+      return;
+    }
+
+    const content = this.configService.get<string>(
+      'WHATSAPP_PROCESSING_FAILURE_MESSAGE',
+      'I could not complete that request right now. I have asked a human agent to help you.',
+    );
+    try {
+      const delivery = await this.outboundService.sendText({
+        config: conversation.config,
+        to: conversation.contactWaId,
+        content,
+      });
+      await this.prisma.whatsAppMessage.create({
+        data: {
+          organizationId: conversation.organizationId,
+          conversationId: conversation.id,
+          direction: 'outbound',
+          role: 'assistant',
+          type: 'text',
+          providerMessageId: delivery.providerMessageId,
+          content,
+          deliveryStatus: delivery.status,
+          deliveryAttempts: 1,
+          metadata: this.toJsonObject({
+            usedFallback: true,
+            handoffRequested: true,
+            failureCode: 'automatic_reply_failed',
+            delivery,
+          }),
+        },
+      });
+    } catch (deliveryError) {
+      await this.prisma.whatsAppMessage.create({
+        data: {
+          organizationId: conversation.organizationId,
+          conversationId: conversation.id,
+          direction: 'outbound',
+          role: 'assistant',
+          type: 'text',
+          content,
+          deliveryStatus: 'failed',
+          deliveryError: 'Provider delivery failed after retry attempts',
+          deliveryAttempts: 1,
+          metadata: this.toJsonObject({
+            usedFallback: true,
+            handoffRequested: true,
+            failureCode: 'automatic_reply_and_notice_failed',
+          }),
+        },
+      });
+      this.logger.error(
+        `WhatsApp failure notice could not be delivered for ${messageId}`,
+        deliveryError instanceof Error ? deliveryError.stack : undefined,
+      );
+    }
+
+    const processingError = this.errorMessage(error).slice(0, 2000);
+    await this.prisma.whatsAppMessage.update({
+      where: { id: messageId },
+      data: { processedAt: new Date(), processingError },
+    });
+    await this.auditService
+      .record({
+        organizationId: conversation.organizationId,
+        action: 'whatsapp.auto_handoff_requested',
+        entityType: 'whatsapp_conversation',
+        entityId: conversation.id,
+        metadata: { reason: 'automatic_reply_failed', error: processingError },
+      })
+      .catch((auditError) =>
+        this.logger.warn(
+          `Could not audit WhatsApp failure handoff for ${conversation.id}: ${this.errorMessage(auditError)}`,
+        ),
+      );
   }
 
   private async persistInboundMessage(
@@ -987,6 +1112,7 @@ export class WhatsAppAssistantService {
     content: string,
     appointmentAction?: AppointmentActionDto,
     locale = 'en',
+    inboundMessageId?: string,
   ): Promise<{
     message: Prisma.WhatsAppMessageGetPayload<object>;
     delivery: WhatsAppOutboundResult;
@@ -1023,21 +1149,188 @@ export class WhatsAppAssistantService {
       return { message, delivery };
     }
 
-    const systemUser = this.createSystemUser(organizationId);
-    const searchResults = await this.knowledgeService.search(systemUser, {
-      query: content,
-      limit: 5,
-      productKey: 'whatsapp_assistant',
+    const memoryPolicy = this.readWhatsAppMemoryPolicy(config.settings);
+    const conversation = await this.prisma.whatsAppConversation.findUnique({
+      where: { id: conversationId },
+      select: { metadata: true },
     });
-    const chatResult = await this.chatService.answerWithContext({
-      organizationId,
-      question: `Reply in locale ${locale}. Customer message: ${content}`,
-      safeFallback: true,
-      context: searchResults.map((result) => ({
-        content: result.content,
-        score: result.score,
-      })),
-    });
+    const conversationMemory = this.readConversationMemory(
+      conversation?.metadata ?? {},
+    );
+    let activeTopicQuery = conversationMemory.activeTopicQuery;
+    let clarificationRequested = false;
+    let clarificationAttempts = 0;
+    let shouldAutoHandoff = false;
+    let searchResults: KnowledgeSearchRow[] = [];
+    let answer: string;
+    let responseMetadata: Record<string, unknown>;
+
+    const conversationalResult =
+      this.chatService.answerConversationally(content);
+    if (conversationalResult) {
+      answer = conversationalResult.answer;
+      responseMetadata = {
+        model: conversationalResult.model,
+        provider: conversationalResult.provider,
+        adapter: conversationalResult.adapter,
+        usedFallback: false,
+        handledWithoutKnowledge: true,
+        retrieval: {
+          candidateCount: 0,
+          acceptedCount: 0,
+          skipped: 'conversational_intent',
+        },
+      };
+    } else {
+      const recentMessages = memoryPolicy.enabled
+        ? await this.prisma.whatsAppMessage.findMany({
+            where: {
+              conversationId,
+              organizationId,
+              id: inboundMessageId ? { not: inboundMessageId } : undefined,
+              role: { in: ['contact', 'assistant'] },
+              content: { not: null },
+            },
+            select: { role: true, content: true, metadata: true },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            take: memoryPolicy.recentMessageLimit,
+          })
+        : [];
+      const conversationHistory: ChatHistoryMessage[] = [...recentMessages]
+        .reverse()
+        .flatMap((message) =>
+          message.content
+            ? [
+                {
+                  role:
+                    message.role === 'contact'
+                      ? ('user' as const)
+                      : ('assistant' as const),
+                  content: message.content,
+                },
+              ]
+            : [],
+        );
+      const previousContactMessage = [...conversationHistory]
+        .reverse()
+        .find((message) => message.role === 'user');
+      const isContextualFollowUp = this.isContextualFollowUp(
+        content,
+        conversationHistory.length > 0,
+      );
+      const storedTopic = recentMessages
+        .filter((message) => message.role === 'assistant')
+        .map((message) => this.toRecord(message.metadata).retrieval)
+        .find(
+          (retrieval) =>
+            retrieval &&
+            !Array.isArray(retrieval) &&
+            typeof retrieval === 'object' &&
+            typeof (retrieval as Record<string, unknown>).topicQuery ===
+              'string',
+        );
+      const persistedTopic =
+        activeTopicQuery ??
+        (storedTopic && !Array.isArray(storedTopic)
+          ? (storedTopic as Record<string, unknown>).topicQuery
+          : null);
+      const topicQuery =
+        typeof persistedTopic === 'string'
+          ? persistedTopic
+          : (previousContactMessage?.content ?? content);
+      const retrievalQuery = isContextualFollowUp
+        ? `${topicQuery}\nFollow-up request: ${content}`
+        : content;
+      const proposedTopicQuery = isContextualFollowUp ? topicQuery : content;
+      const systemUser = this.createSystemUser(organizationId);
+      const candidates = await this.knowledgeService.search(systemUser, {
+        query: retrievalQuery,
+        limit: 10,
+        productKey: 'whatsapp_assistant',
+        folderIds: this.readWhatsAppKnowledgeFolderIds(config.settings),
+      });
+      const minimumScore = this.configService.get<number>(
+        'WHATSAPP_MIN_SIMILARITY_SCORE',
+        0.35,
+      );
+      const lexicalRescueMargin = this.configService.get<number>(
+        'WHATSAPP_LEXICAL_RESCUE_MARGIN',
+        0.05,
+      );
+      searchResults = candidates
+        .filter(
+          (result) =>
+            result.score >= minimumScore ||
+            (result.score >= minimumScore - lexicalRescueMargin &&
+              this.hasLexicalSupport(retrievalQuery, result.content)),
+        )
+        .slice(0, 5);
+      const retrievalMetadata = {
+        candidateCount: candidates.length,
+        acceptedCount: searchResults.length,
+        minimumScore,
+        lexicalRescueMargin,
+        lexicalRescueCount: searchResults.filter(
+          (result) => result.score < minimumScore,
+        ).length,
+        topScore: candidates[0]?.score ?? null,
+        contextualFollowUp: isContextualFollowUp,
+        topicQuery: proposedTopicQuery,
+      };
+
+      if (!searchResults.length) {
+        const previousMemory = this.readPreviousAssistantMemory(recentMessages);
+        const lowConfidence = this.resolveLowConfidenceDecision(
+          memoryPolicy,
+          conversationMemory.clarificationRequested
+            ? conversationMemory
+            : previousMemory,
+        );
+        clarificationAttempts = lowConfidence.attempts;
+        shouldAutoHandoff = lowConfidence.shouldHandoff;
+        clarificationRequested = !shouldAutoHandoff;
+        answer = shouldAutoHandoff
+          ? 'I cannot confirm that from the available knowledge right now. I have requested a human agent to help you.'
+          : 'I could not find enough relevant information to answer that confidently. Could you rephrase your question or add a little more detail?';
+        responseMetadata = {
+          model: 'local-guardrail',
+          provider: 'local',
+          adapter: 'retrieval-guardrail',
+          usedFallback: true,
+          handledWithoutKnowledge: false,
+          retrieval: retrievalMetadata,
+          memory: { clarificationRequested, clarificationAttempts },
+        };
+      } else {
+        activeTopicQuery = proposedTopicQuery;
+        const chatResult = await this.chatService.answerWithContext({
+          organizationId,
+          question: `Reply in locale ${locale}. Customer message: ${content}`,
+          history: conversationHistory,
+          safeFallback: true,
+          context: searchResults.map((result) => ({
+            content: result.content,
+            score: result.score,
+          })),
+        });
+        answer = chatResult.answer;
+        responseMetadata = {
+          model: chatResult.model,
+          provider: chatResult.provider,
+          adapter: chatResult.adapter,
+          usedFallback: chatResult.usedFallback,
+          handledWithoutKnowledge: chatResult.handledWithoutKnowledge ?? false,
+          error: chatResult.error,
+          retrieval: retrievalMetadata,
+          memory: { clarificationRequested: false, clarificationAttempts: 0 },
+        };
+        shouldAutoHandoff =
+          this.configService.get<boolean>(
+            'WHATSAPP_AUTO_HANDOFF_ON_FAILURE',
+            true,
+          ) && chatResult.usedFallback;
+      }
+    }
 
     if (!(await this.isAiOwnedConversation(conversationId))) {
       throw new HumanOwnedConversationError();
@@ -1045,7 +1338,7 @@ export class WhatsAppAssistantService {
     const delivery = await this.outboundService.sendText({
       config,
       to: contactWaId,
-      content: chatResult.answer,
+      content: answer,
     });
     const message = await this.prisma.whatsAppMessage.create({
       data: {
@@ -1055,13 +1348,11 @@ export class WhatsAppAssistantService {
         role: 'assistant',
         type: 'text',
         providerMessageId: delivery.providerMessageId,
-        content: chatResult.answer,
+        content: answer,
+        deliveryStatus: delivery.status,
+        deliveryAttempts: 1,
         metadata: this.toJsonObject({
-          model: chatResult.model,
-          provider: chatResult.provider,
-          adapter: chatResult.adapter,
-          usedFallback: chatResult.usedFallback,
-          error: chatResult.error,
+          ...responseMetadata,
           delivery,
           citations: searchResults.map((result) => ({
             chunkId: result.id,
@@ -1070,6 +1361,35 @@ export class WhatsAppAssistantService {
         }),
       },
     });
+
+    await this.prisma.whatsAppConversation.updateMany({
+      where: {
+        id: conversationId,
+        status: 'open',
+        assignedAgentId: null,
+      },
+      data: {
+        status: shouldAutoHandoff ? 'waiting_for_agent' : 'open',
+        metadata: this.toJsonObject({
+          ...this.toRecord(conversation?.metadata ?? {}),
+          memory: {
+            activeTopicQuery,
+            clarificationRequested,
+            clarificationAttempts,
+          },
+        }),
+      },
+    });
+
+    if (shouldAutoHandoff) {
+      await this.auditService.record({
+        organizationId,
+        action: 'whatsapp.auto_handoff_requested',
+        entityType: 'whatsapp_conversation',
+        entityId: conversationId,
+        metadata: { reason: 'low_confidence_or_provider_failure' },
+      });
+    }
 
     return { message, delivery };
   }
@@ -1259,6 +1579,280 @@ export class WhatsAppAssistantService {
         keyword.trim().length > 0 &&
         normalized.includes(keyword.trim().toLocaleLowerCase()),
     );
+  }
+
+  private async normalizeWhatsAppSettings(
+    organizationId: string,
+    input: Record<string, unknown> | undefined,
+    existing: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    const settings = { ...existing, ...(input ?? {}) };
+    const policy = this.readWhatsAppMemoryPolicy(settings, true);
+    const knowledgeScope = settings.knowledgeScope ?? 'all';
+    if (knowledgeScope !== 'all' && knowledgeScope !== 'folders') {
+      throw new BadRequestException('knowledgeScope must be all or folders');
+    }
+    const rawFolderIds = settings.folderIds ?? [];
+    if (
+      !Array.isArray(rawFolderIds) ||
+      rawFolderIds.some(
+        (folderId) => typeof folderId !== 'string' || !folderId.trim(),
+      )
+    ) {
+      throw new BadRequestException('folderIds must be an array of IDs');
+    }
+    const folderIds = [
+      ...new Set(rawFolderIds.map((folderId) => String(folderId).trim())),
+    ];
+    await this.assertWhatsAppKnowledgeFolders(
+      organizationId,
+      knowledgeScope,
+      folderIds,
+    );
+
+    const rawKeywords = settings.handoffKeywords ?? [];
+    if (
+      !Array.isArray(rawKeywords) ||
+      rawKeywords.some((keyword) => typeof keyword !== 'string')
+    ) {
+      throw new BadRequestException(
+        'handoffKeywords must be an array of strings',
+      );
+    }
+
+    return {
+      ...settings,
+      handoffKeywords: rawKeywords
+        .map((keyword) => String(keyword).trim())
+        .filter(Boolean)
+        .slice(0, 50),
+      knowledgeScope,
+      folderIds: knowledgeScope === 'folders' ? folderIds : [],
+      memoryEnabled: policy.enabled,
+      recentMessageLimit: policy.recentMessageLimit,
+      lowConfidenceAction: policy.lowConfidenceAction,
+      maxClarificationAttempts: policy.maxClarificationAttempts,
+    };
+  }
+
+  private async assertWhatsAppKnowledgeFolders(
+    organizationId: string,
+    knowledgeScope: 'all' | 'folders',
+    folderIds: string[],
+  ) {
+    if (knowledgeScope === 'all') return;
+    if (!folderIds.length) {
+      throw new BadRequestException(
+        'Select at least one knowledge folder for WhatsApp',
+      );
+    }
+    const count = await this.prisma.knowledgeFolder.count({
+      where: { organizationId, id: { in: folderIds } },
+    });
+    if (count !== folderIds.length) {
+      throw new BadRequestException(
+        'WhatsApp knowledge folder scope is invalid',
+      );
+    }
+  }
+
+  private readWhatsAppKnowledgeFolderIds(
+    value: Prisma.JsonValue,
+  ): string[] | undefined {
+    const settings = this.toRecord(value);
+    if (settings.knowledgeScope !== 'folders') return undefined;
+    return Array.isArray(settings.folderIds)
+      ? settings.folderIds.filter(
+          (folderId): folderId is string => typeof folderId === 'string',
+        )
+      : undefined;
+  }
+
+  private readWhatsAppMemoryPolicy(
+    value: Prisma.JsonValue | Record<string, unknown>,
+    strict = false,
+  ): WhatsAppMemoryPolicy {
+    const settings = this.toRecord(value as Prisma.JsonValue);
+    const enabled = settings.memoryEnabled ?? true;
+    const recentMessageLimit = settings.recentMessageLimit ?? 8;
+    const lowConfidenceAction = settings.lowConfidenceAction ?? 'clarify';
+    const maxClarificationAttempts = settings.maxClarificationAttempts ?? 2;
+
+    if (strict && typeof enabled !== 'boolean') {
+      throw new BadRequestException('memoryEnabled must be a boolean');
+    }
+    if (
+      strict &&
+      (!Number.isInteger(recentMessageLimit) ||
+        Number(recentMessageLimit) < 4 ||
+        Number(recentMessageLimit) > 20)
+    ) {
+      throw new BadRequestException(
+        'recentMessageLimit must be an integer between 4 and 20',
+      );
+    }
+    if (
+      strict &&
+      lowConfidenceAction !== 'clarify' &&
+      lowConfidenceAction !== 'handoff'
+    ) {
+      throw new BadRequestException(
+        'lowConfidenceAction must be clarify or handoff',
+      );
+    }
+    if (
+      strict &&
+      (!Number.isInteger(maxClarificationAttempts) ||
+        Number(maxClarificationAttempts) < 1 ||
+        Number(maxClarificationAttempts) > 3)
+    ) {
+      throw new BadRequestException(
+        'maxClarificationAttempts must be an integer between 1 and 3',
+      );
+    }
+
+    return {
+      enabled: typeof enabled === 'boolean' ? enabled : true,
+      recentMessageLimit: Number.isInteger(recentMessageLimit)
+        ? Math.min(20, Math.max(4, Number(recentMessageLimit)))
+        : 8,
+      lowConfidenceAction:
+        lowConfidenceAction === 'handoff' ? 'handoff' : 'clarify',
+      maxClarificationAttempts: Number.isInteger(maxClarificationAttempts)
+        ? Math.min(3, Math.max(1, Number(maxClarificationAttempts)))
+        : 2,
+    };
+  }
+
+  private readConversationMemory(value: Prisma.JsonValue): {
+    activeTopicQuery: string | null;
+    clarificationRequested: boolean;
+    clarificationAttempts: number;
+  } {
+    const memory = this.toRecord(value).memory;
+    if (!memory || Array.isArray(memory) || typeof memory !== 'object') {
+      return {
+        activeTopicQuery: null,
+        clarificationRequested: false,
+        clarificationAttempts: 0,
+      };
+    }
+    const record = memory as Record<string, unknown>;
+    return {
+      activeTopicQuery:
+        typeof record.activeTopicQuery === 'string' &&
+        record.activeTopicQuery.trim()
+          ? record.activeTopicQuery
+          : null,
+      clarificationRequested: record.clarificationRequested === true,
+      clarificationAttempts:
+        typeof record.clarificationAttempts === 'number' &&
+        Number.isInteger(record.clarificationAttempts)
+          ? Math.max(0, record.clarificationAttempts)
+          : 0,
+    };
+  }
+
+  private readPreviousAssistantMemory(
+    messages: Array<{ role: string; metadata: Prisma.JsonValue }>,
+  ): { clarificationRequested: boolean; clarificationAttempts: number } {
+    const previousAssistant = messages.find(
+      (message) => message.role === 'assistant',
+    );
+    const memory = previousAssistant
+      ? this.toRecord(previousAssistant.metadata).memory
+      : null;
+    if (!memory || Array.isArray(memory) || typeof memory !== 'object') {
+      return { clarificationRequested: false, clarificationAttempts: 0 };
+    }
+    const record = memory as Record<string, unknown>;
+    return {
+      clarificationRequested: record.clarificationRequested === true,
+      clarificationAttempts:
+        typeof record.clarificationAttempts === 'number' &&
+        Number.isInteger(record.clarificationAttempts)
+          ? Math.max(0, record.clarificationAttempts)
+          : 0,
+    };
+  }
+
+  private resolveLowConfidenceDecision(
+    policy: WhatsAppMemoryPolicy,
+    previous: {
+      clarificationRequested: boolean;
+      clarificationAttempts: number;
+    },
+  ): { attempts: number; shouldHandoff: boolean } {
+    const attempts = previous.clarificationRequested
+      ? previous.clarificationAttempts + 1
+      : 1;
+    return {
+      attempts,
+      shouldHandoff:
+        policy.lowConfidenceAction === 'handoff' ||
+        attempts >= policy.maxClarificationAttempts,
+    };
+  }
+
+  private isContextualFollowUp(
+    content: string,
+    hasConversationHistory: boolean,
+  ): boolean {
+    if (!hasConversationHistory) return false;
+    const normalized = content.trim().toLowerCase();
+    if (normalized.length > 240) return false;
+    return /\b(it|its|that|this|these|those|they|them|above|previous|same|again|more|shorter|longer|format|markdown|md|table|list|rewrite|rephrase|summari[sz]e|translate|explain)\b/.test(
+      normalized,
+    );
+  }
+
+  private hasLexicalSupport(query: string, content: string): boolean {
+    const ignoredTerms = new Set([
+      'about',
+      'again',
+      'could',
+      'from',
+      'give',
+      'have',
+      'into',
+      'more',
+      'please',
+      'that',
+      'their',
+      'then',
+      'this',
+      'what',
+      'when',
+      'where',
+      'which',
+      'with',
+      'would',
+    ]);
+    const queryTerms = this.tokenizeForLexicalMatch(query)
+      .filter((term) => term.length >= 3 && !ignoredTerms.has(term))
+      .map((term) => this.stemLexicalTerm(term));
+    if (!queryTerms.length) return false;
+    const contentTerms = new Set(
+      this.tokenizeForLexicalMatch(content).map((term) =>
+        this.stemLexicalTerm(term),
+      ),
+    );
+    const matchedTerms = queryTerms.filter((term) => contentTerms.has(term));
+    const requiredMatches = queryTerms.length <= 2 ? 1 : 2;
+    return matchedTerms.length >= Math.min(requiredMatches, queryTerms.length);
+  }
+
+  private tokenizeForLexicalMatch(value: string): string[] {
+    return value.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  }
+
+  private stemLexicalTerm(term: string): string {
+    if (term.length >= 7 && term.endsWith('ing')) return term.slice(0, -3);
+    if (term.length >= 6 && term.endsWith('er')) return term.slice(0, -2);
+    if (term.length >= 6 && term.endsWith('ed')) return term.slice(0, -2);
+    if (term.length >= 6 && term.endsWith('es')) return term.slice(0, -2);
+    if (term.length >= 5 && term.endsWith('s')) return term.slice(0, -1);
+    return term;
   }
 
   private isUniqueConstraintError(error: unknown): boolean {
