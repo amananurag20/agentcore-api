@@ -1,21 +1,35 @@
-import { HttpStatus } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { RateLimitService } from './rate-limit.service';
 
-describe('RateLimitService', () => {
-  it('blocks requests after the configured in-memory limit', async () => {
-    const service = new RateLimitService({
-      get: (key: string) => (key === 'QUEUE_PREFIX' ? 'test' : undefined),
-    } as never);
+describe('RateLimitService leases', () => {
+  function createService() {
+    const values: Record<string, unknown> = {
+      NODE_ENV: 'test',
+      RATE_LIMIT_FAIL_CLOSED: false,
+    };
+    return new RateLimitService({
+      get: (key: string) => values[key],
+    } as ConfigService);
+  }
 
-    await service.consume('public-chat:test', 2, 60);
-    await service.consume('public-chat:test', 2, 60);
-
+  it('allows only the owning token to release a generation lease', async () => {
+    const service = createService();
     await expect(
-      service.consume('public-chat:test', 2, 60),
-    ).rejects.toMatchObject({
-      status: HttpStatus.TOO_MANY_REQUESTS,
-    });
+      service.acquireLease('conversation-a', 'owner-a', 30),
+    ).resolves.toBe(true);
+    await expect(
+      service.acquireLease('conversation-a', 'owner-b', 30),
+    ).resolves.toBe(false);
 
+    await service.releaseLease('conversation-a', 'owner-b');
+    await expect(
+      service.acquireLease('conversation-a', 'owner-b', 30),
+    ).resolves.toBe(false);
+
+    await service.releaseLease('conversation-a', 'owner-a');
+    await expect(
+      service.acquireLease('conversation-a', 'owner-b', 30),
+    ).resolves.toBe(true);
     await service.onModuleDestroy();
   });
 });

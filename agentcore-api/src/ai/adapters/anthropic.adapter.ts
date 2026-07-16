@@ -1,6 +1,7 @@
 import {
   AIChatRequest,
   AIChatResponse,
+  AIChatStreamRequest,
   AIProviderAdapter,
   AIProviderAdapterOptions,
 } from './ai-adapter.types';
@@ -65,6 +66,7 @@ export class AnthropicAdapter implements AIProviderAdapter {
           temperature: input.temperature ?? 0.2,
         }),
       },
+      input.signal,
     );
 
     if (!response.ok) {
@@ -99,6 +101,101 @@ export class AnthropicAdapter implements AIProviderAdapter {
     };
   }
 
+  async streamChatCompletion(
+    input: AIChatStreamRequest,
+  ): Promise<AIChatResponse> {
+    if (!input.apiKey) throw new Error('Anthropic API key is required');
+    const system = input.messages.find((message) => message.role === 'system');
+    const messages = input.messages
+      .filter((message) => message.role !== 'system')
+      .map((message) => ({
+        role: message.role === 'assistant' ? 'assistant' : 'user',
+        content: this.toAnthropicContent(message.content),
+      }));
+    const response = await this.fetchWithRetry(
+      `${this.resolveBaseUrl(input.baseUrl)}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          'x-api-key': input.apiKey,
+        },
+        body: JSON.stringify({
+          model: input.model,
+          max_tokens: input.maxOutputTokens ?? this.options.maxOutputTokens,
+          system:
+            typeof system?.content === 'string'
+              ? system.content
+              : system?.content
+                  .filter((part) => part.type === 'text')
+                  .map((part) => part.text)
+                  .join('\n'),
+          messages,
+          temperature: input.temperature ?? 0.2,
+          stream: true,
+        }),
+      },
+      input.signal,
+    );
+    if (!response.ok) {
+      throw new Error(
+        `Anthropic provider returned ${response.status}: ${await this.readProviderError(response)}`,
+      );
+    }
+    if (!response.body)
+      throw new Error('Anthropic provider returned no stream');
+
+    let answer = '';
+    let inputTokens = 0;
+    let outputTokens = 0;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        if (input.signal?.aborted)
+          throw (
+            input.signal.reason ?? new DOMException('Aborted', 'AbortError')
+          );
+        const result = await reader.read();
+        if (result.done) break;
+        buffer += decoder.decode(result.value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (!data) continue;
+          const event = JSON.parse(data) as Record<string, unknown>;
+          const message = event.message as AnthropicResponse | undefined;
+          if (message?.usage)
+            inputTokens = message.usage.input_tokens ?? inputTokens;
+          const usage = event.usage as AnthropicResponse['usage'] | undefined;
+          if (usage) outputTokens = usage.output_tokens ?? outputTokens;
+          const delta = event.delta as { text?: string } | undefined;
+          if (!delta?.text) continue;
+          answer += delta.text;
+          await input.onDelta(delta.text);
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (!answer.trim())
+      throw new Error('Anthropic provider returned an empty answer');
+    return {
+      answer: answer.trim(),
+      model: input.model,
+      adapter: this.kind,
+      usage: {
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+      },
+    };
+  }
+
   private resolveBaseUrl(baseUrl?: string | null): string {
     return (baseUrl || 'https://api.anthropic.com/v1').replace(/\/+$/, '');
   }
@@ -123,6 +220,7 @@ export class AnthropicAdapter implements AIProviderAdapter {
   private async fetchWithRetry(
     url: string,
     init: RequestInit,
+    signal?: AbortSignal,
   ): Promise<Response> {
     let lastError: unknown;
 
@@ -131,7 +229,12 @@ export class AnthropicAdapter implements AIProviderAdapter {
         const response = await fetch(url, {
           ...init,
           redirect: 'manual',
-          signal: AbortSignal.timeout(this.options.timeoutMs),
+          signal: signal
+            ? AbortSignal.any([
+                signal,
+                AbortSignal.timeout(this.options.timeoutMs),
+              ])
+            : AbortSignal.timeout(this.options.timeoutMs),
         });
 
         if (

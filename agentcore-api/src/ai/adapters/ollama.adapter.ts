@@ -1,6 +1,7 @@
 import {
   AIChatRequest,
   AIChatResponse,
+  AIChatStreamRequest,
   AIEmbeddingRequest,
   AIEmbeddingResponse,
   AIProviderAdapter,
@@ -51,6 +52,7 @@ export class OllamaAdapter implements AIProviderAdapter {
           },
         }),
       },
+      input.signal,
     );
 
     if (!response.ok) {
@@ -74,6 +76,79 @@ export class OllamaAdapter implements AIProviderAdapter {
         inputTokens: body.prompt_eval_count ?? 0,
         outputTokens: body.eval_count ?? 0,
         totalTokens: (body.prompt_eval_count ?? 0) + (body.eval_count ?? 0),
+      },
+    };
+  }
+
+  async streamChatCompletion(
+    input: AIChatStreamRequest,
+  ): Promise<AIChatResponse> {
+    const response = await this.fetchWithRetry(
+      `${this.resolveBaseUrl(input.baseUrl)}/api/chat`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: input.model,
+          messages: input.messages.map((message) =>
+            this.toOllamaMessage(message),
+          ),
+          stream: true,
+          options: {
+            num_predict: input.maxOutputTokens ?? this.options.maxOutputTokens,
+            temperature: input.temperature ?? 0.2,
+          },
+        }),
+      },
+      input.signal,
+    );
+    if (!response.ok) {
+      throw new Error(
+        `Ollama chat provider returned ${response.status}: ${await this.readProviderError(response)}`,
+      );
+    }
+    if (!response.body) throw new Error('Ollama provider returned no stream');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let answer = '';
+    let inputTokens = 0;
+    let outputTokens = 0;
+    try {
+      while (true) {
+        if (input.signal?.aborted)
+          throw (
+            input.signal.reason ?? new DOMException('Aborted', 'AbortError')
+          );
+        const result = await reader.read();
+        if (result.done) break;
+        buffer += decoder.decode(result.value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const chunk = JSON.parse(line) as OllamaChatResponse;
+          inputTokens = chunk.prompt_eval_count ?? inputTokens;
+          outputTokens = chunk.eval_count ?? outputTokens;
+          const delta = chunk.message?.content ?? chunk.response ?? '';
+          if (!delta) continue;
+          answer += delta;
+          await input.onDelta(delta);
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (!answer.trim())
+      throw new Error('Ollama chat provider returned an empty answer');
+    return {
+      answer: answer.trim(),
+      model: input.model,
+      adapter: this.kind,
+      usage: {
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
       },
     };
   }
@@ -134,6 +209,7 @@ export class OllamaAdapter implements AIProviderAdapter {
   private async fetchWithRetry(
     url: string,
     init: RequestInit,
+    signal?: AbortSignal,
   ): Promise<Response> {
     let lastError: unknown;
 
@@ -142,7 +218,12 @@ export class OllamaAdapter implements AIProviderAdapter {
         const response = await fetch(url, {
           ...init,
           redirect: 'manual',
-          signal: AbortSignal.timeout(this.options.timeoutMs),
+          signal: signal
+            ? AbortSignal.any([
+                signal,
+                AbortSignal.timeout(this.options.timeoutMs),
+              ])
+            : AbortSignal.timeout(this.options.timeoutMs),
         });
 
         if (

@@ -20,6 +20,12 @@ export class SendCustomerChatMessageDto {
   @MaxLength(2000)
   content: string;
 
+  @ApiPropertyOptional({ description: 'Client-generated idempotency key' })
+  @IsString()
+  @MaxLength(100)
+  @IsOptional()
+  clientMessageId?: string;
+
   @ApiPropertyOptional({ type: AppointmentActionDto })
   @ValidateNested()
   @Type(() => AppointmentActionDto)

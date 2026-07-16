@@ -178,6 +178,82 @@ describe('ChatService safety boundaries', () => {
     expect(findMany).toHaveBeenCalledTimes(1);
   });
 
+  it('clears partial output before streaming from a failover provider', async () => {
+    const providers = [
+      {
+        id: 'primary',
+        organizationId: 'org-a',
+        provider: 'openai',
+        status: 'active',
+        validationStatus: 'verified',
+        priority: 0,
+        chatModel: 'primary-model',
+        apiKeyEncrypted: 'primary-key',
+        baseUrl: null,
+        settings: {},
+      },
+      {
+        id: 'secondary',
+        organizationId: 'org-a',
+        provider: 'anthropic',
+        status: 'active',
+        validationStatus: 'verified',
+        priority: 10,
+        chatModel: 'secondary-model',
+        apiKeyEncrypted: 'secondary-key',
+        baseUrl: null,
+        settings: {},
+      },
+    ];
+    const events: string[] = [];
+    const service = new ChatService(
+      { get: jest.fn() } as never,
+      { decrypt: jest.fn().mockReturnValue('decrypted') } as never,
+      {
+        aIProviderConfig: { findMany: jest.fn().mockResolvedValue(providers) },
+      } as never,
+      {
+        getAdapter: jest.fn((provider: { id: string }) => ({
+          kind: provider.id === 'primary' ? 'openai' : 'anthropic',
+          createChatCompletion: jest.fn(),
+          streamChatCompletion:
+            provider.id === 'primary'
+              ? async ({
+                  onDelta,
+                }: {
+                  onDelta: (value: string) => Promise<void>;
+                }) => {
+                  await onDelta('bad partial');
+                  throw new Error('primary disconnected');
+                }
+              : async ({
+                  onDelta,
+                }: {
+                  onDelta: (value: string) => Promise<void>;
+                }) => {
+                  await onDelta('good answer');
+                  return {
+                    answer: 'good answer',
+                    model: 'secondary-model',
+                    adapter: 'anthropic',
+                  };
+                },
+        })),
+      } as never,
+    );
+
+    const result = await service.answerWithContext({
+      organizationId: 'org-a',
+      question: 'What is the refund policy?',
+      context: [{ content: 'Refunds are available for 30 days.', score: 0.9 }],
+      onDelta: (delta) => events.push(delta),
+      onReplace: (content) => events.push(`replace:${content}`),
+    });
+
+    expect(result.answer).toBe('good answer');
+    expect(events).toEqual(['bad partial', 'replace:', 'good answer']);
+  });
+
   it('fails over when a retained provider credential cannot be decrypted', async () => {
     const providers = [
       {

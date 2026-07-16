@@ -12,9 +12,12 @@ type InMemoryLimit = {
   expiresAt: number;
 };
 
+type InMemoryLease = { token: string; expiresAt: number };
+
 @Injectable()
 export class RateLimitService implements OnModuleDestroy {
   private readonly fallbackLimits = new Map<string, InMemoryLimit>();
+  private readonly fallbackLeases = new Map<string, InMemoryLease>();
   private readonly prefix: string;
   private readonly redis: Redis | null;
   private readonly failClosed: boolean;
@@ -46,6 +49,64 @@ export class RateLimitService implements OnModuleDestroy {
     if (count > limit) {
       throw new HttpException(message, HttpStatus.TOO_MANY_REQUESTS);
     }
+  }
+
+  async acquireLease(
+    key: string,
+    token: string,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    if (ttlSeconds <= 0) return false;
+    if (this.redis) {
+      try {
+        const result = await this.redis.set(
+          `${this.prefix}:lease:${key}`,
+          token,
+          'EX',
+          ttlSeconds,
+          'NX',
+        );
+        return result === 'OK';
+      } catch {
+        if (this.failClosed) {
+          throw new HttpException(
+            'Generation coordination is temporarily unavailable.',
+            HttpStatus.SERVICE_UNAVAILABLE,
+          );
+        }
+      }
+    } else if (this.failClosed) {
+      throw new HttpException(
+        'Generation coordination is temporarily unavailable.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    const now = Date.now();
+    const existing = this.fallbackLeases.get(key);
+    if (existing && existing.expiresAt > now) return false;
+    this.fallbackLeases.set(key, {
+      token,
+      expiresAt: now + ttlSeconds * 1000,
+    });
+    return true;
+  }
+
+  async releaseLease(key: string, token: string): Promise<void> {
+    if (this.redis) {
+      try {
+        await this.redis.eval(
+          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+          1,
+          `${this.prefix}:lease:${key}`,
+          token,
+        );
+        return;
+      } catch {
+        if (this.failClosed) return;
+      }
+    }
+    const existing = this.fallbackLeases.get(key);
+    if (existing?.token === token) this.fallbackLeases.delete(key);
   }
 
   async onModuleDestroy() {

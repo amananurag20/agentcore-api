@@ -18,7 +18,12 @@ export interface AIChatRequest {
   maxOutputTokens?: number;
   model: string;
   messages: AIChatMessage[];
+  signal?: AbortSignal;
   temperature?: number;
+}
+
+export interface AIChatStreamRequest extends AIChatRequest {
+  onDelta: (delta: string) => void | Promise<void>;
 }
 
 export interface AIChatResponse {
@@ -67,6 +72,7 @@ export interface AITranscriptionResponse {
 export interface AIProviderAdapter {
   readonly kind: AIAdapterKind;
   createChatCompletion?(input: AIChatRequest): Promise<AIChatResponse>;
+  streamChatCompletion?(input: AIChatStreamRequest): Promise<AIChatResponse>;
   createEmbedding?(input: AIEmbeddingRequest): Promise<AIEmbeddingResponse>;
   createTranscription?(
     input: AITranscriptionRequest,

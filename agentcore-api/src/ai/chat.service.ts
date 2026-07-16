@@ -5,6 +5,7 @@ import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AIUsageService } from '../ai-usage/ai-usage.service';
 import { AIAdapterRegistryService } from './adapters/ai-adapter-registry.service';
+import type { AIChatRequest } from './adapters/ai-adapter.types';
 import { ProviderEndpointPolicyService } from './provider-endpoint-policy.service';
 
 export interface ChatContextChunk {
@@ -54,6 +55,9 @@ export class ChatService {
     context: ChatContextChunk[];
     history?: ChatHistoryMessage[];
     safeFallback?: boolean;
+    signal?: AbortSignal;
+    onDelta?: (delta: string) => void | Promise<void>;
+    onReplace?: (content: string) => void | Promise<void>;
   }): Promise<ChatResult> {
     const conversationalResult = this.answerConversationally(input.question);
     if (conversationalResult) return conversationalResult;
@@ -85,6 +89,9 @@ export class ChatService {
         input.context,
         input.history,
         input.safeFallback,
+        input.signal,
+        input.onDelta,
+        input.onReplace,
       );
       if (!result.usedFallback) return result;
       lastFailure = result;
@@ -315,6 +322,9 @@ export class ChatService {
     context: ChatContextChunk[],
     history: ChatHistoryMessage[] = [],
     safeFallback = true,
+    signal?: AbortSignal,
+    onDelta?: (delta: string) => void | Promise<void>,
+    onReplace?: (content: string) => void | Promise<void>,
   ): Promise<ChatResult> {
     const adapter = this.adapterRegistry.getAdapter(providerConfig);
 
@@ -338,7 +348,7 @@ export class ChatService {
       );
       await this.usageService?.assertBudgetAvailable(providerConfig);
       await this.endpointPolicy?.assertProviderAllowed(providerConfig);
-      const result = await adapter.createChatCompletion({
+      const request: AIChatRequest = {
         apiKey,
         baseUrl: providerConfig.baseUrl,
         maxOutputTokens: this.maxOutputTokens,
@@ -354,8 +364,16 @@ export class ChatService {
             content: this.buildPrompt(question, context, history),
           },
         ],
+        signal,
         temperature: this.readTemperature(providerConfig),
-      });
+      };
+      const result =
+        onDelta && adapter.streamChatCompletion
+          ? await adapter.streamChatCompletion({ ...request, onDelta })
+          : await adapter.createChatCompletion(request);
+      if (onDelta && !adapter.streamChatCompletion) {
+        await onDelta(result.answer);
+      }
       await this.usageService?.record({
         provider: providerConfig,
         capability: 'chat',
@@ -373,6 +391,8 @@ export class ChatService {
         usedFallback: false,
       };
     } catch (error) {
+      if (this.isAbortError(error) || signal?.aborted) throw error;
+      await onReplace?.('');
       await this.usageService?.record({
         provider: providerConfig,
         capability: 'chat',
@@ -394,6 +414,13 @@ export class ChatService {
         error: errorMessage,
       };
     }
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return (
+      (error instanceof DOMException && error.name === 'AbortError') ||
+      (error instanceof Error && error.name === 'AbortError')
+    );
   }
 
   private buildPrompt(

@@ -2,6 +2,7 @@ import {
   AIAdapterKind,
   AIChatRequest,
   AIChatResponse,
+  AIChatStreamRequest,
   AIEmbeddingRequest,
   AIEmbeddingResponse,
   AIProviderAdapter,
@@ -21,6 +22,11 @@ interface OpenAICompatibleChatResponse {
     completion_tokens?: number;
     total_tokens?: number;
   };
+}
+
+interface OpenAICompatibleChatStreamChunk {
+  choices?: Array<{ delta?: { content?: string } }>;
+  usage?: OpenAICompatibleChatResponse['usage'];
 }
 
 interface OpenAICompatibleEmbeddingResponse {
@@ -63,6 +69,7 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
           temperature: input.temperature ?? 0.2,
         }),
       },
+      input.signal,
     );
 
     if (!response.ok) {
@@ -83,6 +90,63 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
       model: input.model,
       adapter: this.kind,
       usage: this.toUsage(body.usage),
+    };
+  }
+
+  async streamChatCompletion(
+    input: AIChatStreamRequest,
+  ): Promise<AIChatResponse> {
+    const response = await this.fetchWithRetry(
+      `${this.resolveBaseUrl(input.baseUrl)}/chat/completions`,
+      {
+        method: 'POST',
+        headers: this.buildHeaders(input.apiKey),
+        body: JSON.stringify({
+          max_tokens: input.maxOutputTokens ?? this.options.maxOutputTokens,
+          model: input.model,
+          messages: input.messages,
+          temperature: input.temperature ?? 0.2,
+          stream: true,
+          ...(this.kind === 'openai'
+            ? { stream_options: { include_usage: true } }
+            : {}),
+        }),
+      },
+      input.signal,
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        `Chat provider returned ${response.status}: ${await this.readProviderError(response)}`,
+      );
+    }
+    if (!response.body) throw new Error('Chat provider returned no stream');
+
+    let answer = '';
+    let usage: OpenAICompatibleChatResponse['usage'];
+    await this.readLineStream(
+      response.body,
+      async (line) => {
+        if (!line.startsWith('data:')) return;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') return;
+        const chunk = JSON.parse(data) as OpenAICompatibleChatStreamChunk;
+        usage = chunk.usage ?? usage;
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (!delta) return;
+        answer += delta;
+        await input.onDelta(delta);
+      },
+      input.signal,
+    );
+
+    if (!answer.trim())
+      throw new Error('Chat provider returned an empty answer');
+    return {
+      answer: answer.trim(),
+      model: input.model,
+      adapter: this.kind,
+      usage: this.toUsage(usage),
     };
   }
 
@@ -200,6 +264,7 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
   private async fetchWithRetry(
     url: string,
     init: RequestInit,
+    signal?: AbortSignal,
   ): Promise<Response> {
     let lastError: unknown;
 
@@ -208,7 +273,12 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
         const response = await fetch(url, {
           ...init,
           redirect: 'manual',
-          signal: AbortSignal.timeout(this.options.timeoutMs),
+          signal: signal
+            ? AbortSignal.any([
+                signal,
+                AbortSignal.timeout(this.options.timeoutMs),
+              ])
+            : AbortSignal.timeout(this.options.timeoutMs),
         });
 
         if (
@@ -233,6 +303,32 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
     throw new Error(
       `AI provider request failed: ${this.toErrorMessage(lastError)}`,
     );
+  }
+
+  private async readLineStream(
+    body: ReadableStream<Uint8Array>,
+    onLine: (line: string) => void | Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        if (signal?.aborted)
+          throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
+        for (const line of lines) await onLine(line);
+      }
+      buffer += decoder.decode();
+      if (buffer) await onLine(buffer);
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   private resolveRetryDelayMs(response: Response, attempt: number): number {

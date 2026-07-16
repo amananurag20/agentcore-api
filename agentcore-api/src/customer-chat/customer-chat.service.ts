@@ -83,6 +83,12 @@ type WidgetMemoryPolicy = {
   maxClarificationAttempts: number;
 };
 
+export type CustomerChatStreamCallbacks = {
+  signal?: AbortSignal;
+  onDelta?: (delta: string) => void | Promise<void>;
+  onReplace?: (content: string) => void | Promise<void>;
+};
+
 @Injectable()
 export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CustomerChatService.name);
@@ -716,6 +722,45 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     return this.processVisitorMessage(publicUser, conversation, input, true);
   }
 
+  async sendPublicMessageStreaming(
+    conversationId: string,
+    input: SendPublicCustomerChatMessageDto,
+    visitorToken: string | undefined,
+    origin: string | undefined,
+    callbacks: CustomerChatStreamCallbacks,
+  ) {
+    this.assertPublicMessageLength(input.content);
+    const conversation = await this.findConversationContextForVisitor(
+      conversationId,
+      visitorToken,
+      origin,
+    );
+    await this.limitPublicConversationMessages(conversation.id);
+    return this.processVisitorMessage(
+      this.createSystemUser(conversation.organizationId),
+      conversation,
+      input,
+      true,
+      callbacks,
+    );
+  }
+
+  async authorizePublicSocket(
+    conversationId: string,
+    visitorToken?: string,
+    origin?: string,
+  ) {
+    const conversation = await this.findConversationContextForVisitor(
+      conversationId,
+      visitorToken,
+      origin,
+    );
+    return {
+      conversationId: conversation.id,
+      organizationId: conversation.organizationId,
+    };
+  }
+
   async listPublicMessages(
     conversationId: string,
     input: ListCustomerChatMessagesDto,
@@ -791,10 +836,12 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     conversation: ConversationContext,
     input: SendCustomerChatMessageDto,
     publicResponse: boolean,
+    callbacks: CustomerChatStreamCallbacks = {},
   ) {
+    this.throwIfAborted(callbacks.signal);
     const now = new Date();
-    const { visitorMessage, canAutoReply } = await this.prisma.$transaction(
-      async (transaction) => {
+    const { visitorMessage, canAutoReply, duplicate } =
+      await this.prisma.$transaction(async (transaction) => {
         const current = await transaction.customerChatConversation.findUnique({
           where: { id: conversation.id },
           select: { status: true, assignedAgentId: true },
@@ -802,10 +849,29 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         if (!current) {
           throw new NotFoundException('Customer chat conversation not found');
         }
+        if (input.clientMessageId) {
+          const existing = await transaction.customerChatMessage.findUnique({
+            where: {
+              conversationId_clientMessageId: {
+                conversationId: conversation.id,
+                clientMessageId: input.clientMessageId,
+              },
+            },
+            include: { citations: { include: { chunk: true } } },
+          });
+          if (existing) {
+            return {
+              visitorMessage: existing,
+              canAutoReply: false,
+              duplicate: true,
+            };
+          }
+        }
         const message = await transaction.customerChatMessage.create({
           data: {
             organizationId: conversation.organizationId,
             conversationId: conversation.id,
+            clientMessageId: input.clientMessageId,
             role: 'visitor',
             content: input.content,
           },
@@ -829,9 +895,25 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
           visitorMessage: message,
           canAutoReply:
             current.status === 'open' && current.assignedAgentId === null,
+          duplicate: false,
         };
-      },
-    );
+      });
+
+    if (duplicate) {
+      const updatedConversation = await this.loadConversation(conversation.id);
+      return {
+        conversation: this.toConversationResponse(
+          updatedConversation,
+          publicResponse ? 'public' : 'internal',
+        ),
+        visitorMessage: this.toMessageResponse(
+          visitorMessage,
+          undefined,
+          publicResponse,
+        ),
+        assistantMessage: null,
+      };
+    }
 
     try {
       await this.realtimeService.publish({
@@ -874,8 +956,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     let activeTopicQuery = conversationMemory.activeTopicQuery;
     let clarificationAttempts = 0;
     let clarificationRequested = false;
+    let streamedAnswer = false;
 
     try {
+      this.throwIfAborted(callbacks.signal);
       if (input.appointmentAction) {
         const result = await this.appointmentBookingService.executeAction(
           conversation.organizationId,
@@ -1053,8 +1137,19 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
                 content: result.content,
                 score: result.score,
               })),
+              signal: callbacks.signal,
+              onDelta: callbacks.onDelta
+                ? async (delta) => {
+                    streamedAnswer = true;
+                    await callbacks.onDelta?.(delta);
+                  }
+                : undefined,
+              onReplace: callbacks.onReplace,
             });
             answer = chatResult.answer;
+            if (streamedAnswer && chatResult.usedFallback) {
+              await callbacks.onReplace?.(answer);
+            }
             metadata = {
               model: chatResult.model,
               provider: chatResult.provider,
@@ -1078,6 +1173,23 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         }
       }
     } catch (error) {
+      if (this.isAbortError(error) || callbacks.signal?.aborted) {
+        const updatedConversation = await this.loadConversation(
+          conversation.id,
+        );
+        return {
+          conversation: this.toConversationResponse(
+            updatedConversation,
+            publicResponse ? 'public' : 'internal',
+          ),
+          visitorMessage: this.toMessageResponse(
+            visitorMessage,
+            undefined,
+            publicResponse,
+          ),
+          assistantMessage: null,
+        };
+      }
       return this.recoverFromAutoReplyFailure(
         currentUser,
         conversation,
@@ -1086,6 +1198,9 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         error,
       );
     }
+
+    this.throwIfAborted(callbacks.signal);
+    if (!streamedAnswer) await callbacks.onDelta?.(answer);
 
     const assistantMessage = await this.prisma.$transaction(
       async (transaction) => {
@@ -1173,6 +1288,19 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
           )
         : null,
     };
+  }
+
+  private throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+    }
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return (
+      (error instanceof DOMException && error.name === 'AbortError') ||
+      (error instanceof Error && error.name === 'AbortError')
+    );
   }
 
   private async recoverFromAutoReplyFailure(

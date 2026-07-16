@@ -39,10 +39,21 @@ export class CreatePublicCustomerChatConversationDto {
 }
 
 export class SendPublicCustomerChatMessageDto {
-  @ApiProperty({ example: 'What are your business hours?', minLength: 1 })
+  @ApiProperty({
+    example: 'What are your business hours?',
+    minLength: 1,
+    maxLength: 2000,
+  })
   @IsString()
   @MinLength(1)
+  @MaxLength(2000)
   content: string;
+
+  @ApiPropertyOptional({ description: 'Client-generated idempotency key' })
+  @IsString()
+  @MaxLength(100)
+  @IsOptional()
+  clientMessageId?: string;
 
   @ApiPropertyOptional({ type: AppointmentActionDto })
   @ValidateNested()

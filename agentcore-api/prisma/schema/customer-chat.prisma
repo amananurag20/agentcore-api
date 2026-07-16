@@ -65,17 +65,19 @@ model CustomerChatWidgetKnowledgeFolder {
 }
 
 model CustomerChatMessage {
-  id             String                   @id @default(uuid())
-  organizationId String                   @map("organization_id")
-  organization   Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  conversationId String                   @map("conversation_id")
-  conversation   CustomerChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  role           CustomerChatMessageRole
-  content        String
-  metadata       Json                     @default("{}")
-  citations      CustomerChatCitation[]
-  createdAt      DateTime                 @default(now()) @map("created_at")
+  id              String                   @id @default(uuid())
+  organizationId  String                   @map("organization_id")
+  organization    Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversationId  String                   @map("conversation_id")
+  conversation    CustomerChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  clientMessageId String?                  @map("client_message_id")
+  role            CustomerChatMessageRole
+  content         String
+  metadata        Json                     @default("{}")
+  citations       CustomerChatCitation[]
+  createdAt       DateTime                 @default(now()) @map("created_at")
 
+  @@unique([conversationId, clientMessageId])
   @@index([organizationId])
   @@index([conversationId, createdAt])
   @@map("customer_chat_messages")
