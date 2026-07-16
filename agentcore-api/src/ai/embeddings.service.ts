@@ -160,11 +160,13 @@ export class EmbeddingsService {
       return this.localEmbedding(text, providerConfig);
     }
 
-    const apiKey = this.cryptoService.decrypt(providerConfig.apiKeyEncrypted!);
     const model = providerConfig.embeddingModel ?? this.defaultModel;
     const startedAt = Date.now();
 
     try {
+      const apiKey = this.cryptoService.decrypt(
+        providerConfig.apiKeyEncrypted!,
+      );
       await this.usageService?.assertBudgetAvailable(providerConfig);
       await this.endpointPolicy?.assertProviderAllowed(providerConfig);
       const result = await adapter.createEmbedding({

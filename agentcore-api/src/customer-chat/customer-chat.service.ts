@@ -12,7 +12,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
-import { ChatService } from '../ai/chat.service';
+import { ChatService, type ChatHistoryMessage } from '../ai/chat.service';
 import { AuditService } from '../audit/audit.service';
 import { AppointmentBookingService } from '../appointment-booking/appointment-booking.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
@@ -75,6 +75,13 @@ type ConversationContext = Prisma.CustomerChatConversationGetPayload<{
 type MessageWithCitations = Prisma.CustomerChatMessageGetPayload<{
   include: { citations: { include: { chunk: true } } };
 }>;
+
+type WidgetMemoryPolicy = {
+  enabled: boolean;
+  recentMessageLimit: number;
+  lowConfidenceAction: 'clarify' | 'handoff';
+  maxClarificationAttempts: number;
+};
 
 @Injectable()
 export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
@@ -502,7 +509,9 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         knowledgeScope,
         greetingText: input.greetingText,
         allowedDomains: input.allowedDomains,
-        settings: this.toJsonObject(input.settings),
+        settings: this.toJsonObject(
+          this.normalizeWidgetSettings(input.settings),
+        ),
         folderScopes: {
           create: folderIds.map((folderId) => ({ folderId })),
         },
@@ -572,7 +581,12 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         greetingText: input.greetingText,
         allowedDomains: input.allowedDomains,
         settings: input.settings
-          ? this.toJsonObject(input.settings)
+          ? this.toJsonObject(
+              this.normalizeWidgetSettings(
+                input.settings,
+                this.toRecord(existing.settings),
+              ),
+            )
           : undefined,
         folderScopes: replaceFolderScopes
           ? {
@@ -851,6 +865,15 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     let metadata: Record<string, unknown>;
     let searchResults: KnowledgeSearchRow[] = [];
     let shouldAutoHandoff = false;
+    const memoryPolicy = this.readWidgetMemoryPolicy(
+      conversation.widgetConfig?.settings,
+    );
+    const conversationMemory = this.readConversationMemory(
+      conversation.metadata,
+    );
+    let activeTopicQuery = conversationMemory.activeTopicQuery;
+    let clarificationAttempts = 0;
+    let clarificationRequested = false;
 
     try {
       if (input.appointmentAction) {
@@ -861,57 +884,198 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         answer = this.appointmentBookingService.formatActionResult(result);
         metadata = { appointmentAction: input.appointmentAction };
       } else {
-        const searchUser: AuthenticatedUser = {
-          ...currentUser,
-          orgId: conversation.organizationId,
-        };
-        const candidates = await this.knowledgeService.search(searchUser, {
-          query: input.content,
-          limit: 10,
-          productKey: 'customer_chat',
-          folderIds:
-            conversation.widgetConfig?.knowledgeScope === 'folders'
-              ? conversation.widgetConfig.folderScopes.map(
-                  (scope) => scope.folderId,
-                )
-              : undefined,
-        });
-        const minimumScore = this.configService.get<number>(
-          'CUSTOMER_CHAT_MIN_SIMILARITY_SCORE',
-          0.35,
+        const conversationalResult = this.chatService.answerConversationally(
+          input.content,
         );
-        searchResults = candidates
-          .filter((result) => result.score >= minimumScore)
-          .slice(0, 5);
-        const chatResult = await this.chatService.answerWithContext({
-          organizationId: conversation.organizationId,
-          question: input.content,
-          safeFallback: true,
-          context: searchResults.map((result) => ({
-            content: result.content,
-            score: result.score,
-          })),
-        });
-        answer = chatResult.answer;
-        metadata = {
-          model: chatResult.model,
-          provider: chatResult.provider,
-          adapter: chatResult.adapter,
-          usedFallback: chatResult.usedFallback,
-          error: chatResult.error,
-          retrieval: {
+        if (conversationalResult) {
+          answer = conversationalResult.answer;
+          metadata = {
+            model: conversationalResult.model,
+            provider: conversationalResult.provider,
+            adapter: conversationalResult.adapter,
+            usedFallback: false,
+            handledWithoutKnowledge: true,
+            retrieval: {
+              candidateCount: 0,
+              acceptedCount: 0,
+              skipped: 'conversational_intent',
+            },
+          };
+        } else {
+          const recentMessages = memoryPolicy.enabled
+            ? await this.prisma.customerChatMessage.findMany({
+                where: {
+                  conversationId: conversation.id,
+                  organizationId: conversation.organizationId,
+                  id: { not: visitorMessage.id },
+                  role: { in: ['visitor', 'assistant'] },
+                },
+                select: { role: true, content: true, metadata: true },
+                orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+                take: memoryPolicy.recentMessageLimit,
+              })
+            : [];
+          const conversationHistory: ChatHistoryMessage[] = [...recentMessages]
+            .reverse()
+            .map((message) => ({
+              role: message.role === 'visitor' ? 'user' : 'assistant',
+              content: message.content,
+            }));
+          const previousVisitorMessage = [...conversationHistory]
+            .reverse()
+            .find((message) => message.role === 'user');
+          const isContextualFollowUp = this.isContextualFollowUp(
+            input.content,
+            conversationHistory.length > 0,
+          );
+          const storedRetrievalTopic = recentMessages.find((message) => {
+            if (message.role !== 'assistant') return false;
+            const retrieval = this.toRecord(message.metadata).retrieval;
+            return (
+              retrieval &&
+              !Array.isArray(retrieval) &&
+              typeof retrieval === 'object' &&
+              typeof (retrieval as Record<string, unknown>).topicQuery ===
+                'string'
+            );
+          });
+          const storedRetrieval = storedRetrievalTopic
+            ? this.toRecord(storedRetrievalTopic.metadata).retrieval
+            : null;
+          const persistedTopicQuery =
+            activeTopicQuery ??
+            (storedRetrieval &&
+            !Array.isArray(storedRetrieval) &&
+            typeof storedRetrieval === 'object'
+              ? (storedRetrieval as Record<string, unknown>).topicQuery
+              : null);
+          const inferredTopicMessage = [...conversationHistory]
+            .reverse()
+            .find(
+              (message) =>
+                message.role === 'user' &&
+                !this.isContextualFollowUp(message.content, true) &&
+                !this.chatService.answerConversationally(message.content),
+            );
+          const topicQuery =
+            typeof persistedTopicQuery === 'string'
+              ? persistedTopicQuery
+              : (inferredTopicMessage?.content ??
+                previousVisitorMessage?.content ??
+                input.content);
+          const searchUser: AuthenticatedUser = {
+            ...currentUser,
+            orgId: conversation.organizationId,
+          };
+          const retrievalQuery = isContextualFollowUp
+            ? `${topicQuery}\nFollow-up request: ${input.content}`
+            : input.content;
+          const proposedTopicQuery = isContextualFollowUp
+            ? topicQuery
+            : input.content;
+          const candidates = await this.knowledgeService.search(searchUser, {
+            query: retrievalQuery,
+            limit: 10,
+            productKey: 'customer_chat',
+            folderIds:
+              conversation.widgetConfig?.knowledgeScope === 'folders'
+                ? conversation.widgetConfig.folderScopes.map(
+                    (scope) => scope.folderId,
+                  )
+                : undefined,
+          });
+          const minimumScore = this.configService.get<number>(
+            'CUSTOMER_CHAT_MIN_SIMILARITY_SCORE',
+            0.35,
+          );
+          const lexicalRescueMargin = this.configService.get<number>(
+            'CUSTOMER_CHAT_LEXICAL_RESCUE_MARGIN',
+            0.05,
+          );
+          searchResults = candidates
+            .filter(
+              (result) =>
+                result.score >= minimumScore ||
+                (result.score >= minimumScore - lexicalRescueMargin &&
+                  this.hasLexicalSupport(retrievalQuery, result.content)),
+            )
+            .slice(0, 5);
+          const lexicalRescueCount = searchResults.filter(
+            (result) => result.score < minimumScore,
+          ).length;
+          const retrievalMetadata = {
             candidateCount: candidates.length,
             acceptedCount: searchResults.length,
             minimumScore,
+            lexicalRescueMargin,
+            lexicalRescueCount,
             topScore: candidates[0]?.score ?? null,
-          },
-        };
-        shouldAutoHandoff =
-          this.configService.get<boolean>(
-            'CUSTOMER_CHAT_AUTO_HANDOFF_ON_FAILURE',
-            true,
-          ) &&
-          (searchResults.length === 0 || chatResult.usedFallback);
+            contextualFollowUp: isContextualFollowUp,
+            topicQuery: proposedTopicQuery,
+          };
+
+          if (searchResults.length === 0) {
+            const previousMemory =
+              this.readPreviousAssistantMemory(recentMessages);
+            const lastClarification = conversationMemory.clarificationRequested
+              ? conversationMemory
+              : previousMemory;
+            const lowConfidenceDecision = this.resolveLowConfidenceDecision(
+              memoryPolicy,
+              lastClarification,
+            );
+            clarificationAttempts = lowConfidenceDecision.attempts;
+            shouldAutoHandoff = lowConfidenceDecision.shouldHandoff;
+            clarificationRequested = !shouldAutoHandoff;
+            answer = shouldAutoHandoff
+              ? 'I cannot confirm that from the available knowledge right now. I have requested a human agent to help you.'
+              : 'I could not find enough relevant information to answer that confidently. Could you rephrase your question or add a little more detail?';
+            metadata = {
+              model: 'local-guardrail',
+              provider: 'local',
+              adapter: 'retrieval-guardrail',
+              usedFallback: true,
+              handledWithoutKnowledge: false,
+              retrieval: retrievalMetadata,
+              memory: {
+                clarificationRequested,
+                clarificationAttempts,
+              },
+            };
+          } else {
+            activeTopicQuery = proposedTopicQuery;
+            const chatResult = await this.chatService.answerWithContext({
+              organizationId: conversation.organizationId,
+              question: input.content,
+              history: conversationHistory,
+              safeFallback: true,
+              context: searchResults.map((result) => ({
+                content: result.content,
+                score: result.score,
+              })),
+            });
+            answer = chatResult.answer;
+            metadata = {
+              model: chatResult.model,
+              provider: chatResult.provider,
+              adapter: chatResult.adapter,
+              usedFallback: chatResult.usedFallback,
+              handledWithoutKnowledge:
+                chatResult.handledWithoutKnowledge ?? false,
+              error: chatResult.error,
+              retrieval: retrievalMetadata,
+              memory: {
+                clarificationRequested: false,
+                clarificationAttempts: 0,
+              },
+            };
+            shouldAutoHandoff =
+              this.configService.get<boolean>(
+                'CUSTOMER_CHAT_AUTO_HANDOFF_ON_FAILURE',
+                true,
+              ) && chatResult.usedFallback;
+          }
+        }
       }
     } catch (error) {
       return this.recoverFromAutoReplyFailure(
@@ -935,6 +1099,14 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             status: shouldAutoHandoff ? 'waiting_for_agent' : 'open',
             handoffRequestedAt: shouldAutoHandoff ? new Date() : undefined,
             lastMessageAt: new Date(),
+            metadata: this.toJsonObject({
+              ...this.toRecord(conversation.metadata),
+              memory: {
+                activeTopicQuery,
+                clarificationRequested,
+                clarificationAttempts,
+              },
+            }),
             version: { increment: 1 },
           },
         });
@@ -1565,7 +1737,9 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       id: message.id,
       role: message.role,
       content: message.content,
-      metadata: publicResponse ? {} : this.toRecord(message.metadata),
+      metadata: publicResponse
+        ? this.toPublicMessageMetadata(message.metadata)
+        : this.toRecord(message.metadata),
       citations: message.citations.map((citation) => ({
         chunkId: citation.chunkId,
         score:
@@ -1580,6 +1754,232 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     value: Record<string, unknown> | undefined,
   ): Prisma.InputJsonObject {
     return (value ?? {}) as Prisma.InputJsonObject;
+  }
+
+  private normalizeWidgetSettings(
+    input: Record<string, unknown> | undefined,
+    existing: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const settings = { ...existing, ...(input ?? {}) };
+    const policy = this.readWidgetMemoryPolicy(settings, true);
+    return {
+      ...settings,
+      memoryEnabled: policy.enabled,
+      recentMessageLimit: policy.recentMessageLimit,
+      lowConfidenceAction: policy.lowConfidenceAction,
+      maxClarificationAttempts: policy.maxClarificationAttempts,
+    };
+  }
+
+  private readWidgetMemoryPolicy(
+    value: Prisma.JsonValue | Record<string, unknown> | null | undefined,
+    strict = false,
+  ): WidgetMemoryPolicy {
+    const settings =
+      value && !Array.isArray(value) && typeof value === 'object'
+        ? (value as Record<string, unknown>)
+        : {};
+    const enabled = settings.memoryEnabled ?? true;
+    const recentMessageLimit = settings.recentMessageLimit ?? 8;
+    const lowConfidenceAction = settings.lowConfidenceAction ?? 'clarify';
+    const maxClarificationAttempts = settings.maxClarificationAttempts ?? 2;
+
+    if (strict && typeof enabled !== 'boolean') {
+      throw new BadRequestException('memoryEnabled must be a boolean');
+    }
+    if (
+      strict &&
+      (!Number.isInteger(recentMessageLimit) ||
+        Number(recentMessageLimit) < 4 ||
+        Number(recentMessageLimit) > 20)
+    ) {
+      throw new BadRequestException(
+        'recentMessageLimit must be an integer between 4 and 20',
+      );
+    }
+    if (
+      strict &&
+      lowConfidenceAction !== 'clarify' &&
+      lowConfidenceAction !== 'handoff'
+    ) {
+      throw new BadRequestException(
+        'lowConfidenceAction must be clarify or handoff',
+      );
+    }
+    if (
+      strict &&
+      (!Number.isInteger(maxClarificationAttempts) ||
+        Number(maxClarificationAttempts) < 1 ||
+        Number(maxClarificationAttempts) > 3)
+    ) {
+      throw new BadRequestException(
+        'maxClarificationAttempts must be an integer between 1 and 3',
+      );
+    }
+
+    return {
+      enabled: typeof enabled === 'boolean' ? enabled : true,
+      recentMessageLimit: Number.isInteger(recentMessageLimit)
+        ? Math.min(20, Math.max(4, Number(recentMessageLimit)))
+        : 8,
+      lowConfidenceAction:
+        lowConfidenceAction === 'handoff' ? 'handoff' : 'clarify',
+      maxClarificationAttempts: Number.isInteger(maxClarificationAttempts)
+        ? Math.min(3, Math.max(1, Number(maxClarificationAttempts)))
+        : 2,
+    };
+  }
+
+  private readConversationMemory(value: Prisma.JsonValue): {
+    activeTopicQuery: string | null;
+    clarificationRequested: boolean;
+    clarificationAttempts: number;
+  } {
+    const memory = this.toRecord(value).memory;
+    if (!memory || Array.isArray(memory) || typeof memory !== 'object') {
+      return {
+        activeTopicQuery: null,
+        clarificationRequested: false,
+        clarificationAttempts: 0,
+      };
+    }
+    const record = memory as Record<string, unknown>;
+    const activeTopicQuery = record.activeTopicQuery;
+    return {
+      activeTopicQuery:
+        typeof activeTopicQuery === 'string' && activeTopicQuery.trim()
+          ? activeTopicQuery
+          : null,
+      clarificationRequested: record.clarificationRequested === true,
+      clarificationAttempts:
+        typeof record.clarificationAttempts === 'number' &&
+        Number.isInteger(record.clarificationAttempts)
+          ? Math.max(0, record.clarificationAttempts)
+          : 0,
+    };
+  }
+
+  private readPreviousAssistantMemory(
+    messages: Array<{
+      role: string;
+      metadata: Prisma.JsonValue;
+    }>,
+  ): {
+    clarificationRequested: boolean;
+    clarificationAttempts: number;
+  } {
+    const previousAssistant = messages.find(
+      (message) => message.role === 'assistant',
+    );
+    const memory = previousAssistant
+      ? this.toRecord(previousAssistant.metadata).memory
+      : null;
+    if (!memory || Array.isArray(memory) || typeof memory !== 'object') {
+      return { clarificationRequested: false, clarificationAttempts: 0 };
+    }
+    const record = memory as Record<string, unknown>;
+    return {
+      clarificationRequested: record.clarificationRequested === true,
+      clarificationAttempts:
+        typeof record.clarificationAttempts === 'number' &&
+        Number.isInteger(record.clarificationAttempts)
+          ? Math.max(0, record.clarificationAttempts)
+          : 0,
+    };
+  }
+
+  private resolveLowConfidenceDecision(
+    policy: WidgetMemoryPolicy,
+    previous: {
+      clarificationRequested: boolean;
+      clarificationAttempts: number;
+    },
+  ): { attempts: number; shouldHandoff: boolean } {
+    const attempts = previous.clarificationRequested
+      ? previous.clarificationAttempts + 1
+      : 1;
+    return {
+      attempts,
+      shouldHandoff:
+        policy.lowConfidenceAction === 'handoff' ||
+        attempts >= policy.maxClarificationAttempts,
+    };
+  }
+
+  private toPublicMessageMetadata(
+    value: Prisma.JsonValue,
+  ): Record<string, unknown> {
+    const metadata = this.toRecord(value);
+    return {
+      responseType:
+        metadata.usedFallback === true
+          ? 'fallback'
+          : metadata.handledWithoutKnowledge === true
+            ? 'automated'
+            : 'generated',
+    };
+  }
+
+  private isContextualFollowUp(
+    content: string,
+    hasConversationHistory: boolean,
+  ): boolean {
+    if (!hasConversationHistory) return false;
+    const normalized = content.trim().toLowerCase();
+    if (normalized.length > 240) return false;
+    return /\b(it|its|that|this|these|those|they|them|above|previous|same|again|more|shorter|longer|format|markdown|md|table|list|rewrite|rephrase|summari[sz]e|translate|explain)\b/.test(
+      normalized,
+    );
+  }
+
+  private hasLexicalSupport(query: string, content: string): boolean {
+    const ignoredTerms = new Set([
+      'about',
+      'again',
+      'could',
+      'from',
+      'give',
+      'have',
+      'into',
+      'more',
+      'please',
+      'that',
+      'their',
+      'then',
+      'this',
+      'what',
+      'when',
+      'where',
+      'which',
+      'with',
+      'would',
+    ]);
+    const queryTerms = this.tokenizeForLexicalMatch(query)
+      .filter((term) => term.length >= 3 && !ignoredTerms.has(term))
+      .map((term) => this.stemLexicalTerm(term));
+    if (queryTerms.length === 0) return false;
+
+    const contentTerms = new Set(
+      this.tokenizeForLexicalMatch(content).map((term) =>
+        this.stemLexicalTerm(term),
+      ),
+    );
+    const matchedTerms = queryTerms.filter((term) => contentTerms.has(term));
+    const requiredMatches = queryTerms.length <= 2 ? 1 : 2;
+    return matchedTerms.length >= Math.min(requiredMatches, queryTerms.length);
+  }
+
+  private tokenizeForLexicalMatch(value: string): string[] {
+    return value.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  }
+
+  private stemLexicalTerm(term: string): string {
+    if (term.length >= 7 && term.endsWith('ing')) return term.slice(0, -3);
+    if (term.length >= 6 && term.endsWith('er')) return term.slice(0, -2);
+    if (term.length >= 6 && term.endsWith('ed')) return term.slice(0, -2);
+    if (term.length >= 6 && term.endsWith('es')) return term.slice(0, -2);
+    if (term.length >= 5 && term.endsWith('s')) return term.slice(0, -1);
+    return term;
   }
 
   private toRecord(value: Prisma.JsonValue): Record<string, unknown> {
