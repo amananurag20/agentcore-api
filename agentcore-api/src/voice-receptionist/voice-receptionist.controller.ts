@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Header,
   HttpCode,
@@ -9,7 +10,10 @@ import {
   Post,
   Query,
   Req,
+  Res,
+  Sse,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
@@ -77,7 +81,7 @@ export class VoiceReceptionistController {
   @Post('configs')
   @Roles('super_admin', 'org_admin', 'product_admin')
   @RequireProductAccess('voice_receptionist', 'configure')
-  @ApiOperation({ summary: 'Create voice provider config placeholder' })
+  @ApiOperation({ summary: 'Create a voice provider configuration' })
   @ApiCreatedResponse({ type: VoiceConfigResponseDto })
   createConfig(
     @CurrentUser() user: AuthenticatedUser,
@@ -99,6 +103,57 @@ export class VoiceReceptionistController {
     return this.voiceReceptionistService.updateConfig(user, id, body);
   }
 
+  @Delete('configs/:id')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('voice_receptionist', 'configure')
+  @ApiOperation({ summary: 'Delete an inactive voice configuration' })
+  deleteConfig(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.voiceReceptionistService.deleteConfig(user, id);
+  }
+
+  @Post('configs/:id/test')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('voice_receptionist', 'configure')
+  @ApiOperation({ summary: 'Validate configuration and provider credentials' })
+  testConfig(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.voiceReceptionistService.testConfig(user, id);
+  }
+
+  @Get('analytics')
+  @ApiOperation({ summary: 'Get 30-day voice receptionist analytics' })
+  getAnalytics(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.voiceReceptionistService.getAnalytics(user, organizationId);
+  }
+
+  @Get('runtime-health')
+  @ApiOperation({ summary: 'Get active ConversationRelay session health' })
+  getRuntimeHealth(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('configId') configId?: string,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.voiceReceptionistService.getRuntimeHealth(
+      user,
+      configId,
+      organizationId,
+    );
+  }
+
+  @Sse('events')
+  @ApiOperation({ summary: 'Stream voice call and session updates' })
+  streamEvents(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.voiceReceptionistService.streamEvents(user, organizationId);
+  }
+
   @Get('calls')
   @ApiOperation({ summary: 'List voice calls' })
   @ApiOkResponse({ type: VoiceCallListResponseDto })
@@ -114,6 +169,23 @@ export class VoiceReceptionistController {
   @ApiOkResponse({ type: VoiceCallResponseDto })
   getCall(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     return this.voiceReceptionistService.getCall(user, id);
+  }
+
+  @Get('calls/:id/recording')
+  @ApiOperation({ summary: 'Proxy an authenticated Twilio recording' })
+  async getRecording(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Res() response: Response,
+  ) {
+    const recording = await this.voiceReceptionistService.getRecording(
+      user,
+      id,
+    );
+    response.setHeader('Content-Type', recording.contentType);
+    response.setHeader('Cache-Control', 'private, max-age=300');
+    response.setHeader('Content-Length', recording.buffer.length);
+    response.send(recording.buffer);
   }
 
   @Post('calls/:id/agent-messages')

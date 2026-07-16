@@ -427,6 +427,44 @@ export class AppointmentCalendarService {
     return `${eventId}-${updatedAt.getTime()}`;
   }
 
+  async retryDeadLetter(eventId: string): Promise<void> {
+    const event = await this.prisma.appointmentCalendarEvent.update({
+      where: { id: eventId },
+      data: { attempts: 0, status: 'pending', lastError: null },
+    });
+    if (!this.queueService.isEnabled()) {
+      await this.prisma.appointmentCalendarEvent.update({
+        where: { id: event.id },
+        data: {
+          status: 'failed',
+          lastError: 'Calendar sync queue is disabled',
+        },
+      });
+      return;
+    }
+    const jobId = this.calendarJobId(event.id, event.updatedAt);
+    try {
+      await this.queueService.add(
+        APPOINTMENT_CALENDAR_SYNC_QUEUE,
+        APPOINTMENT_CALENDAR_SYNC_JOB,
+        {
+          calendarEventId: event.id,
+          expectedUpdatedAt: event.updatedAt.toISOString(),
+        } satisfies AppointmentCalendarSyncJobData,
+        { jobId },
+      );
+    } catch (error) {
+      await this.prisma.appointmentCalendarEvent.update({
+        where: { id: event.id },
+        data: {
+          status: 'failed',
+          lastError: `Queue publish failed: ${this.errorMessage(error)}`,
+        },
+      });
+      throw error;
+    }
+  }
+
   private async queryFreeBusy(
     connection: AppointmentCalendarConnection,
     accessToken: string,

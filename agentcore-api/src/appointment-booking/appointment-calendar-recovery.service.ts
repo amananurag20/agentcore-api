@@ -16,6 +16,7 @@ import {
   AppointmentCalendarService,
   AppointmentCalendarSyncJobData,
 } from './appointment-calendar.service';
+import { AppointmentOperationsAlertService } from './appointment-operations-alert.service';
 
 @Injectable()
 export class AppointmentCalendarRecoveryService
@@ -26,6 +27,7 @@ export class AppointmentCalendarRecoveryService
 
   constructor(
     private readonly auditService: AuditService,
+    private readonly alertService: AppointmentOperationsAlertService,
     private readonly calendarService: AppointmentCalendarService,
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
@@ -165,6 +167,14 @@ export class AppointmentCalendarRecoveryService
         attempts: event.attempts,
         lastError: event.lastError,
       },
+    });
+    await this.alertService.deadLetter({
+      event: 'appointment.calendar.dead_letter',
+      organizationId: event.organizationId,
+      bookingId: event.bookingId,
+      recordId: event.id,
+      attempts: event.attempts,
+      lastError: event.lastError,
     });
   }
 }

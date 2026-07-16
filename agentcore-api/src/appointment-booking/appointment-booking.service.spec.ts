@@ -63,6 +63,8 @@ describe('AppointmentBookingService group capacity', () => {
     cancellationWindowMinutes: null,
     rescheduleWindowMinutes: null,
     waitlistEnabled: true,
+    reminderOffsetsMinutes: [],
+    reminderTemplates: {},
     status: 'active' as const,
     metadata: {},
     createdAt: new Date(),

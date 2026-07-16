@@ -30,6 +30,7 @@ export class AppointmentReminderQueueService {
   async enqueueBookingReminders(input: {
     bookingId: string;
     organizationId: string;
+    serviceId?: string;
     startAt: Date;
     timezone?: string;
   }) {
@@ -38,7 +39,20 @@ export class AppointmentReminderQueueService {
     const policy = await this.prisma.appointmentBookingPolicy.findUnique({
       where: { organizationId: input.organizationId },
     });
-    const offsets = [0, ...this.getReminderOffsets()];
+    const service = input.serviceId
+      ? await this.prisma.appointmentService.findUnique({
+          where: { id: input.serviceId },
+          select: { reminderOffsetsMinutes: true },
+        })
+      : null;
+    const configuredOffsets = service?.reminderOffsetsMinutes.length
+      ? service.reminderOffsetsMinutes
+      : policy?.reminderOffsetsMinutes?.length
+        ? policy.reminderOffsetsMinutes
+        : this.getReminderOffsets();
+    const offsets = [0, ...new Set(configuredOffsets)].sort(
+      (left, right) => right - left,
+    );
 
     for (const offsetMinutes of offsets) {
       let dueAt =
@@ -144,6 +158,47 @@ export class AppointmentReminderQueueService {
           ),
         ]),
       );
+    }
+  }
+
+  async retryDeadLetter(reminderId: string): Promise<void> {
+    const dueAt = new Date();
+    const reminder = await this.prisma.appointmentReminder.update({
+      where: { id: reminderId },
+      data: {
+        dueAt,
+        status: 'pending',
+        attempts: 0,
+        lastError: null,
+      },
+    });
+    if (!this.queueService.isEnabled()) {
+      await this.prisma.appointmentReminder.update({
+        where: { id: reminderId },
+        data: { status: 'failed', lastError: 'Reminder queue is disabled' },
+      });
+      return;
+    }
+    try {
+      await this.queueService.add(
+        APPOINTMENT_REMINDER_QUEUE,
+        APPOINTMENT_REMINDER_JOB,
+        {
+          reminderId,
+          expectedDueAt: dueAt.toISOString(),
+        } satisfies AppointmentReminderJobData,
+        { jobId: appointmentReminderJobId(reminder.id, dueAt), attempts: 1 },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.prisma.appointmentReminder.update({
+        where: { id: reminderId },
+        data: {
+          status: 'failed',
+          lastError: `Queue publish failed: ${message}`,
+        },
+      });
+      throw error;
     }
   }
 

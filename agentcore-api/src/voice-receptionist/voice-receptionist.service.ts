@@ -1,8 +1,10 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -38,6 +40,7 @@ import {
   VoiceProviderActionResult,
 } from './voice-outbound.service';
 import { VoiceNotificationService } from './voice-notification.service';
+import { VoiceRuntimeService } from './voice-runtime.service';
 
 type VoiceCallWithEvents = Prisma.VoiceCallGetPayload<{
   include: {
@@ -71,6 +74,7 @@ export class VoiceReceptionistService {
     private readonly notificationService: VoiceNotificationService,
     private readonly outboundService: VoiceOutboundService,
     private readonly prisma: PrismaService,
+    @Optional() private readonly runtimeService?: VoiceRuntimeService,
   ) {}
 
   async listConfigs(
@@ -193,6 +197,82 @@ export class VoiceReceptionistService {
     return this.toConfigResponse(config);
   }
 
+  async deleteConfig(currentUser: AuthenticatedUser, id: string) {
+    const config = await this.findConfigForActor(currentUser, id);
+    const activeCalls = await this.prisma.voiceCall.count({
+      where: {
+        configId: config.id,
+        status: { in: ['ringing', 'in_progress', 'waiting_for_agent'] },
+      },
+    });
+    if (activeCalls) {
+      throw new ConflictException(
+        'Cannot delete a voice config with active calls',
+      );
+    }
+    await this.prisma.voiceReceptionistConfig.delete({
+      where: { id: config.id },
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'voice.config_deleted',
+      entityType: 'voice_config',
+      entityId: config.id,
+    });
+    return { deleted: true, id: config.id };
+  }
+
+  async testConfig(currentUser: AuthenticatedUser, id: string) {
+    const config = await this.findConfigForActor(currentUser, id);
+    const settings = this.toRecord(config.settings);
+    const checks = {
+      active: config.status === 'active',
+      credentials: Boolean(config.apiKeyEncrypted),
+      accountSid: Boolean(
+        settings.twilioAccountSid ||
+        this.configService.get<string>('TWILIO_ACCOUNT_SID'),
+      ),
+      webhookBase: Boolean(
+        this.configService.get<string>('VOICE_WEBHOOK_PUBLIC_BASE_URL'),
+      ),
+      streamingConfigured: this.outboundService.hasConversationRelay(config),
+      transferConfigured: Boolean(config.transferPhoneNumber),
+      voicemailEnabled: config.voicemailEnabled,
+    };
+    let providerTest: {
+      provider: string;
+      reachable: boolean;
+      liveControlSupported: boolean;
+      message?: string;
+      accountSid?: string;
+      accountStatus?: string;
+    };
+    try {
+      providerTest = await this.outboundService.testConnection(config);
+    } catch (error) {
+      providerTest = {
+        provider: config.provider,
+        reachable: false,
+        liveControlSupported: config.provider === 'twilio',
+        message:
+          error instanceof Error ? error.message : 'Provider test failed',
+      };
+    }
+    return {
+      configId: config.id,
+      ready:
+        checks.active &&
+        checks.credentials &&
+        (config.provider !== 'twilio' || checks.accountSid) &&
+        checks.webhookBase &&
+        providerTest.reachable,
+      checks,
+      providerTest,
+      checkedAt: new Date(),
+    };
+  }
+
   async listCalls(currentUser: AuthenticatedUser, input: ListVoiceCallsDto) {
     const organizationId = this.resolveOrganizationId(
       currentUser,
@@ -238,6 +318,108 @@ export class VoiceReceptionistService {
   async getCall(currentUser: AuthenticatedUser, id: string) {
     const call = await this.findCallForActor(currentUser, id);
     return this.toCallResponse(call);
+  }
+
+  async getRecording(currentUser: AuthenticatedUser, id: string) {
+    const call = await this.findCallForActor(currentUser, id);
+    if (!call.recordingUrl) {
+      throw new NotFoundException('Voice recording not found');
+    }
+    const config = await this.prisma.voiceReceptionistConfig.findUniqueOrThrow({
+      where: { id: call.configId },
+    });
+    return this.outboundService.downloadRecording(config, call.recordingUrl);
+  }
+
+  async getAnalytics(
+    currentUser: AuthenticatedUser,
+    requestedOrganizationId?: string,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      requestedOrganizationId,
+    );
+    await this.assertVoiceEnabled(organizationId);
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const calls = await this.prisma.voiceCall.findMany({
+      where: { organizationId, startedAt: { gte: since } },
+      select: {
+        status: true,
+        durationSeconds: true,
+        events: { select: { type: true } },
+      },
+    });
+    const count = (status: string) =>
+      calls.filter((call) => call.status === status).length;
+    const durations = calls
+      .map((call) => call.durationSeconds)
+      .filter((value): value is number => value !== null);
+    const eventCount = (type: string) =>
+      calls.reduce(
+        (total, call) =>
+          total + call.events.filter((event) => event.type === type).length,
+        0,
+      );
+    return {
+      periodDays: 30,
+      totalCalls: calls.length,
+      inProgress: count('in_progress'),
+      completed: count('completed'),
+      transferred: count('transferred'),
+      voicemail: count('voicemail'),
+      failed: count('failed'),
+      waitingForAgent: count('waiting_for_agent'),
+      averageDurationSeconds: durations.length
+        ? Math.round(
+            durations.reduce((total, duration) => total + duration, 0) /
+              durations.length,
+          )
+        : 0,
+      containmentRate: calls.length
+        ? Math.round((count('completed') / calls.length) * 1000) / 10
+        : 0,
+      transferRate: calls.length
+        ? Math.round((count('transferred') / calls.length) * 1000) / 10
+        : 0,
+      bargeIns: eventCount('barge_in'),
+      assistantResponses: eventCount('assistant_response'),
+      generatedAt: new Date(),
+    };
+  }
+
+  async getRuntimeHealth(
+    currentUser: AuthenticatedUser,
+    configId?: string,
+    requestedOrganizationId?: string,
+  ) {
+    const organizationId = configId
+      ? (await this.findConfigForActor(currentUser, configId)).organizationId
+      : this.resolveOrganizationId(currentUser, requestedOrganizationId);
+    await this.assertVoiceEnabled(organizationId);
+    return (
+      this.runtimeService?.getHealth(configId, organizationId) ?? {
+        status: 'disabled',
+        transport: 'twilio-conversation-relay',
+        activeSessions: 0,
+        sessions: [],
+        checkedAt: new Date(),
+      }
+    );
+  }
+
+  async streamEvents(
+    currentUser: AuthenticatedUser,
+    requestedOrganizationId?: string,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      requestedOrganizationId,
+    );
+    await this.assertVoiceEnabled(organizationId);
+    if (!this.runtimeService) {
+      throw new ConflictException('Voice realtime service is unavailable');
+    }
+    return this.runtimeService.streamOrganization(organizationId);
   }
 
   async sendAgentMessage(
@@ -288,6 +470,7 @@ export class VoiceReceptionistService {
       entityId: call.id,
       metadata: { eventId: event.id },
     });
+    this.publishCallUpdate(updated);
 
     return {
       call: this.toCallResponse(updated),
@@ -322,6 +505,7 @@ export class VoiceReceptionistService {
       entityId: call.id,
       metadata: { assignedAgentId },
     });
+    this.publishCallUpdate(updated);
 
     return this.toCallResponse(updated);
   }
@@ -362,6 +546,7 @@ export class VoiceReceptionistService {
       entityId: call.id,
       metadata: { status: input.status },
     });
+    this.publishCallUpdate(updated);
 
     return this.toCallResponse(updated);
   }
@@ -426,6 +611,7 @@ export class VoiceReceptionistService {
       entityType: 'voice_call',
       entityId: call.id,
     });
+    this.publishCallUpdate(updated);
 
     return this.toCallResponse(updated);
   }
@@ -498,6 +684,7 @@ export class VoiceReceptionistService {
       entityId: call.id,
       metadata: { routeAction: input.action, providerAction: action },
     });
+    this.publishCallUpdate(updated);
 
     return {
       call: this.toCallResponse(updated),
@@ -1172,6 +1359,7 @@ export class VoiceReceptionistService {
         metadata: this.toJsonObject({ durationSeconds }),
       },
     });
+    this.publishCallUpdate(updated);
     return this.toCallResponse(updated);
   }
 
@@ -1203,7 +1391,7 @@ export class VoiceReceptionistService {
       },
     });
     if (answered) {
-      await this.prisma.voiceCall.update({
+      const updated = await this.prisma.voiceCall.update({
         where: { id: call.id },
         data: {
           status: 'completed',
@@ -1211,19 +1399,22 @@ export class VoiceReceptionistService {
           lastEventAt: new Date(),
         },
       });
+      this.publishCallUpdate(updated);
       return '<Response><Hangup/></Response>';
     }
     if (config.voicemailEnabled) {
-      await this.prisma.voiceCall.update({
+      const updated = await this.prisma.voiceCall.update({
         where: { id: call.id },
         data: { status: 'voicemail', lastEventAt: new Date() },
       });
+      this.publishCallUpdate(updated);
       return this.outboundService.buildVoicemailTwiml(config);
     }
-    await this.prisma.voiceCall.update({
+    const updated = await this.prisma.voiceCall.update({
       where: { id: call.id },
       data: { status: 'in_progress', lastEventAt: new Date() },
     });
+    this.publishCallUpdate(updated);
     return this.outboundService.buildGatherTwiml(
       config,
       'No one is available right now. Would you like help with something else?',
@@ -1247,7 +1438,7 @@ export class VoiceReceptionistService {
     const recordingDurationSeconds = this.parseOptionalInt(
       input.RecordingDuration,
     );
-    await this.prisma.voiceCall.update({
+    const updated = await this.prisma.voiceCall.update({
       where: { id: call.id },
       data: {
         status: 'voicemail',
@@ -1257,6 +1448,7 @@ export class VoiceReceptionistService {
         lastEventAt: new Date(),
       },
     });
+    this.publishCallUpdate(updated);
     const existingEvent = await this.prisma.voiceCallEvent.findFirst({
       where: {
         callId: call.id,
@@ -2078,6 +2270,7 @@ export class VoiceReceptionistService {
       'twilioGatherUrl',
       'twilioDialCallbackUrl',
       'twilioRecordingCallbackUrl',
+      'twilioConversationRelayCallbackUrl',
     ]) {
       const value = settings[key];
       if (
@@ -2086,6 +2279,36 @@ export class VoiceReceptionistService {
       ) {
         throw new BadRequestException(`settings.${key} must be an HTTPS URL`);
       }
+    }
+
+    const relayUrl = settings.conversationRelayUrl;
+    if (
+      relayUrl !== undefined &&
+      (typeof relayUrl !== 'string' || !/^wss:\/\//.test(relayUrl))
+    ) {
+      throw new BadRequestException(
+        'settings.conversationRelayUrl must be a WSS URL',
+      );
+    }
+    const relayTtsProvider = settings.conversationRelayTtsProvider;
+    if (
+      relayTtsProvider !== undefined &&
+      (typeof relayTtsProvider !== 'string' ||
+        !['Amazon', 'Google', 'ElevenLabs'].includes(relayTtsProvider))
+    ) {
+      throw new BadRequestException(
+        'settings.conversationRelayTtsProvider is unsupported',
+      );
+    }
+    const relaySttProvider = settings.conversationRelayTranscriptionProvider;
+    if (
+      relaySttProvider !== undefined &&
+      (typeof relaySttProvider !== 'string' ||
+        !['Deepgram', 'Google'].includes(relaySttProvider))
+    ) {
+      throw new BadRequestException(
+        'settings.conversationRelayTranscriptionProvider is unsupported',
+      );
     }
 
     const dtmfRoutes = settings.dtmfRoutes;
@@ -2244,6 +2467,19 @@ export class VoiceReceptionistService {
             : 'Voice provider action failed',
       };
     }
+  }
+
+  private publishCallUpdate(call: {
+    id: string;
+    organizationId: string;
+    providerCallId?: string | null;
+  }): void {
+    this.runtimeService?.publish({
+      type: 'call.updated',
+      organizationId: call.organizationId,
+      callId: call.id,
+      providerCallId: call.providerCallId ?? undefined,
+    });
   }
 
   private async withTimeout<T>(

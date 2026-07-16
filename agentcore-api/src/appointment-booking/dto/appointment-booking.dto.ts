@@ -2,6 +2,8 @@ import { Transform, Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   ArrayNotEmpty,
+  ArrayMaxSize,
+  ArrayUnique,
   IsArray,
   IsBoolean,
   IsEmail,
@@ -118,6 +120,21 @@ export class CreateAppointmentServiceDto {
   @IsOptional()
   waitlistEnabled?: boolean;
 
+  @ApiPropertyOptional({ type: [Number], example: [1440, 60] })
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  @Max(525600, { each: true })
+  @IsOptional()
+  reminderOffsetsMinutes?: number[];
+
+  @ApiPropertyOptional()
+  @IsObject()
+  @IsOptional()
+  reminderTemplates?: Record<string, string>;
+
   @ApiPropertyOptional({ enum: AppointmentServiceStatusDto })
   @IsEnum(AppointmentServiceStatusDto)
   @IsOptional()
@@ -196,6 +213,21 @@ export class UpdateAppointmentServiceDto {
   @IsBoolean()
   @IsOptional()
   waitlistEnabled?: boolean;
+
+  @ApiPropertyOptional({ type: [Number] })
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  @Max(525600, { each: true })
+  @IsOptional()
+  reminderOffsetsMinutes?: number[];
+
+  @ApiPropertyOptional()
+  @IsObject()
+  @IsOptional()
+  reminderTemplates?: Record<string, string>;
 
   @ApiPropertyOptional({ enum: AppointmentServiceStatusDto })
   @IsEnum(AppointmentServiceStatusDto)

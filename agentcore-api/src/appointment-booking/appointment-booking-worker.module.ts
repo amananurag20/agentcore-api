@@ -17,6 +17,7 @@ import { AppointmentReminderQueueService } from './appointment-reminder-queue.se
 import { AppointmentBookingService } from './appointment-booking.service';
 import { AppointmentTimezoneService } from './appointment-timezone.service';
 import { AppointmentWaitlistRecoveryService } from './appointment-waitlist-recovery.service';
+import { AppointmentOperationsAlertService } from './appointment-operations-alert.service';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { AppointmentWaitlistRecoveryService } from './appointment-waitlist-recov
     AppointmentTimezoneService,
     AppointmentBookingService,
     AppointmentWaitlistRecoveryService,
+    AppointmentOperationsAlertService,
   ],
 })
 export class AppointmentBookingWorkerModule {}

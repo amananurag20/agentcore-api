@@ -38,7 +38,7 @@ export class AppointmentReminderDeliveryService {
   ): Promise<ReminderDeliveryResult[]> {
     const channels = this.getChannels();
     const suppressed = await this.getSuppressedChannels(booking);
-    const message = this.buildMessage(booking, reminderType);
+    const content = await this.buildContent(booking, reminderType);
     const deliveries: Array<() => Promise<ReminderDeliveryResult | null>> = [];
 
     if (
@@ -47,7 +47,9 @@ export class AppointmentReminderDeliveryService {
       !alreadyDelivered.has('email') &&
       !suppressed.has('email')
     ) {
-      deliveries.push(() => this.sendEmail(booking, message));
+      deliveries.push(() =>
+        this.sendEmail(booking, content.message, content.emailSubject),
+      );
     }
     if (
       channels.has('sms') &&
@@ -55,7 +57,9 @@ export class AppointmentReminderDeliveryService {
       !alreadyDelivered.has('sms') &&
       !suppressed.has('sms')
     ) {
-      deliveries.push(() => this.sendSms(booking.customerPhone!, message));
+      deliveries.push(() =>
+        this.sendSms(booking.customerPhone!, content.message),
+      );
     }
     if (
       channels.has('whatsapp') &&
@@ -68,7 +72,8 @@ export class AppointmentReminderDeliveryService {
           booking.organizationId,
           booking.customerPhone!,
           booking,
-          message,
+          content.message,
+          content.whatsAppTemplateName,
         ),
       );
     }
@@ -127,13 +132,10 @@ export class AppointmentReminderDeliveryService {
   private async sendEmail(
     booking: ReminderBooking,
     message: string,
+    subject: string,
   ): Promise<ReminderDeliveryResult | null> {
     if (!booking.customerEmail) return null;
-    return this.sendEmailMessage(
-      booking.customerEmail,
-      `Appointment: ${booking.service.name}`,
-      message,
-    );
+    return this.sendEmailMessage(booking.customerEmail, subject, message);
   }
 
   private async sendEmailMessage(
@@ -210,6 +212,7 @@ export class AppointmentReminderDeliveryService {
     to: string,
     booking: ReminderBooking,
     fallbackMessage: string,
+    templateName?: string,
   ): Promise<ReminderDeliveryResult | null> {
     const config = await this.prisma.whatsAppAssistantConfig.findFirst({
       where: { organizationId, status: 'active' },
@@ -218,7 +221,7 @@ export class AppointmentReminderDeliveryService {
     if (!config?.accessTokenEncrypted || !config.phoneNumberId) return null;
 
     if (config.provider === 'meta') {
-      return this.sendMetaWhatsApp(config, to, booking);
+      return this.sendMetaWhatsApp(config, to, booking, templateName);
     }
     if (config.provider === 'twilio') {
       return this.sendTwilioWhatsApp(config, to, fallbackMessage);
@@ -230,11 +233,13 @@ export class AppointmentReminderDeliveryService {
     config: WhatsAppAssistantConfig,
     to: string,
     booking: ReminderBooking,
+    configuredTemplateName?: string,
   ): Promise<ReminderDeliveryResult> {
     const token = this.cryptoService.decrypt(config.accessTokenEncrypted!);
     const templateName =
-      this.configService.get<string>('APPOINTMENT_WHATSAPP_TEMPLATE_NAME') ??
-      'appointment_reminder';
+      configuredTemplateName ||
+      (this.configService.get<string>('APPOINTMENT_WHATSAPP_TEMPLATE_NAME') ??
+        'appointment_reminder');
     const response = await fetch(
       `https://graph.facebook.com/v20.0/${config.phoneNumberId}/messages`,
       {
@@ -326,19 +331,75 @@ export class AppointmentReminderDeliveryService {
     };
   }
 
-  private buildMessage(booking: ReminderBooking, reminderType: string): string {
-    const prefix =
+  private async buildContent(
+    booking: ReminderBooking,
+    reminderType: string,
+  ): Promise<{
+    message: string;
+    emailSubject: string;
+    whatsAppTemplateName?: string;
+  }> {
+    const policy = await this.prisma.appointmentBookingPolicy.findUnique({
+      where: { organizationId: booking.organizationId },
+      select: { reminderTemplates: true },
+    });
+    const templates = {
+      ...this.toStringRecord(policy?.reminderTemplates),
+      ...this.toStringRecord(booking.service.reminderTemplates),
+    };
+    const defaultTemplate =
       reminderType === 'confirmation'
-        ? 'Your appointment is confirmed.'
-        : 'This is an appointment reminder.';
-    const base = `${prefix} ${booking.service.name} with ${booking.staff.name} is scheduled for ${this.formatStart(booking)}.`;
+        ? 'Your appointment is confirmed. {{serviceName}} with {{staffName}} is scheduled for {{startTime}}.'
+        : 'Appointment reminder: {{serviceName}} with {{staffName}} is scheduled for {{startTime}}.';
+    const template =
+      reminderType === 'confirmation'
+        ? templates.confirmation || defaultTemplate
+        : templates[reminderType] || templates.reminder || defaultTemplate;
     const publicUrl = this.configService.get<string>('APPOINTMENT_PUBLIC_URL');
-    if (!publicUrl) return base;
-    const url = new URL('/appointment-reminders/unsubscribe', publicUrl);
-    url.searchParams.set('organizationId', booking.organizationId);
-    url.searchParams.set('bookingId', booking.id);
-    url.searchParams.set('token', this.reminderOptOutToken(booking));
-    return `${base} Manage reminder preferences: ${url.toString()}`;
+    let preferencesUrl = '';
+    if (publicUrl) {
+      const url = new URL('/book', publicUrl);
+      url.searchParams.set('organizationId', booking.organizationId);
+      url.searchParams.set('bookingId', booking.id);
+      url.searchParams.set('token', this.reminderOptOutToken(booking));
+      url.searchParams.set('channel', 'email');
+      preferencesUrl = url.toString();
+    }
+    const variables: Record<string, string> = {
+      customerName: booking.customerName,
+      serviceName: booking.service.name,
+      staffName: booking.staff.name,
+      startTime: this.formatStart(booking),
+      partySize: String(booking.partySize),
+      reminderType,
+      preferencesUrl,
+    };
+    const render = (value: string) =>
+      value.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
+        Object.prototype.hasOwnProperty.call(variables, key)
+          ? variables[key]
+          : match,
+      );
+    const rendered = render(template);
+    return {
+      message:
+        preferencesUrl && !template.includes('{{preferencesUrl}}')
+          ? `${rendered} Manage reminder preferences: ${preferencesUrl}`
+          : rendered,
+      emailSubject: render(
+        templates.emailSubject || 'Appointment: {{serviceName}}',
+      ),
+      whatsAppTemplateName: templates.whatsappTemplateName,
+    };
+  }
+
+  private toStringRecord(value: unknown): Record<string, string> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value).filter(
+        (entry): entry is [string, string] => typeof entry[1] === 'string',
+      ),
+    );
   }
 
   private async getSuppressedChannels(

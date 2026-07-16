@@ -11,6 +11,7 @@ import { IncomingMessage, Server } from 'node:http';
 import { Duplex } from 'node:stream';
 import WebSocket, { RawData, WebSocketServer } from 'ws';
 import { VoiceReceptionistService } from './voice-receptionist.service';
+import { VoiceRuntimeService } from './voice-runtime.service';
 
 type RelayMessage = {
   type?: string;
@@ -48,6 +49,7 @@ export class VoiceConversationRelayGateway
     private readonly configService: ConfigService,
     private readonly httpAdapterHost: HttpAdapterHost,
     private readonly voiceService: VoiceReceptionistService,
+    private readonly runtimeService: VoiceRuntimeService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -131,7 +133,10 @@ export class VoiceConversationRelayGateway
         );
       });
     });
-    webSocket.on('close', () => clearTimeout(session.durationTimer));
+    webSocket.on('close', () => {
+      clearTimeout(session.durationTimer);
+      this.runtimeService.unregisterSession(session.callSid);
+    });
     webSocket.on('error', (error) => {
       this.logger.warn(`ConversationRelay WebSocket error: ${error.message}`);
     });
@@ -161,11 +166,21 @@ export class VoiceConversationRelayGateway
         return;
       }
       session.callSid = message.callSid;
+      this.runtimeService.registerSession(
+        session.config,
+        message.callSid,
+        (content, language) => this.streamText(webSocket, content, language),
+      );
       await this.voiceService.handleConversationRelaySetup(session.config, {
         sessionId: message.sessionId,
         callSid: message.callSid,
         from: message.from,
         to: message.to,
+      });
+      this.runtimeService.publish({
+        type: 'call.updated',
+        organizationId: session.config.organizationId,
+        providerCallId: message.callSid,
       });
       return;
     }
@@ -174,6 +189,7 @@ export class VoiceConversationRelayGateway
       webSocket.close(1008, 'Setup required');
       return;
     }
+    this.runtimeService.touch(session.callSid);
 
     if (message.type === 'interrupt') {
       session.generation += 1;
@@ -183,6 +199,11 @@ export class VoiceConversationRelayGateway
         message.utteranceUntilInterrupt,
         message.durationUntilInterruptMs,
       );
+      this.runtimeService.publish({
+        type: 'call.updated',
+        organizationId: session.config.organizationId,
+        providerCallId: session.callSid,
+      });
       return;
     }
 
@@ -197,6 +218,11 @@ export class VoiceConversationRelayGateway
         undefined,
         message.lang,
       );
+      this.runtimeService.publish({
+        type: 'call.updated',
+        organizationId: session.config.organizationId,
+        providerCallId: session.callSid,
+      });
       if (generation !== session.generation) return;
       if (result.type === 'end') {
         this.send(webSocket, result);
@@ -214,6 +240,11 @@ export class VoiceConversationRelayGateway
         message.digit,
         message.digit,
       );
+      this.runtimeService.publish({
+        type: 'call.updated',
+        organizationId: session.config.organizationId,
+        providerCallId: session.callSid,
+      });
       if (generation !== session.generation) return;
       if (result.type === 'end') this.send(webSocket, result);
       else this.streamText(webSocket, result.content, result.language);

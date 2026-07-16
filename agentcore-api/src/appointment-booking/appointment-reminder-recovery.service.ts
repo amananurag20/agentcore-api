@@ -16,6 +16,7 @@ import {
   appointmentReminderJobId,
   AppointmentReminderJobData,
 } from './appointment-reminder-queue.service';
+import { AppointmentOperationsAlertService } from './appointment-operations-alert.service';
 
 @Injectable()
 export class AppointmentReminderRecoveryService
@@ -26,6 +27,7 @@ export class AppointmentReminderRecoveryService
 
   constructor(
     private readonly auditService: AuditService,
+    private readonly alertService: AppointmentOperationsAlertService,
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly queueService: QueueService,
@@ -164,6 +166,14 @@ export class AppointmentReminderRecoveryService
         attempts: reminder.attempts,
         lastError: reminder.lastError,
       },
+    });
+    await this.alertService.deadLetter({
+      event: 'appointment.reminder.dead_letter',
+      organizationId: reminder.organizationId,
+      bookingId: reminder.bookingId,
+      recordId: reminder.id,
+      attempts: reminder.attempts,
+      lastError: reminder.lastError,
     });
   }
 }

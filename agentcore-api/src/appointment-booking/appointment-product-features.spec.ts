@@ -96,4 +96,51 @@ describe('Appointment product feature workers', () => {
       reminderCreates.find((item) => item.offsetMinutes === 840)?.dueAt,
     ).toEqual(new Date('2026-08-02T08:00:00.000Z'));
   });
+
+  it('uses a service reminder schedule before the organization default', async () => {
+    const prisma = {
+      appointmentReminder: {
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn(),
+        upsert: jest.fn(({ create }: { create: { offsetMinutes: number } }) =>
+          Promise.resolve({ id: `reminder-${create.offsetMinutes}` }),
+        ),
+        update: jest.fn(),
+      },
+      appointmentBookingPolicy: {
+        findUnique: jest.fn().mockResolvedValue({
+          quietHoursEnabled: false,
+          reminderOffsetsMinutes: [1440, 60],
+        }),
+      },
+      appointmentService: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ reminderOffsetsMinutes: [30] }),
+      },
+    };
+    const queue = {
+      isEnabled: jest.fn(() => true),
+      add: jest.fn(),
+      remove: jest.fn(),
+    };
+    const service = new AppointmentReminderQueueService(
+      { get: jest.fn() } as never,
+      prisma as never,
+      queue as never,
+    );
+
+    await service.enqueueBookingReminders({
+      bookingId: 'booking-1',
+      organizationId: 'org-1',
+      serviceId: 'service-1',
+      startAt: new Date(Date.now() + 2 * 60 * 60_000),
+      timezone: 'UTC',
+    });
+
+    const offsets = prisma.appointmentReminder.upsert.mock.calls.map(
+      ([input]) => input.create.offsetMinutes,
+    );
+    expect(offsets).toEqual([30, 0]);
+  });
 });

@@ -13,6 +13,8 @@ model AppointmentService {
   cancellationWindowMinutes Int?                          @map("cancellation_window_minutes")
   rescheduleWindowMinutes   Int?                          @map("reschedule_window_minutes")
   waitlistEnabled           Boolean                       @default(true) @map("waitlist_enabled")
+  reminderOffsetsMinutes    Int[]                         @default([]) @map("reminder_offsets_minutes")
+  reminderTemplates         Json                          @default("{}") @map("reminder_templates")
   status                    AppointmentServiceStatus      @default(active)
   metadata                  Json                          @default("{}")
   staffServices             AppointmentStaffService[]
@@ -307,6 +309,8 @@ model AppointmentBookingPolicy {
   quietHoursStart           String       @default("21:00") @map("quiet_hours_start")
   quietHoursEnd             String       @default("08:00") @map("quiet_hours_end")
   quietHoursTimezone        String       @default("UTC") @map("quiet_hours_timezone")
+  reminderOffsetsMinutes    Int[]        @default([1440, 60]) @map("reminder_offsets_minutes")
+  reminderTemplates         Json         @default("{}") @map("reminder_templates")
   createdAt                 DateTime     @default(now()) @map("created_at")
   updatedAt                 DateTime     @updatedAt @map("updated_at")
 

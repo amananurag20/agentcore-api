@@ -231,20 +231,25 @@ export class WhatsAppAssistantWebhookController {
   @ApiOperation({ summary: 'Verify WhatsApp provider webhook' })
   verifyWebhook(
     @Param('configId') configId: string,
+    @Query('hub.mode') mode?: string,
     @Query('hub.verify_token') verifyToken?: string,
     @Query('hub.challenge') challenge?: string,
   ) {
     return this.whatsAppAssistantService.verifyWebhook(
       configId,
+      mode,
       verifyToken,
       challenge,
     );
   }
 
   @Public()
-  @Post(':configId/inbound')
+  @Post([':configId', ':configId/inbound'])
   @HttpCode(200)
-  @ApiOperation({ summary: 'Receive inbound WhatsApp webhook message' })
+  @ApiOperation({
+    summary:
+      'Receive inbound WhatsApp webhook events (the /inbound path is a legacy alias)',
+  })
   @ApiOkResponse({
     description: 'Webhook accepted for asynchronous processing',
   })

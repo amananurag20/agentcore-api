@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -102,6 +103,104 @@ describe('WhatsAppAssistantService hardening', () => {
         'x-hub-signature-256': `sha256=${'0'.repeat(64)}`,
       }),
     ).toThrow(ForbiddenException);
+  });
+
+  it('fails webhook verification closed when required configuration or parameters are missing', async () => {
+    const findFirst = jest.fn().mockResolvedValue({
+      id: 'config-1',
+      organizationId: 'org-1',
+      status: 'active',
+      webhookVerifyTokenEncrypted: null,
+    });
+    const service = createService({
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+      },
+      whatsAppAssistantConfig: { findFirst },
+    });
+
+    await expect(
+      service.verifyWebhook('config-1', 'subscribe', 'token', 'challenge'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    findFirst.mockResolvedValue({
+      id: 'config-1',
+      organizationId: 'org-1',
+      status: 'active',
+      webhookVerifyTokenEncrypted: 'encrypted',
+    });
+    await expect(
+      service.verifyWebhook('config-1', undefined, 'app-secret', 'challenge'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.verifyWebhook('config-1', 'subscribe', 'app-secret', undefined),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('returns the challenge only for the exact configured verification token', async () => {
+    const service = createService({
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+      },
+      whatsAppAssistantConfig: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'config-1',
+          organizationId: 'org-1',
+          status: 'active',
+          webhookVerifyTokenEncrypted: 'encrypted',
+        }),
+      },
+    });
+
+    await expect(
+      service.verifyWebhook(
+        'config-1',
+        'subscribe',
+        'app-secret',
+        'challenge-value',
+      ),
+    ).resolves.toBe('challenge-value');
+    await expect(
+      service.verifyWebhook(
+        'config-1',
+        'subscribe',
+        'wrong-token',
+        'challenge-value',
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('deduplicates before updating the conversation session window', async () => {
+    const upsert = jest.fn();
+    const service = createService({
+      whatsAppMessage: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'message-1',
+          processedAt: new Date(),
+        }),
+      },
+      whatsAppConversation: { upsert },
+    }) as unknown as {
+      persistInboundMessage(
+        config: WhatsAppAssistantConfig,
+        input: { contactWaId: string; providerMessageId: string },
+      ): Promise<{ messageId: string; created: boolean; processed: boolean }>;
+    };
+
+    await expect(
+      service.persistInboundMessage(
+        {
+          id: 'config-1',
+          organizationId: 'org-1',
+        } as WhatsAppAssistantConfig,
+        { contactWaId: '15551234567', providerMessageId: 'wamid.duplicate' },
+      ),
+    ).resolves.toEqual({
+      messageId: 'message-1',
+      created: false,
+      processed: true,
+    });
+    expect(upsert).not.toHaveBeenCalled();
   });
 
   it('marks assigned inbound messages processed without invoking AI', async () => {

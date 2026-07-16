@@ -2,11 +2,13 @@ import {
   BadRequestException,
   Injectable,
   Logger,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, VoiceReceptionistConfig } from '@prisma/client';
 import { CryptoService } from '../crypto/crypto.service';
+import { VoiceRuntimeService } from './voice-runtime.service';
 
 export type VoiceProviderActionResult = {
   provider: 'mock' | 'twilio' | 'sip' | 'custom';
@@ -22,6 +24,7 @@ export class VoiceOutboundService {
   constructor(
     private readonly configService: ConfigService,
     private readonly cryptoService: CryptoService,
+    @Optional() private readonly runtimeService?: VoiceRuntimeService,
   ) {}
 
   async speakText(input: {
@@ -29,6 +32,16 @@ export class VoiceOutboundService {
     providerCallId?: string | null;
     content: string;
   }): Promise<VoiceProviderActionResult> {
+    if (
+      input.providerCallId &&
+      this.runtimeService?.sendText(input.providerCallId, input.content)
+    ) {
+      return {
+        provider: 'twilio',
+        status: 'sent',
+        providerActionId: `conversation-relay-${input.providerCallId}`,
+      };
+    }
     if (this.shouldUseLiveTwilio(input.config)) {
       return this.updateTwilioCall({
         config: input.config,
@@ -111,6 +124,98 @@ export class VoiceOutboundService {
     }
 
     return this.mockSendToVoicemail(input);
+  }
+
+  async testConnection(config: VoiceReceptionistConfig) {
+    if (config.provider !== 'twilio') {
+      return {
+        provider: config.provider,
+        reachable: false,
+        liveControlSupported: false,
+        message: `${config.provider} has no native live-control adapter configured`,
+      };
+    }
+    const accountSid = this.getTwilioAccountSid(config);
+    const authToken = config.apiKeyEncrypted
+      ? this.cryptoService.decrypt(config.apiKeyEncrypted)
+      : undefined;
+    if (!accountSid || !authToken) {
+      throw new ServiceUnavailableException(
+        'Twilio Account SID and auth token are required',
+      );
+    }
+    const response = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}.json`,
+      {
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`,
+        },
+        signal: AbortSignal.timeout(
+          this.configService.get<number>('VOICE_PROVIDER_TIMEOUT_MS', 5_000),
+        ),
+      },
+    );
+    if (!response.ok) {
+      throw new ServiceUnavailableException(
+        `Twilio credential test failed with status ${response.status}`,
+      );
+    }
+    const body = (await response.json()) as { status?: string; sid?: string };
+    return {
+      provider: 'twilio',
+      reachable: true,
+      liveControlSupported: true,
+      accountSid: body.sid ?? accountSid,
+      accountStatus: body.status ?? 'unknown',
+    };
+  }
+
+  async downloadRecording(
+    config: VoiceReceptionistConfig,
+    recordingUrl: string,
+  ): Promise<{ buffer: Buffer; contentType: string }> {
+    const url = new URL(recordingUrl);
+    if (
+      url.protocol !== 'https:' ||
+      url.hostname !== 'api.twilio.com' ||
+      !url.pathname.includes('/Recordings/')
+    ) {
+      throw new BadRequestException('Untrusted Twilio recording URL');
+    }
+    const accountSid = this.getTwilioAccountSid(config);
+    const authToken = config.apiKeyEncrypted
+      ? this.cryptoService.decrypt(config.apiKeyEncrypted)
+      : undefined;
+    if (!accountSid || !authToken) {
+      throw new ServiceUnavailableException('Twilio credentials are missing');
+    }
+    const response = await fetch(url, {
+      redirect: 'error',
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`,
+      },
+      signal: AbortSignal.timeout(
+        this.configService.get<number>('VOICE_PROVIDER_TIMEOUT_MS', 5_000),
+      ),
+    });
+    if (!response.ok) {
+      throw new ServiceUnavailableException(
+        `Twilio recording download failed with status ${response.status}`,
+      );
+    }
+    const maxBytes = 25 * 1024 * 1024;
+    const declaredSize = Number(response.headers.get('content-length') ?? 0);
+    if (declaredSize > maxBytes) {
+      throw new BadRequestException('Voice recording exceeds 25 MB');
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > maxBytes) {
+      throw new BadRequestException('Voice recording exceeds 25 MB');
+    }
+    return {
+      buffer,
+      contentType: response.headers.get('content-type') ?? 'audio/wav',
+    };
   }
 
   private mockSpeakText(input: {

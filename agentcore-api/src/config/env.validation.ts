@@ -243,6 +243,10 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
+  APPOINTMENT_OPERATIONS_ALERT_WEBHOOK_URL?: string;
+
+  @IsString()
+  @IsOptional()
   APPOINTMENT_REMINDER_CHANNELS?: string;
 
   @IsString()
@@ -729,6 +733,13 @@ class EnvironmentVariables {
   @Max(14400)
   @IsOptional()
   VOICE_MAX_CALL_DURATION_SECONDS = 1800;
+
+  @Transform(({ value }) => Number(value ?? 250))
+  @IsInt()
+  @Min(1)
+  @Max(5000)
+  @IsOptional()
+  VOICE_SSE_MAX_CONNECTIONS = 250;
 
   @IsString()
   @IsOptional()

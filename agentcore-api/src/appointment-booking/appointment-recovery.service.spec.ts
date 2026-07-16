@@ -4,6 +4,7 @@ import { AppointmentReminderRecoveryService } from './appointment-reminder-recov
 describe('Appointment recovery dead letters', () => {
   const now = new Date();
   const audit = { record: jest.fn() };
+  const alerts = { deadLetter: jest.fn() };
   const config = {
     get: jest.fn((_key: string, fallback: unknown) => fallback),
   };
@@ -40,6 +41,7 @@ describe('Appointment recovery dead letters', () => {
     };
     const service = new AppointmentReminderRecoveryService(
       audit as never,
+      alerts as never,
       config as never,
       prisma as never,
       queue as never,
@@ -59,6 +61,9 @@ describe('Appointment recovery dead letters', () => {
         action: 'appointment.reminder_dead_lettered',
         entityId: reminder.bookingId,
       }),
+    );
+    expect(alerts.deadLetter).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'appointment.reminder.dead_letter' }),
     );
   });
 
@@ -88,6 +93,7 @@ describe('Appointment recovery dead letters', () => {
     };
     const service = new AppointmentCalendarRecoveryService(
       audit as never,
+      alerts as never,
       { calendarJobId: jest.fn() } as never,
       config as never,
       prisma as never,
@@ -107,6 +113,9 @@ describe('Appointment recovery dead letters', () => {
         action: 'appointment.calendar_sync_dead_lettered',
         entityId: event.bookingId,
       }),
+    );
+    expect(alerts.deadLetter).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'appointment.calendar.dead_letter' }),
     );
   });
 });

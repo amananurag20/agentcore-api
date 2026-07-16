@@ -2,12 +2,16 @@ import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
+  ArrayMaxSize,
+  ArrayUnique,
+  IsArray,
   IsEmail,
   IsEnum,
   IsInt,
   IsISO8601,
   IsOptional,
   IsString,
+  IsObject,
   IsUUID,
   Matches,
   Max,
@@ -97,6 +101,29 @@ export class UpdateAppointmentPolicyDto {
   @IsString()
   @IsOptional()
   quietHoursTimezone?: string;
+
+  @ApiPropertyOptional({ type: [Number], example: [10080, 1440, 60] })
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  @Max(525600, { each: true })
+  @IsOptional()
+  reminderOffsetsMinutes?: number[];
+
+  @ApiPropertyOptional({
+    example: {
+      confirmation:
+        'Your {{serviceName}} appointment is confirmed for {{startTime}}.',
+      reminder:
+        'Reminder: {{serviceName}} with {{staffName}} at {{startTime}}.',
+      emailSubject: 'Appointment: {{serviceName}}',
+    },
+  })
+  @IsObject()
+  @IsOptional()
+  reminderTemplates?: Record<string, string>;
 }
 
 export class CreateAppointmentBlackoutDto {

@@ -484,6 +484,33 @@ export class AppointmentBookingController {
     return this.appointmentBookingService.listWaitlist(user, query);
   }
 
+  @Get('operations/dead-letters')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  listDeadLetters(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.appointmentBookingService.listDeadLetters(user, organizationId);
+  }
+
+  @Post('operations/reminders/:id/retry')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  retryReminderDeadLetter(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.appointmentBookingService.retryReminderDeadLetter(user, id);
+  }
+
+  @Post('operations/calendars/:id/retry')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  retryCalendarDeadLetter(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.appointmentBookingService.retryCalendarDeadLetter(user, id);
+  }
+
   @Patch('series/:id/cancel')
   cancelSeries(
     @CurrentUser() user: AuthenticatedUser,
@@ -590,6 +617,16 @@ export class PublicAppointmentBookingController {
   ) {
     await this.limitPublicRequest(request, query.organizationId, 'read');
     return this.appointmentBookingService.listPublicAvailability(query);
+  }
+
+  @Public()
+  @Get('waitlist-sessions')
+  async listPublicWaitlistSessions(
+    @Query() query: PublicListAvailabilityDto,
+    @Req() request: Request,
+  ) {
+    await this.limitPublicRequest(request, query.organizationId, 'read');
+    return this.appointmentBookingService.listPublicWaitlistSessions(query);
   }
 
   @Public()

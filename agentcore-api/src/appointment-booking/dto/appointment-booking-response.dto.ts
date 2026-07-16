@@ -46,6 +46,12 @@ export class AppointmentServiceResponseDto {
   @ApiProperty()
   waitlistEnabled: boolean;
 
+  @ApiProperty({ type: [Number] })
+  reminderOffsetsMinutes: number[];
+
+  @ApiProperty()
+  reminderTemplates: Record<string, string>;
+
   @ApiProperty({ enum: AppointmentServiceStatusDto })
   status: AppointmentServiceStatusDto;
 

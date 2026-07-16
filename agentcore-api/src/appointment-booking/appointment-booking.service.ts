@@ -475,6 +475,90 @@ export class AppointmentBookingService {
     });
   }
 
+  async listDeadLetters(
+    currentUser: AuthenticatedUser,
+    requestedOrganizationId?: string,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      requestedOrganizationId,
+    );
+    const [reminders, calendarEvents] = await Promise.all([
+      this.prisma.appointmentReminder.findMany({
+        where: { organizationId, status: 'dead_letter' },
+        include: {
+          booking: {
+            select: {
+              id: true,
+              customerName: true,
+              startAt: true,
+              service: { select: { id: true, name: true } },
+            },
+          },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 100,
+      }),
+      this.prisma.appointmentCalendarEvent.findMany({
+        where: { organizationId, status: 'dead_letter' },
+        include: {
+          booking: {
+            select: {
+              id: true,
+              customerName: true,
+              startAt: true,
+              service: { select: { id: true, name: true } },
+            },
+          },
+          connection: {
+            select: { id: true, provider: true, accountEmail: true },
+          },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 100,
+      }),
+    ]);
+    return { reminders, calendarEvents };
+  }
+
+  async retryReminderDeadLetter(currentUser: AuthenticatedUser, id: string) {
+    const reminder = await this.prisma.appointmentReminder.findUnique({
+      where: { id },
+    });
+    if (!reminder || reminder.status !== 'dead_letter') {
+      throw new NotFoundException('Reminder dead letter not found');
+    }
+    this.resolveOrganizationId(currentUser, reminder.organizationId);
+    await this.reminderQueueService.retryDeadLetter(reminder.id);
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: reminder.organizationId,
+      action: 'appointment.reminder_dead_letter_retried',
+      entityType: 'appointment_reminder',
+      entityId: reminder.id,
+    });
+    return { retried: true, id: reminder.id };
+  }
+
+  async retryCalendarDeadLetter(currentUser: AuthenticatedUser, id: string) {
+    const event = await this.prisma.appointmentCalendarEvent.findUnique({
+      where: { id },
+    });
+    if (!event || event.status !== 'dead_letter') {
+      throw new NotFoundException('Calendar dead letter not found');
+    }
+    this.resolveOrganizationId(currentUser, event.organizationId);
+    await this.calendarService.retryDeadLetter(event.id);
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: event.organizationId,
+      action: 'appointment.calendar_dead_letter_retried',
+      entityType: 'appointment_calendar_event',
+      entityId: event.id,
+    });
+    return { retried: true, id: event.id };
+  }
+
   async joinWaitlist(input: JoinAppointmentWaitlistDto) {
     await this.assertAppointmentBookingEnabled(input.organizationId);
     const service = await this.findActiveService(
@@ -804,6 +888,8 @@ export class AppointmentBookingService {
         cancellationWindowMinutes: input.cancellationWindowMinutes,
         rescheduleWindowMinutes: input.rescheduleWindowMinutes,
         waitlistEnabled: input.waitlistEnabled ?? true,
+        reminderOffsetsMinutes: input.reminderOffsetsMinutes ?? [],
+        reminderTemplates: this.toJsonObject(input.reminderTemplates),
         status: input.status ?? 'active',
         metadata: this.toJsonObject(input.metadata),
       },
@@ -849,6 +935,10 @@ export class AppointmentBookingService {
           cancellationWindowMinutes: input.cancellationWindowMinutes,
           rescheduleWindowMinutes: input.rescheduleWindowMinutes,
           waitlistEnabled: input.waitlistEnabled,
+          reminderOffsetsMinutes: input.reminderOffsetsMinutes,
+          reminderTemplates: input.reminderTemplates
+            ? this.toJsonObject(input.reminderTemplates)
+            : undefined,
           status: input.status,
           metadata: input.metadata
             ? this.toJsonObject(input.metadata)
@@ -1347,6 +1437,64 @@ export class AppointmentBookingService {
     return this.listAvailableSlots(input.organizationId, input);
   }
 
+  async listPublicWaitlistSessions(input: PublicListAvailabilityDto) {
+    await this.assertAppointmentBookingEnabled(input.organizationId);
+    const service = await this.findActiveService(
+      input.organizationId,
+      input.serviceId,
+    );
+    if (!service.waitlistEnabled) return [];
+    const timezone = input.timezone ?? 'UTC';
+    this.timezoneService.assertValid(timezone);
+    const dayStart = this.timezoneService.startOfDay(input.date, timezone);
+    const dayEnd = this.timezoneService.nextDayStart(input.date, timezone);
+    const bookings = await this.prisma.appointmentBooking.findMany({
+      where: {
+        organizationId: input.organizationId,
+        serviceId: service.id,
+        staffId: input.staffId,
+        status: { in: ['pending', 'confirmed'] },
+        startAt: { gte: dayStart, lt: dayEnd, gt: new Date() },
+      },
+      include: { staff: { select: { id: true, name: true, timezone: true } } },
+      orderBy: { startAt: 'asc' },
+    });
+    const sessions = new Map<
+      string,
+      {
+        staffId: string;
+        staffName: string;
+        startAt: Date;
+        endAt: Date;
+        timezone: string;
+        partySize: number;
+      }
+    >();
+    for (const booking of bookings) {
+      const key = `${booking.staffId}:${booking.startAt.toISOString()}`;
+      const existing = sessions.get(key);
+      if (existing) existing.partySize += booking.partySize;
+      else {
+        sessions.set(key, {
+          staffId: booking.staff.id,
+          staffName: booking.staff.name,
+          startAt: booking.startAt,
+          endAt: booking.endAt,
+          timezone: booking.staff.timezone,
+          partySize: booking.partySize,
+        });
+      }
+    }
+    return [...sessions.values()].map((session) => ({
+      staffId: session.staffId,
+      staffName: session.staffName,
+      startAt: session.startAt,
+      endAt: session.endAt,
+      timezone: session.timezone,
+      seatsRemaining: Math.max(0, service.maxAttendees - session.partySize),
+    }));
+  }
+
   async listBookings(
     currentUser: AuthenticatedUser,
     input: ListAppointmentBookingsDto,
@@ -1418,6 +1566,7 @@ export class AppointmentBookingService {
     await this.reminderQueueService.enqueueBookingReminders({
       bookingId: booking.id,
       organizationId,
+      serviceId: booking.serviceId,
       startAt: booking.startAt,
       timezone: booking.timezone,
     });
@@ -1449,6 +1598,7 @@ export class AppointmentBookingService {
     await this.reminderQueueService.enqueueBookingReminders({
       bookingId: booking.id,
       organizationId: input.organizationId,
+      serviceId: booking.serviceId,
       startAt: booking.startAt,
       timezone: booking.timezone,
     });
@@ -1579,6 +1729,7 @@ export class AppointmentBookingService {
     await this.reminderQueueService.enqueueBookingReminders({
       bookingId: updated.id,
       organizationId: updated.organizationId,
+      serviceId: updated.serviceId,
       startAt: updated.startAt,
       timezone: updated.timezone,
     });
@@ -1699,6 +1850,7 @@ export class AppointmentBookingService {
         await this.reminderQueueService.enqueueBookingReminders({
           bookingId: item.id,
           organizationId: item.organizationId,
+          serviceId: item.serviceId,
           startAt: item.startAt,
           timezone: item.timezone,
         });
@@ -1814,6 +1966,7 @@ export class AppointmentBookingService {
       await this.reminderQueueService.enqueueBookingReminders({
         bookingId: updated.id,
         organizationId: updated.organizationId,
+        serviceId: updated.serviceId,
         startAt: updated.startAt,
         timezone: updated.timezone,
       });
@@ -2093,6 +2246,7 @@ export class AppointmentBookingService {
     await this.reminderQueueService.enqueueBookingReminders({
       bookingId: booking.id,
       organizationId: booking.organizationId,
+      serviceId: booking.serviceId,
       startAt: booking.startAt,
       timezone: booking.timezone,
     });
@@ -3135,6 +3289,7 @@ export class AppointmentBookingService {
     return {
       ...service,
       metadata: this.toRecord(service.metadata),
+      reminderTemplates: this.toRecord(service.reminderTemplates),
     };
   }
 

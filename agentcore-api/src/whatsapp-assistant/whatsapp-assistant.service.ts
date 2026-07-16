@@ -650,21 +650,30 @@ export class WhatsAppAssistantService {
 
   async verifyWebhook(
     configId: string,
+    mode?: string,
     verifyToken?: string,
     challenge?: string,
   ) {
     const config = await this.findActiveConfig(configId);
     await this.assertWhatsAppEnabled(config.organizationId);
 
+    if (mode !== 'subscribe' || !challenge) {
+      throw new BadRequestException('Invalid WhatsApp webhook verification');
+    }
+    if (!config.webhookVerifyTokenEncrypted) {
+      throw new ForbiddenException(
+        'WhatsApp webhook verify token is not configured',
+      );
+    }
     if (
-      config.webhookVerifyTokenEncrypted &&
+      !verifyToken ||
       verifyToken !==
         this.cryptoService.decrypt(config.webhookVerifyTokenEncrypted)
     ) {
       throw new ForbiddenException('Invalid WhatsApp webhook verify token');
     }
 
-    return challenge ?? 'ok';
+    return challenge;
   }
 
   async receiveInboundWebhook(
@@ -866,6 +875,24 @@ export class WhatsAppAssistantService {
   ): Promise<{ messageId: string; created: boolean; processed: boolean }> {
     if (!input.providerMessageId) {
       throw new BadRequestException('WhatsApp message id is required');
+    }
+
+    // Deduplicate before touching the conversation so a provider retry cannot
+    // extend the customer-service window or reorder the inbox.
+    const existingMessage = await this.prisma.whatsAppMessage.findFirst({
+      where: {
+        organizationId: config.organizationId,
+        direction: 'inbound',
+        providerMessageId: input.providerMessageId,
+      },
+      select: { id: true, processedAt: true },
+    });
+    if (existingMessage) {
+      return {
+        messageId: existingMessage.id,
+        created: false,
+        processed: Boolean(existingMessage.processedAt),
+      };
     }
 
     const now = new Date();

@@ -29,6 +29,7 @@ describe('VoiceConversationRelayGateway', () => {
       { get: jest.fn() } as never,
       {} as never,
       {} as never,
+      {} as never,
     ) as unknown as TestableGateway;
     const socket = { readyState: WebSocket.OPEN, send: jest.fn() };
 
@@ -68,6 +69,10 @@ describe('VoiceConversationRelayGateway', () => {
       { get: jest.fn() } as never,
       {} as never,
       voiceService as never,
+      {
+        touch: jest.fn(),
+        publish: jest.fn(),
+      } as never,
     ) as unknown as TestableGateway;
     const socket = {
       readyState: WebSocket.OPEN,

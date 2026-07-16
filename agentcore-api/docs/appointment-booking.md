@@ -24,6 +24,16 @@ Administrators manage organization defaults through `GET/PATCH
 and reschedule windows. Authenticated staff/admin actions bypass these customer
 self-service windows.
 
+The policy also stores the organization reminder schedule and templates.
+`reminderOffsetsMinutes` contains positive minute offsets before the appointment;
+the immediate confirmation is always added separately. Services can override the
+schedule and templates with the same fields, while empty service settings inherit
+the organization policy. Template keys include `confirmation`, `reminder`, a
+specific type such as `24h_before`, `emailSubject`, and
+`whatsappTemplateName`. Text supports `{{customerName}}`, `{{serviceName}}`,
+`{{staffName}}`, `{{startTime}}`, `{{partySize}}`, `{{reminderType}}`, and
+`{{preferencesUrl}}`.
+
 Use `PATCH /api/v1/appointment-booking/bookings/:id/check-in` to record attendance.
 The worker marks unchecked-in confirmed bookings `no_show` after the configured
 grace period. Organization closures are managed through the authenticated
@@ -45,6 +55,12 @@ Customers may join a full service/staff/start slot at `POST
 capacity to the first party that fits, by email/SMS, with a configurable claim
 deadline. Claims are optimistic and DB-capacity guarded. The worker expires stale
 offers, repairs interrupted claims, and advances the queue.
+
+Public clients can query `GET
+/api/v1/appointment-booking/public/waitlist-sessions` with the same parameters
+as availability. It returns already-booked sessions, including sessions with no
+remaining seats, so customers can choose a waitlist session without knowing an
+internal staff ID.
 
 ## Customer self-service
 
@@ -86,6 +102,22 @@ wall-clock time (and drop the reminder if that would be after the appointment).
 Reminder messages include an HMAC-signed preference link when
 `APPOINTMENT_PUBLIC_URL` is configured. The public opt-out endpoint creates a
 per-channel suppression that is checked immediately before delivery.
+
+## Operations and deployment
+
+Administrators inspect terminal delivery failures with `GET
+/api/v1/appointment-booking/operations/dead-letters`. Retry a reminder with
+`POST /operations/reminders/:id/retry` or a calendar event with `POST
+/operations/calendars/:id/retry`. Retries reset recovery attempts, enqueue a new
+idempotent job, and create an audit event.
+Set `APPOINTMENT_OPERATIONS_ALERT_WEBHOOK_URL` to receive a bounded-time JSON
+webhook as soon as a reminder or calendar record enters dead letter.
+
+Before production traffic, apply all Prisma migrations, run the API and worker as
+separately supervised processes, configure Redis and provider credentials, set
+`APPOINTMENT_PUBLIC_URL`, and alert on dead-letter audit events plus queue/worker
+health. Live Google, Microsoft, Resend, Twilio, and Meta verification requires
+credentials for the target environment.
 
 Run both processes in production:
 
