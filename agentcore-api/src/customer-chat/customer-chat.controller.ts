@@ -407,6 +407,30 @@ export class CustomerChatWidgetController {
   }
 
   @Public()
+  @Patch('conversations/:id/close')
+  @ApiOperation({ summary: 'Close the current public widget conversation' })
+  @ApiOkResponse({ type: CustomerChatConversationDto })
+  async closePublicConversation(
+    @Param('id') id: string,
+    @Req() request: Request,
+    @Headers('x-visitor-token') visitorToken?: string,
+    @Headers('origin') origin?: string,
+    @Headers('referer') referer?: string,
+  ) {
+    await this.limitPublicRequest({
+      action: 'close',
+      clientIp: this.getClientIp(request),
+      maxEnvKey: 'PUBLIC_CHAT_MAX_MESSAGES_PER_WINDOW',
+      defaultMax: 20,
+    });
+    return this.customerChatService.closePublicConversation(
+      id,
+      visitorToken,
+      origin ?? referer,
+    );
+  }
+
+  @Public()
   @Sse('conversations/:id/events')
   @ApiOperation({ summary: 'Stream public widget conversation updates' })
   async streamPublicConversation(

@@ -2,6 +2,78 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CustomerChatService } from './customer-chat.service';
 
 describe('CustomerChatService automatic reply recovery', () => {
+  it('closes a visitor conversation without deleting its history', async () => {
+    const now = new Date();
+    const conversation = {
+      id: 'conversation-a',
+      organizationId: 'org-a',
+      status: 'open',
+      version: 3,
+    };
+    const closedConversation = {
+      ...conversation,
+      status: 'closed',
+      version: 4,
+      messages: [{ id: 'message-a' }],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const prisma = {
+      customerChatConversation: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const realtime = { publish: jest.fn().mockResolvedValue(undefined) };
+    const service = Object.create(
+      CustomerChatService.prototype,
+    ) as CustomerChatService;
+    Object.assign(service as object, {
+      prisma,
+      auditService: audit,
+      realtimeService: realtime,
+    });
+    jest
+      .spyOn(service as never, 'findConversationContextForVisitor' as never)
+      .mockResolvedValue(conversation as never);
+    jest
+      .spyOn(service as never, 'loadConversation' as never)
+      .mockResolvedValue(closedConversation as never);
+    jest
+      .spyOn(service as never, 'createSystemUser' as never)
+      .mockReturnValue({ orgId: 'org-a' } as never);
+    jest
+      .spyOn(service as never, 'toConversationResponse' as never)
+      .mockReturnValue(closedConversation as never);
+
+    const result = await service.closePublicConversation(
+      conversation.id,
+      'visitor-token',
+      'https://example.com',
+    );
+
+    expect(prisma.customerChatConversation.updateMany).toHaveBeenCalledWith({
+      where: { id: conversation.id, status: { not: 'closed' } },
+      data: { status: 'closed', version: { increment: 1 } },
+    });
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'customer_chat.conversation_closed',
+        metadata: {
+          source: 'public_widget',
+          reason: 'visitor_started_new_chat',
+        },
+      }),
+    );
+    expect(realtime.publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'conversation.updated',
+        conversationId: conversation.id,
+      }),
+    );
+    expect(result).toEqual(closedConversation);
+  });
+
   it('uses bounded production defaults for widget conversation memory', () => {
     const policyReader = CustomerChatService.prototype as unknown as {
       readWidgetMemoryPolicy: (

@@ -804,6 +804,44 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     return this.toConversationResponse(updatedConversation, 'public');
   }
 
+  async closePublicConversation(
+    conversationId: string,
+    visitorToken?: string,
+    origin?: string,
+  ) {
+    const conversation = await this.findConversationContextForVisitor(
+      conversationId,
+      visitorToken,
+      origin,
+    );
+    const closeResult =
+      conversation.status !== 'closed'
+        ? await this.prisma.customerChatConversation.updateMany({
+            where: { id: conversation.id, status: { not: 'closed' } },
+            data: {
+              status: 'closed',
+              version: { increment: 1 },
+            },
+          })
+        : { count: 0 };
+    const updatedConversation = await this.loadConversation(conversation.id);
+    if (closeResult.count > 0) {
+      await this.auditService.record({
+        actor: this.createSystemUser(conversation.organizationId),
+        organizationId: conversation.organizationId,
+        action: 'customer_chat.conversation_closed',
+        entityType: 'customer_chat_conversation',
+        entityId: conversation.id,
+        metadata: { source: 'public_widget', reason: 'visitor_started_new_chat' },
+      });
+      await this.publishConversationEvent(
+        updatedConversation,
+        'conversation.updated',
+      );
+    }
+    return this.toConversationResponse(updatedConversation, 'public');
+  }
+
   async streamConversationForActor(
     currentUser: AuthenticatedUser,
     conversationId: string,
