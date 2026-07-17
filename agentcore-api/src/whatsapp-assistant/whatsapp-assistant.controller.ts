@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   Param,
@@ -90,6 +91,22 @@ export class WhatsAppAssistantController {
     @Body() body: UpdateWhatsAppConfigDto,
   ) {
     return this.whatsAppAssistantService.updateConfig(user, id, body);
+  }
+
+  @Delete('configs/:id')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('whatsapp_assistant', 'configure')
+  @ApiOperation({ summary: 'Delete an unused WhatsApp provider config' })
+  @ApiOkResponse({
+    schema: {
+      example: { deleted: true, id: '8e77ecbd-f983-4421-a52d-f422ed2a48d9' },
+    },
+  })
+  deleteConfig(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.whatsAppAssistantService.deleteConfig(user, id);
   }
 
   @Get('configs/:id/templates')

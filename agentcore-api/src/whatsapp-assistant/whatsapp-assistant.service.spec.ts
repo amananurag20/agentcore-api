@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -42,6 +43,93 @@ const signedConfig = {
 } as WhatsAppAssistantConfig;
 
 describe('WhatsAppAssistantService hardening', () => {
+  const adminUser = {
+    sub: 'admin-1',
+    email: 'admin@example.com',
+    orgId: 'org-1',
+    roles: ['org_admin'],
+  };
+
+  it('deletes an unused organization-scoped WhatsApp configuration', async () => {
+    const deleteConfig = jest.fn().mockResolvedValue({});
+    const auditRecord = jest.fn().mockResolvedValue(undefined);
+    const service = createService(
+      {
+        organizationProduct: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+        },
+        whatsAppAssistantConfig: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'config-1',
+            organizationId: 'org-1',
+            name: 'Primary Meta',
+            provider: 'meta',
+            status: 'inactive',
+          }),
+          delete: deleteConfig,
+        },
+        whatsAppConversation: { count: jest.fn().mockResolvedValue(0) },
+      },
+      { consume: jest.fn() },
+      { sendText: jest.fn() },
+      { record: auditRecord },
+    );
+
+    await expect(service.deleteConfig(adminUser, 'config-1')).resolves.toEqual({
+      deleted: true,
+      id: 'config-1',
+    });
+    expect(deleteConfig).toHaveBeenCalledWith({ where: { id: 'config-1' } });
+    expect(auditRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'whatsapp.config_deleted' }),
+    );
+  });
+
+  it('preserves conversation history when configuration deletion is requested', async () => {
+    const deleteConfig = jest.fn();
+    const service = createService({
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+      },
+      whatsAppAssistantConfig: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'config-1',
+          organizationId: 'org-1',
+          status: 'inactive',
+        }),
+        delete: deleteConfig,
+      },
+      whatsAppConversation: { count: jest.fn().mockResolvedValue(1) },
+    });
+
+    await expect(
+      service.deleteConfig(adminUser, 'config-1'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(deleteConfig).not.toHaveBeenCalled();
+  });
+
+  it('requires a configuration to be inactive before deletion', async () => {
+    const count = jest.fn();
+    const service = createService({
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+      },
+      whatsAppAssistantConfig: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'config-1',
+          organizationId: 'org-1',
+          status: 'active',
+        }),
+      },
+      whatsAppConversation: { count },
+    });
+
+    await expect(
+      service.deleteConfig(adminUser, 'config-1'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(count).not.toHaveBeenCalled();
+  });
+
   it('selects an approved template using the detected conversation locale', async () => {
     const service = createService({
       whatsAppTemplate: {

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -202,6 +203,36 @@ export class WhatsAppAssistantService {
     });
 
     return this.toConfigResponse(config);
+  }
+
+  async deleteConfig(currentUser: AuthenticatedUser, id: string) {
+    const config = await this.findConfigForActor(currentUser, id);
+    if (config.status !== 'inactive') {
+      throw new ConflictException(
+        'Deactivate the WhatsApp configuration before deleting it',
+      );
+    }
+    const conversationCount = await this.prisma.whatsAppConversation.count({
+      where: { configId: config.id },
+    });
+    if (conversationCount > 0) {
+      throw new ConflictException(
+        'Cannot delete a WhatsApp configuration with conversation history; set it to inactive instead',
+      );
+    }
+
+    await this.prisma.whatsAppAssistantConfig.delete({
+      where: { id: config.id },
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'whatsapp.config_deleted',
+      entityType: 'whatsapp_config',
+      entityId: config.id,
+      metadata: { name: config.name, provider: config.provider },
+    });
+    return { deleted: true, id: config.id };
   }
 
   async listConversations(
