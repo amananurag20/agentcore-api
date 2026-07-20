@@ -48,24 +48,30 @@ model WhatsAppTemplate {
 }
 
 model WhatsAppConversation {
-  id               String                     @id @default(uuid())
-  organizationId   String                     @map("organization_id")
-  organization     Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  configId         String                     @map("config_id")
-  config           WhatsAppAssistantConfig    @relation(fields: [configId], references: [id], onDelete: Cascade)
-  status           WhatsAppConversationStatus @default(open)
-  contactWaId      String                     @map("contact_wa_id")
-  contactName      String?                    @map("contact_name")
-  contactPhone     String?                    @map("contact_phone")
-  locale           String                     @default("en")
-  assignedAgentId  String?                    @map("assigned_agent_id")
-  assignedAgent    User?                      @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
-  sessionExpiresAt DateTime?                  @map("session_expires_at")
-  lastMessageAt    DateTime                   @default(now()) @map("last_message_at")
-  metadata         Json                       @default("{}")
-  messages         WhatsAppMessage[]
-  createdAt        DateTime                   @default(now()) @map("created_at")
-  updatedAt        DateTime                   @updatedAt @map("updated_at")
+  id                       String                     @id @default(uuid())
+  organizationId           String                     @map("organization_id")
+  organization             Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  configId                 String                     @map("config_id")
+  config                   WhatsAppAssistantConfig    @relation(fields: [configId], references: [id], onDelete: Cascade)
+  status                   WhatsAppConversationStatus @default(open)
+  contactWaId              String                     @map("contact_wa_id")
+  contactName              String?                    @map("contact_name")
+  contactPhone             String?                    @map("contact_phone")
+  locale                   String                     @default("en")
+  assignedAgentId          String?                    @map("assigned_agent_id")
+  assignedAgent            User?                      @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  consentStatus            WhatsAppConsentStatus      @default(unknown) @map("consent_status")
+  consentSource            String?                    @map("consent_source")
+  consentedAt              DateTime?                  @map("consented_at")
+  optedOutAt               DateTime?                  @map("opted_out_at")
+  sessionExpiresAt         DateTime?                  @map("session_expires_at")
+  processingLeaseMessageId String?                    @map("processing_lease_message_id")
+  processingLeaseExpiresAt DateTime?                  @map("processing_lease_expires_at")
+  lastMessageAt            DateTime                   @default(now()) @map("last_message_at")
+  metadata                 Json                       @default("{}")
+  messages                 WhatsAppMessage[]
+  createdAt                DateTime                   @default(now()) @map("created_at")
+  updatedAt                DateTime                   @updatedAt @map("updated_at")
 
   @@unique([configId, contactWaId])
   @@index([organizationId, status])
@@ -85,6 +91,7 @@ model WhatsAppMessage {
   role               WhatsAppMessageRole
   type               WhatsAppMessageType      @default(text)
   providerMessageId  String?                  @map("provider_message_id")
+  automationKey      String?                  @unique @map("automation_key")
   content            String?
   mediaUrl           String?                  @map("media_url")
   mediaMimeType      String?                  @map("media_mime_type")
@@ -108,4 +115,22 @@ model WhatsAppMessage {
   @@index([processedAt])
   @@index([organizationId, deliveryStatus])
   @@map("whatsapp_messages")
+}
+
+model WhatsAppPendingDeliveryStatus {
+  id                String       @id @default(uuid())
+  organizationId    String       @map("organization_id")
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  providerMessageId String       @map("provider_message_id")
+  status            String
+  callbackAt        DateTime     @map("callback_at")
+  recipientWaId     String?      @map("recipient_wa_id")
+  errors            Json         @default("[]")
+  metadata          Json         @default("{}")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  updatedAt         DateTime     @updatedAt @map("updated_at")
+
+  @@unique([organizationId, providerMessageId])
+  @@index([createdAt])
+  @@map("whatsapp_pending_delivery_statuses")
 }

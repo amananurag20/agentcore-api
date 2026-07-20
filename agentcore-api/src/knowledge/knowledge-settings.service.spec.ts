@@ -28,7 +28,7 @@ describe('KnowledgeSettingsService', () => {
       name: 'Local OCR',
       provider: 'local_tesseract',
       status: 'active',
-      endpoint: 'http://ocr:8080/ocr',
+      endpoint: null,
       apiKeyEncrypted: 'encrypted-secret',
       settings: { language: 'eng' },
       createdAt: new Date(),
@@ -38,7 +38,6 @@ describe('KnowledgeSettingsService', () => {
     const result = await service.createOcrProvider(orgAdmin, {
       name: 'Local OCR',
       provider: 'local_tesseract',
-      endpoint: 'http://ocr:8080/ocr',
       apiKey: 'secret',
       settings: { language: 'eng' },
     });

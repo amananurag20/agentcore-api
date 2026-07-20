@@ -10,10 +10,22 @@ describe('Appointment product feature workers', () => {
       checkedInAt: null,
       endAt: new Date(Date.now() - 60 * 60_000),
     };
+    type StatusInput = { where: { status: { in: string[] } } };
+    type UpdateInput = StatusInput & { data: { status: string } };
+    let capturedFind: StatusInput | undefined;
+    let capturedUpdate: UpdateInput | undefined;
+    const findMany = jest.fn((input: StatusInput) => {
+      capturedFind = input;
+      return Promise.resolve([booking]);
+    });
+    const updateMany = jest.fn((input: UpdateInput) => {
+      capturedUpdate = input;
+      return Promise.resolve({ count: 1 });
+    });
     const prisma = {
       appointmentBooking: {
-        findMany: jest.fn().mockResolvedValue([booking]),
-        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findMany,
+        updateMany,
       },
       appointmentBookingPolicy: {
         findMany: jest
@@ -39,9 +51,9 @@ describe('Appointment product feature workers', () => {
 
     await service.scan();
 
-    expect(prisma.appointmentBooking.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { status: 'no_show' } }),
-    );
+    expect(capturedFind?.where.status.in).toEqual(['pending', 'confirmed']);
+    expect(capturedUpdate?.where.status.in).toEqual(['pending', 'confirmed']);
+    expect(capturedUpdate?.data.status).toBe('no_show');
     expect(reminders.cancelBookingReminders).toHaveBeenCalledWith(booking.id);
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'appointment.booking_auto_no_show' }),

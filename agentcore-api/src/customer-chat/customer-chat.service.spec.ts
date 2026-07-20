@@ -4,6 +4,7 @@ import { CustomerChatService } from './customer-chat.service';
 describe('CustomerChatService automatic reply recovery', () => {
   it('closes a visitor conversation without deleting its history', async () => {
     const now = new Date();
+    let closeExpiresAt: Date | undefined;
     const conversation = {
       id: 'conversation-a',
       organizationId: 'org-a',
@@ -20,7 +21,14 @@ describe('CustomerChatService automatic reply recovery', () => {
     };
     const prisma = {
       customerChatConversation: {
-        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        updateMany: jest.fn(
+          (input: {
+            data: { expiresAt?: Date };
+          }): Promise<{ count: number }> => {
+            closeExpiresAt = input.data.expiresAt;
+            return Promise.resolve({ count: 1 });
+          },
+        ),
       },
     };
     const audit = { record: jest.fn().mockResolvedValue(undefined) };
@@ -32,6 +40,9 @@ describe('CustomerChatService automatic reply recovery', () => {
       prisma,
       auditService: audit,
       realtimeService: realtime,
+      configService: {
+        get: jest.fn((_key: string, fallback: unknown) => fallback),
+      },
     });
     jest
       .spyOn(service as never, 'findConversationContextForVisitor' as never)
@@ -52,10 +63,16 @@ describe('CustomerChatService automatic reply recovery', () => {
       'https://example.com',
     );
 
-    expect(prisma.customerChatConversation.updateMany).toHaveBeenCalledWith({
-      where: { id: conversation.id, status: { not: 'closed' } },
-      data: { status: 'closed', version: { increment: 1 } },
-    });
+    expect(prisma.customerChatConversation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: conversation.id, status: { not: 'closed' } },
+        data: expect.objectContaining({
+          status: 'closed',
+          version: { increment: 1 },
+        }) as object,
+      }),
+    );
+    expect(closeExpiresAt).toBeInstanceOf(Date);
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'customer_chat.conversation_closed',
@@ -277,12 +294,19 @@ describe('CustomerChatService automatic reply recovery', () => {
     const service = new CustomerChatService(
       audit as never,
       {} as never,
-      { answerConversationally: jest.fn().mockReturnValue(null) } as never,
+      {
+        answerConversationally: jest.fn().mockReturnValue(null),
+        detectLanguage: jest.fn().mockResolvedValue('en'),
+      } as never,
       {
         get: jest.fn((_key: string, fallback: unknown) => fallback),
       } as never,
       {
         search: jest.fn().mockRejectedValue(new Error('provider unavailable')),
+        getSearchClearanceDiagnostics: jest.fn().mockResolvedValue({
+          visibleCandidateCount: 0,
+          restrictedCandidateCount: 0,
+        }),
       } as never,
       prisma as never,
       {} as never,
@@ -442,5 +466,148 @@ describe('CustomerChatService automatic reply recovery', () => {
     );
     expect(knowledge.search).not.toHaveBeenCalled();
     expect(persistedStatus).toBe('open');
+  });
+
+  it('clears streamed output when an agent claims the conversation mid-generation', async () => {
+    const now = new Date();
+    const visitorMessage = {
+      id: 'message-visitor',
+      organizationId: 'org-a',
+      conversationId: 'conversation-a',
+      clientMessageId: 'client-a',
+      role: 'visitor',
+      content: 'What is the refund policy?',
+      metadata: {},
+      createdAt: now,
+      citations: [],
+    };
+    const conversationContext = {
+      id: 'conversation-a',
+      organizationId: 'org-a',
+      status: 'open',
+      assignedAgentId: null,
+      version: 1,
+      metadata: {},
+      widgetConfig: {
+        id: 'widget-a',
+        name: 'Support',
+        knowledgeScope: 'all',
+        folderScopes: [],
+        settings: {},
+      },
+    };
+    const loadedConversation = {
+      ...conversationContext,
+      status: 'open',
+      assignedAgentId: 'agent-a',
+      visitorId: 'visitor-a',
+      visitorName: null,
+      visitorEmail: null,
+      handoffRequestedAt: null,
+      lastMessageAt: now,
+      expiresAt: now,
+      messages: [visitorMessage],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const transaction = {
+      customerChatConversation: {
+        findUnique: jest.fn().mockResolvedValue({
+          status: 'open',
+          assignedAgentId: null,
+        }),
+        update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      customerChatMessage: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue(visitorMessage),
+      },
+    };
+    const prisma = {
+      $transaction: jest.fn(
+        (callback: (value: typeof transaction) => Promise<unknown>) =>
+          callback(transaction),
+      ),
+      customerChatMessage: { findMany: jest.fn().mockResolvedValue([]) },
+      customerChatConversation: {
+        findUnique: jest.fn().mockResolvedValue(loadedConversation),
+      },
+    };
+    const chat = {
+      answerConversationally: jest.fn().mockReturnValue(null),
+      detectLanguage: jest.fn().mockResolvedValue('en'),
+      rerankKnowledgeCandidates: jest.fn((items: unknown[]) => items),
+      answerWithContext: jest.fn(
+        async (input: { onDelta?: (delta: string) => Promise<void> }) => {
+          await input.onDelta?.('partial answer');
+          return {
+            answer: 'partial answer',
+            model: 'chat-model',
+            provider: 'openai',
+            adapter: 'openai',
+            usedFallback: false,
+            includedContextIndexes: [0],
+          };
+        },
+      ),
+    };
+    const knowledge = {
+      search: jest.fn().mockResolvedValue([
+        {
+          id: 'chunk-a',
+          organizationId: 'org-a',
+          sourceId: 'source-a',
+          documentId: 'document-a',
+          chunkIndex: 0,
+          content: 'Refunds are available for 30 days.',
+          score: 0.9,
+          embeddingModel: 'embedding-model',
+          embeddingProvider: 'openai',
+        },
+      ]),
+      getSearchClearanceDiagnostics: jest.fn().mockResolvedValue({
+        effectiveClearance: 0,
+        excludedChunkCount: 0,
+      }),
+    };
+    const service = new CustomerChatService(
+      { record: jest.fn().mockResolvedValue(undefined) } as never,
+      {} as never,
+      chat as never,
+      {
+        get: jest.fn((_key: string, fallback: unknown) => fallback),
+      } as never,
+      knowledge as never,
+      prisma as never,
+      {} as never,
+      { publish: jest.fn().mockResolvedValue(undefined) } as never,
+    );
+    const onReplace = jest.fn();
+
+    const result = await (
+      service as unknown as {
+        processVisitorMessage: (...args: unknown[]) => Promise<{
+          assistantMessage: object | null;
+        }>;
+      }
+    ).processVisitorMessage(
+      {
+        sub: 'visitor-a',
+        email: 'visitor@example.com',
+        orgId: 'org-a',
+        roles: ['user'],
+      },
+      conversationContext,
+      {
+        content: visitorMessage.content,
+        clientMessageId: visitorMessage.clientMessageId,
+      },
+      true,
+      { onDelta: jest.fn(), onReplace },
+    );
+
+    expect(result.assistantMessage).toBeNull();
+    expect(onReplace).toHaveBeenCalledWith('');
   });
 });

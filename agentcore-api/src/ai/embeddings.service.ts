@@ -49,11 +49,12 @@ export class EmbeddingsService {
   async embedText(input: {
     organizationId: string;
     text: string;
+    signal?: AbortSignal;
   }): Promise<EmbeddingResult> {
     const providerConfig = await this.findProviderConfig(input.organizationId);
 
     if (providerConfig?.apiKeyEncrypted) {
-      return this.embedWithProvider(providerConfig, input.text);
+      return this.embedWithProvider(providerConfig, input.text, input.signal);
     }
 
     if (!this.allowLocalFallback) {
@@ -125,6 +126,7 @@ export class EmbeddingsService {
           status: 'active',
           validationStatus: 'verified',
           embeddingModel: { not: null },
+          deletedAt: null,
         },
       });
       if (!selected) {
@@ -140,6 +142,7 @@ export class EmbeddingsService {
         status: 'active',
         validationStatus: 'verified',
         embeddingModel: { not: null },
+        deletedAt: null,
       },
       orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }],
     });
@@ -148,6 +151,7 @@ export class EmbeddingsService {
   private async embedWithProvider(
     providerConfig: AIProviderConfig,
     text: string,
+    signal?: AbortSignal,
   ): Promise<EmbeddingResult> {
     const adapter = this.adapterRegistry.getAdapter(providerConfig);
 
@@ -174,6 +178,7 @@ export class EmbeddingsService {
         baseUrl: providerConfig.baseUrl,
         model,
         text,
+        signal,
       });
       await this.usageService?.record({
         provider: providerConfig,
@@ -198,6 +203,7 @@ export class EmbeddingsService {
         latencyMs: Date.now() - startedAt,
         success: false,
       });
+      if (signal?.aborted) throw error;
       if (!this.allowLocalFallback) {
         throw new ServiceUnavailableException(
           `Embedding provider failed: ${this.toErrorMessage(error)}`,

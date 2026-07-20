@@ -35,9 +35,12 @@ import {
   CreateWhatsAppTemplateDto,
   ListWhatsAppConversationsDto,
   SendWhatsAppAgentMessageDto,
+  SendWhatsAppInteractiveMessageDto,
   SendWhatsAppMediaMessageDto,
+  SendWhatsAppProactiveTemplateDto,
   SendWhatsAppTemplateMessageDto,
   UpdateWhatsAppConfigDto,
+  UpdateWhatsAppConsentDto,
   UpdateWhatsAppConversationStatusDto,
   UpdateWhatsAppTemplateDto,
 } from './dto/whatsapp-assistant.dto';
@@ -54,6 +57,9 @@ type RawBodyRequest = {
   rawBody?: Buffer;
   headers: Record<string, string | string[] | undefined>;
   ip?: string;
+  protocol?: string;
+  originalUrl?: string;
+  get?: (name: string) => string | undefined;
 };
 
 @ApiTags('WhatsApp Assistant')
@@ -138,6 +144,20 @@ export class WhatsAppAssistantController {
     @Param('id') id: string,
   ) {
     return this.whatsAppAssistantService.syncTemplates(user, id);
+  }
+
+  @Post('configs/:id/proactive-template-messages')
+  @Roles('super_admin', 'org_admin', 'product_admin', 'agent')
+  @ApiOperation({
+    summary:
+      'Send an approved proactive template with recorded opt-in evidence',
+  })
+  sendProactiveTemplate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: SendWhatsAppProactiveTemplateDto,
+  ) {
+    return this.whatsAppAssistantService.sendProactiveTemplate(user, id, body);
   }
 
   @Post('configs/:id/templates')
@@ -290,6 +310,16 @@ export class WhatsAppAssistantController {
     return this.whatsAppAssistantService.sendMediaMessage(user, id, body);
   }
 
+  @Post('conversations/:id/interactive-messages')
+  @ApiOperation({ summary: 'Send WhatsApp reply buttons or a list message' })
+  sendInteractiveMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: SendWhatsAppInteractiveMessageDto,
+  ) {
+    return this.whatsAppAssistantService.sendInteractiveMessage(user, id, body);
+  }
+
   @Patch('conversations/:id/assignment')
   @ApiOperation({ summary: 'Assign or unassign a WhatsApp conversation' })
   @ApiOkResponse({ type: WhatsAppConversationResponseDto })
@@ -310,6 +340,22 @@ export class WhatsAppAssistantController {
     @Body() body: UpdateWhatsAppConversationStatusDto,
   ) {
     return this.whatsAppAssistantService.updateConversationStatus(
+      user,
+      id,
+      body,
+    );
+  }
+
+  @Patch('conversations/:id/consent')
+  @Roles('super_admin', 'org_admin', 'product_admin', 'agent')
+  @ApiOperation({ summary: 'Record WhatsApp messaging opt-in or opt-out' })
+  @ApiOkResponse({ type: WhatsAppConversationResponseDto })
+  updateConversationConsent(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: UpdateWhatsAppConsentDto,
+  ) {
+    return this.whatsAppAssistantService.updateConversationConsent(
       user,
       id,
       body,
@@ -372,6 +418,11 @@ export class WhatsAppAssistantWebhookController {
       request.rawBody,
       request.headers,
       request.ip,
+      {
+        protocol: request.protocol,
+        host: request.get?.('host'),
+        originalUrl: request.originalUrl,
+      },
     );
   }
 }

@@ -105,7 +105,10 @@ describe('VoiceReceptionistService Twilio callbacks', () => {
           key === 'VOICE_WEBHOOK_SIGNATURE_REQUIRED' ? false : fallback,
         ),
       } as unknown as ConfigService,
-      {} as never,
+      {
+        encrypt: jest.fn((value: string) => `encrypted:${value}`),
+        decrypt: jest.fn((value: string) => value.replace('encrypted:', '')),
+      } as never,
       {} as never,
       notification as never,
       outbound as never,
@@ -180,9 +183,18 @@ describe('VoiceReceptionistService Twilio callbacks', () => {
     });
 
     const update = voiceCallUpdates[0] as {
-      data: { recordingSid: string; recordingDurationSeconds: number };
+      data: {
+        recordingSid: string;
+        recordingUrl: null;
+        recordingUrlEncrypted: string;
+        recordingDurationSeconds: number;
+      };
     };
     expect(update.data.recordingSid).toBe('RE123');
+    expect(update.data.recordingUrl).toBeNull();
+    expect(update.data.recordingUrlEncrypted).toBe(
+      'encrypted:https://api.twilio.com/recordings/RE123',
+    );
     expect(update.data.recordingDurationSeconds).toBe(24);
     expect(notification.notifyVoicemail).toHaveBeenCalledWith(
       config,

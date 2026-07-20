@@ -90,6 +90,18 @@ Provider API keys are stored through AI provider config APIs, encrypted using `A
 | `PUBLIC_CHAT_MAX_MESSAGES_PER_WINDOW`                  | Public message rate limit          | Current default `20`.   |
 | `PUBLIC_CHAT_MAX_MESSAGES_PER_CONVERSATION_PER_WINDOW` | Per conversation limit             | Current default `10`.   |
 | `PUBLIC_CHAT_MAX_MESSAGE_LENGTH`                       | Message validation                 | Current default `2000`. |
+| `AI_CHAT_MAX_INPUT_TOKENS`                             | Total RAG prompt budget             | Includes instructions, history, knowledge, and the customer question. |
+| `AI_RAG_CONTEXT_MAX_TOKENS`                            | Knowledge context budget            | Lowest-scoring chunks are removed first when the prompt is full. |
+| `AI_CHAT_HISTORY_MAX_TOKENS`                           | Conversation memory budget          | Retains the newest messages that fit. |
+| `CUSTOMER_CHAT_MAX_CHUNKS_PER_DOCUMENT`                | Retrieval diversity                 | Default `2`; prevents one document from filling every context slot. |
+
+Public widget visitors intentionally use clearance level `0`. Only knowledge
+chunks with `sensitivityLevel = 0` and `customer_chat` product visibility are
+eligible for retrieval. Higher-sensitivity chunks remain available to suitably
+authorized internal users, but are never exposed through the public widget.
+Internal assistant-message metadata includes `effectiveClearance`,
+`clearanceFilteredCount`, and `clearanceBlockedAll` for diagnosing an empty
+public retrieval result without leaking those details to the visitor.
 
 ## Appointment Booking Env
 

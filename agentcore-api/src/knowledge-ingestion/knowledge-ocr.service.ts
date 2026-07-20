@@ -7,8 +7,16 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { KnowledgeOcrProviderConfig, Prisma } from '@prisma/client';
 import { createHash } from 'crypto';
+import {
+  AnalyzeDocumentCommand,
+  DetectDocumentTextCommand,
+  TextractClient,
+} from '@aws-sdk/client-textract';
+import { GoogleAuth } from 'google-auth-library';
+import { recognize as recognizeWithTesseract } from 'tesseract.js';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { OcrEndpointPolicyService } from './ocr-endpoint-policy.service';
 
 export type KnowledgeOcrMode = 'disabled' | 'fallback' | 'always';
 
@@ -23,7 +31,7 @@ export interface KnowledgeOcrPageResult {
 
 export interface OcrEndpointConfig {
   id?: string;
-  endpoint: string;
+  endpoint: string | null;
   apiKey?: string;
   provider: string;
   settings: Record<string, unknown>;
@@ -42,6 +50,9 @@ export interface KnowledgeExtractionRuntimePolicy {
   ocrPageConcurrency: number;
   ocrRenderWidth: number;
   maxPdfPages: number;
+  maxPdfBytes: number;
+  maxOcrPagesPerDocument: number;
+  maxEmptyOcrPageRatio: number;
   maxExtractedCharacters: number;
   pipelineSignature: string;
 }
@@ -63,6 +74,7 @@ export class KnowledgeOcrService {
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     @Optional() private readonly cryptoService?: CryptoService,
+    @Optional() private readonly endpointPolicy?: OcrEndpointPolicyService,
   ) {
     const mode =
       this.configService.get<KnowledgeOcrMode>('KNOWLEDGE_OCR_MODE') ??
@@ -96,6 +108,16 @@ export class KnowledgeOcrService {
         this.configService.get<number>('KNOWLEDGE_OCR_RENDER_WIDTH') ?? 1_800,
       maxPdfPages:
         this.configService.get<number>('KNOWLEDGE_PDF_MAX_PAGES') ?? 5_000,
+      maxPdfBytes:
+        this.configService.get<number>('KNOWLEDGE_PDF_MAX_BYTES') ??
+        100 * 1024 * 1024,
+      maxOcrPagesPerDocument:
+        this.configService.get<number>(
+          'KNOWLEDGE_OCR_MAX_PAGES_PER_DOCUMENT',
+        ) ?? 500,
+      maxEmptyOcrPageRatio:
+        this.configService.get<number>('KNOWLEDGE_OCR_MAX_EMPTY_PAGE_RATIO') ??
+        0.25,
       maxExtractedCharacters:
         this.configService.get<number>('KNOWLEDGE_MAX_EXTRACTED_CHARACTERS') ??
         25_000_000,
@@ -143,6 +165,21 @@ export class KnowledgeOcrService {
       ocrPageConcurrency: config.ocrPageConcurrency,
       ocrRenderWidth: config.ocrRenderWidth,
       maxPdfPages: config.maxPdfPages,
+      maxPdfBytes: this.numericSetting(
+        config.settings,
+        'maxPdfBytes',
+        this.deploymentDefaults.maxPdfBytes,
+      ),
+      maxOcrPagesPerDocument: this.numericSetting(
+        config.settings,
+        'maxOcrPagesPerDocument',
+        this.deploymentDefaults.maxOcrPagesPerDocument,
+      ),
+      maxEmptyOcrPageRatio: this.numericSetting(
+        config.settings,
+        'maxEmptyOcrPageRatio',
+        this.deploymentDefaults.maxEmptyOcrPageRatio,
+      ),
       maxExtractedCharacters: config.maxExtractedCharacters,
     };
     return {
@@ -202,8 +239,8 @@ export class KnowledgeOcrService {
     if (
       policy.fallback &&
       (primaryResult.text.trim().length === 0 ||
-        (primaryResult.confidence !== null &&
-          primaryResult.confidence < policy.minimumConfidence))
+        primaryResult.confidence === null ||
+        primaryResult.confidence < policy.minimumConfidence)
     ) {
       try {
         result = await this.callProvider(policy.fallback, input, policy);
@@ -234,11 +271,41 @@ export class KnowledgeOcrService {
     },
     policy: KnowledgeExtractionRuntimePolicy,
   ): Promise<KnowledgeOcrPageResult> {
-    if (!this.isEndpointAllowed(provider.endpoint)) {
+    if (provider.provider === 'local_tesseract') {
+      return this.callLocalTesseract(provider, input, policy);
+    }
+    if (provider.provider === 'aws_textract') {
+      return this.callAwsTextract(provider, input, policy);
+    }
+    if (provider.provider === 'google_document_ai') {
+      return this.callGoogleDocumentAi(provider, input, policy);
+    }
+    if (provider.provider === 'azure_document_intelligence') {
+      return this.callAzureDocumentIntelligence(provider, input, policy);
+    }
+    return this.callCustomProvider(provider, input, policy);
+  }
+
+  private async callCustomProvider(
+    provider: OcrEndpointConfig,
+    input: {
+      image: Buffer;
+      pageNumber: number;
+      documentName?: string | null;
+    },
+    policy: KnowledgeExtractionRuntimePolicy,
+  ): Promise<KnowledgeOcrPageResult> {
+    if (!provider.endpoint) {
       throw new ServiceUnavailableException(
-        'OCR provider endpoint is not allowed by the deployment policy',
+        `${provider.provider} OCR endpoint is not configured`,
       );
     }
+    const endpointPolicy =
+      this.endpointPolicy ?? new OcrEndpointPolicyService(this.configService);
+    await endpointPolicy.assertAllowed(
+      provider.endpoint,
+      Boolean(provider.apiKey),
+    );
     let lastError: unknown;
     for (let attempt = 0; attempt <= policy.maxRetries; attempt += 1) {
       try {
@@ -259,7 +326,11 @@ export class KnowledgeOcrService {
             : undefined,
           body: form,
           signal: AbortSignal.timeout(policy.timeoutMs),
+          redirect: 'manual',
         });
+        if (response.status >= 300 && response.status < 400) {
+          throw new Error('OCR provider redirects are not allowed');
+        }
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -288,6 +359,232 @@ export class KnowledgeOcrService {
     throw new ServiceUnavailableException(
       `OCR provider ${provider.provider} failed after ${policy.maxRetries + 1} attempts: ${this.errorMessage(lastError)}`,
     );
+  }
+
+  private async callLocalTesseract(
+    provider: OcrEndpointConfig,
+    input: { image: Buffer; pageNumber: number },
+    policy: KnowledgeExtractionRuntimePolicy,
+  ): Promise<KnowledgeOcrPageResult> {
+    const language =
+      typeof provider.settings.language === 'string'
+        ? provider.settings.language
+        : 'eng';
+    const result = await this.withTimeout(
+      recognizeWithTesseract(input.image, language),
+      policy.timeoutMs,
+      'Local Tesseract OCR timed out',
+    );
+    return {
+      text: result.data.text ?? '',
+      confidence: this.normalizeConfidence(result.data.confidence),
+      provider: 'local_tesseract',
+      model: language,
+      cacheHit: false,
+      metadata: { language, pageNumber: input.pageNumber },
+    };
+  }
+
+  private async callAwsTextract(
+    provider: OcrEndpointConfig,
+    input: { image: Buffer },
+    policy: KnowledgeExtractionRuntimePolicy,
+  ): Promise<KnowledgeOcrPageResult> {
+    const credentials = provider.apiKey
+      ? (JSON.parse(provider.apiKey) as {
+          accessKeyId: string;
+          secretAccessKey: string;
+          sessionToken?: string;
+        })
+      : undefined;
+    const region =
+      typeof provider.settings.region === 'string'
+        ? provider.settings.region
+        : (this.configService.get<string>('S3_REGION') ?? 'us-east-1');
+    const client = new TextractClient({ region, credentials });
+    const features = Array.isArray(provider.settings.features)
+      ? provider.settings.features.filter(
+          (value): value is 'TABLES' | 'FORMS' | 'LAYOUT' =>
+            value === 'TABLES' || value === 'FORMS' || value === 'LAYOUT',
+        )
+      : [];
+    const response = await this.withTimeout(
+      features.length
+        ? client.send(
+            new AnalyzeDocumentCommand({
+              Document: { Bytes: input.image },
+              FeatureTypes: features,
+            }),
+          )
+        : client.send(
+            new DetectDocumentTextCommand({ Document: { Bytes: input.image } }),
+          ),
+      policy.timeoutMs,
+      'AWS Textract timed out',
+    );
+    const lines = (response.Blocks ?? []).filter(
+      (block) => block.BlockType === 'LINE' && block.Text,
+    );
+    return {
+      text: lines.map((line) => line.Text).join('\n'),
+      confidence: this.averageConfidence(lines.map((line) => line.Confidence)),
+      provider: 'aws_textract',
+      model: features.length ? 'analyze-document' : 'detect-document-text',
+      cacheHit: false,
+      metadata: {
+        region,
+        featureTypes: features,
+        blockCount: response.Blocks?.length ?? 0,
+        tableCount: (response.Blocks ?? []).filter(
+          (block) => block.BlockType === 'TABLE',
+        ).length,
+      },
+    };
+  }
+
+  private async callGoogleDocumentAi(
+    provider: OcrEndpointConfig,
+    input: { image: Buffer },
+    policy: KnowledgeExtractionRuntimePolicy,
+  ): Promise<KnowledgeOcrPageResult> {
+    const projectId = this.requiredSetting(provider, 'projectId');
+    const location = this.requiredSetting(provider, 'location');
+    const processorId = this.requiredSetting(provider, 'processorId');
+    if (!/^[a-z0-9-]+$/i.test(location)) {
+      throw new ServiceUnavailableException(
+        'Google Document AI settings.location is invalid',
+      );
+    }
+    const version =
+      typeof provider.settings.processorVersion === 'string'
+        ? `/processorVersions/${provider.settings.processorVersion}`
+        : '';
+    const host = `${location}-documentai.googleapis.com`;
+    const endpoint = `https://${host}/v1/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/processors/${encodeURIComponent(processorId)}${version}:process`;
+    const credentials = provider.apiKey
+      ? (JSON.parse(provider.apiKey) as Record<string, unknown>)
+      : undefined;
+    const auth = new GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+    });
+    const response = await this.withTimeout(
+      auth.request<{
+        document?: {
+          text?: string;
+          pages?: Array<{ layout?: { confidence?: number } }>;
+          entities?: unknown[];
+        };
+      }>({
+        url: endpoint,
+        method: 'POST',
+        data: {
+          rawDocument: {
+            content: input.image.toString('base64'),
+            mimeType: 'image/png',
+          },
+        },
+      }),
+      policy.timeoutMs,
+      'Google Document AI timed out',
+    );
+    const document = response.data.document;
+    return {
+      text: document?.text ?? '',
+      confidence: this.averageConfidence(
+        document?.pages?.map((page) => page.layout?.confidence) ?? [],
+      ),
+      provider: 'google_document_ai',
+      model: processorId,
+      cacheHit: false,
+      metadata: {
+        location,
+        pageCount: document?.pages?.length ?? 0,
+        entityCount: document?.entities?.length ?? 0,
+      },
+    };
+  }
+
+  private async callAzureDocumentIntelligence(
+    provider: OcrEndpointConfig,
+    input: { image: Buffer },
+    policy: KnowledgeExtractionRuntimePolicy,
+  ): Promise<KnowledgeOcrPageResult> {
+    if (!provider.endpoint || !provider.apiKey) {
+      throw new ServiceUnavailableException(
+        'Azure Document Intelligence requires an HTTPS endpoint and API key',
+      );
+    }
+    const endpointPolicy =
+      this.endpointPolicy ?? new OcrEndpointPolicyService(this.configService);
+    await endpointPolicy.assertAllowed(provider.endpoint, true);
+    const model =
+      typeof provider.settings.model === 'string'
+        ? provider.settings.model
+        : 'prebuilt-read';
+    const apiVersion =
+      typeof provider.settings.apiVersion === 'string'
+        ? provider.settings.apiVersion
+        : '2024-11-30';
+    const analyzeUrl = `${provider.endpoint.replace(/\/+$/, '')}/documentintelligence/documentModels/${encodeURIComponent(model)}:analyze?api-version=${encodeURIComponent(apiVersion)}`;
+    const submitted = await fetch(analyzeUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Ocp-Apim-Subscription-Key': provider.apiKey,
+      },
+      body: Uint8Array.from(input.image),
+      signal: AbortSignal.timeout(policy.timeoutMs),
+      redirect: 'manual',
+    });
+    if (!submitted.ok || submitted.status < 200 || submitted.status >= 300) {
+      throw new Error(`Azure OCR returned HTTP ${submitted.status}`);
+    }
+    const operationUrl = submitted.headers.get('operation-location');
+    if (!operationUrl) throw new Error('Azure OCR omitted operation-location');
+    await endpointPolicy.assertAllowed(operationUrl, true);
+    const deadline = Date.now() + policy.timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const response = await fetch(operationUrl, {
+        headers: { 'Ocp-Apim-Subscription-Key': provider.apiKey },
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        redirect: 'manual',
+      });
+      if (!response.ok)
+        throw new Error(`Azure OCR returned HTTP ${response.status}`);
+      const body = (await response.json()) as {
+        status?: string;
+        analyzeResult?: {
+          content?: string;
+          pages?: Array<{ words?: Array<{ confidence?: number }> }>;
+          tables?: unknown[];
+        };
+        error?: { message?: string };
+      };
+      if (body.status === 'failed') {
+        throw new Error(body.error?.message ?? 'Azure OCR failed');
+      }
+      if (body.status === 'succeeded') {
+        const result = body.analyzeResult;
+        return {
+          text: result?.content ?? '',
+          confidence: this.averageConfidence(
+            result?.pages?.flatMap((page) =>
+              (page.words ?? []).map((word) => word.confidence),
+            ) ?? [],
+          ),
+          provider: 'azure_document_intelligence',
+          model,
+          cacheHit: false,
+          metadata: {
+            pageCount: result?.pages?.length ?? 0,
+            tableCount: result?.tables?.length ?? 0,
+          },
+        };
+      }
+    }
+    throw new Error('Azure OCR timed out');
   }
 
   private async readCache(
@@ -432,6 +729,45 @@ export class KnowledgeOcrService {
     return Math.max(0, Math.min(1, normalized));
   }
 
+  private averageConfidence(values: Array<number | undefined>): number | null {
+    const valid = values.filter(
+      (value): value is number =>
+        typeof value === 'number' && Number.isFinite(value),
+    );
+    if (!valid.length) return null;
+    return this.normalizeConfidence(
+      valid.reduce((sum, value) => sum + value, 0) / valid.length,
+    );
+  }
+
+  private requiredSetting(provider: OcrEndpointConfig, key: string): string {
+    const value = provider.settings[key];
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new ServiceUnavailableException(
+        `${provider.provider} OCR requires settings.${key}`,
+      );
+    }
+    return value.trim();
+  }
+
+  private async withTimeout<T>(
+    operation: Promise<T>,
+    timeoutMs: number,
+    message: string,
+  ): Promise<T> {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
   private toRecord(value: unknown): Record<string, unknown> {
     return value && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
@@ -442,19 +778,14 @@ export class KnowledgeOcrService {
     return error instanceof Error ? error.message : String(error);
   }
 
-  private isEndpointAllowed(endpoint: string) {
-    const allowedHosts = this.configService
-      .get<string>('KNOWLEDGE_OCR_ALLOWED_HOSTS')
-      ?.split(',')
-      .map((value) => value.trim().toLowerCase())
-      .filter(Boolean);
-    if (!allowedHosts?.length) {
-      return this.configService.get<string>('NODE_ENV') !== 'production';
-    }
-    const url = new URL(endpoint);
-    return (
-      allowedHosts.includes(url.host.toLowerCase()) ||
-      allowedHosts.includes(url.hostname.toLowerCase())
-    );
+  private numericSetting(
+    value: Prisma.JsonValue,
+    key: string,
+    fallback: number,
+  ): number {
+    const setting = this.toRecord(value)[key];
+    return typeof setting === 'number' && Number.isFinite(setting)
+      ? setting
+      : fallback;
   }
 }

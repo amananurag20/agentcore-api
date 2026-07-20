@@ -48,10 +48,12 @@ model Organization {
   whatsAppConversations           WhatsAppConversation[]
   whatsAppMessages                WhatsAppMessage[]
   whatsAppTemplates               WhatsAppTemplate[]
+  whatsAppPendingDeliveryStatuses WhatsAppPendingDeliveryStatus[]
   voiceReceptionistConfigs        VoiceReceptionistConfig[]
   voiceCalls                      VoiceCall[]
   voiceCallEvents                 VoiceCallEvent[]
   voiceAgentPresences             VoiceAgentPresence[]
+  voiceRelayTickets               VoiceRelayTicket[]
   authSessions                    AuthSession[]
   authOneTimeTokens               AuthOneTimeToken[]
   createdAt                       DateTime                         @default(now()) @map("created_at")

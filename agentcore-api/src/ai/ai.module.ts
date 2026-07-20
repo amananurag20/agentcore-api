@@ -15,6 +15,6 @@ import { ProviderEndpointPolicyModule } from './provider-endpoint-policy.module'
     ProviderEndpointPolicyModule,
   ],
   providers: [AIAdapterRegistryService, ChatService, EmbeddingsService],
-  exports: [ChatService, EmbeddingsService],
+  exports: [AIAdapterRegistryService, ChatService, EmbeddingsService],
 })
 export class AIModule {}

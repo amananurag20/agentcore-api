@@ -41,6 +41,8 @@ export type ExternalBusyInterval = { startAt: Date; endAt: Date };
 
 @Injectable()
 export class AppointmentCalendarService {
+  private readonly tokenRefreshes = new Map<string, Promise<string>>();
+
   constructor(
     private readonly auditService: AuditService,
     private readonly configService: ConfigService,
@@ -721,55 +723,94 @@ export class AppointmentCalendarService {
     ) {
       return this.cryptoService.decrypt(connection.accessTokenEncrypted);
     }
-    if (!connection.refreshTokenEncrypted) {
-      throw new ConflictException(
-        'Calendar connection requires reauthorization',
-      );
-    }
-    const config = this.providerConfig(connection.provider);
-    const refreshToken = this.cryptoService.decrypt(
-      connection.refreshTokenEncrypted,
-    );
-    const response = await fetch(
-      connection.provider === 'google'
-        ? 'https://oauth2.googleapis.com/token'
-        : 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: config.clientId,
-          client_secret: config.clientSecret,
-          grant_type: 'refresh_token',
-          refresh_token: refreshToken,
-          ...(connection.provider === 'microsoft'
-            ? {
-                scope:
-                  'openid email offline_access User.Read Calendars.ReadWrite',
-              }
-            : {}),
-        }),
-        signal: this.providerTimeoutSignal(),
-      },
-    );
-    const body = await this.readProviderJson<{
-      access_token: string;
-      refresh_token?: string;
-      expires_in?: number;
-    }>(response);
-    await this.prisma.appointmentCalendarConnection.update({
-      where: { id: connection.id },
-      data: {
-        accessTokenEncrypted: this.cryptoService.encrypt(body.access_token),
-        refreshTokenEncrypted: body.refresh_token
-          ? this.cryptoService.encrypt(body.refresh_token)
-          : undefined,
-        tokenExpiresAt: new Date(Date.now() + (body.expires_in ?? 3600) * 1000),
-        status: 'active',
-        lastError: null,
-      },
+    const existingRefresh = this.tokenRefreshes.get(connection.id);
+    if (existingRefresh) return existingRefresh;
+    const refresh = this.refreshAccessToken(connection.id).finally(() => {
+      this.tokenRefreshes.delete(connection.id);
     });
-    return body.access_token;
+    this.tokenRefreshes.set(connection.id, refresh);
+    return refresh;
+  }
+
+  private async refreshAccessToken(connectionId: string): Promise<string> {
+    const providerTimeout = this.configService.get<number>(
+      'APPOINTMENT_PROVIDER_TIMEOUT_MS',
+      10_000,
+    );
+    return this.prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${`appointment-calendar-token:${connectionId}`}, 0)
+          )
+        `;
+        const connection = await tx.appointmentCalendarConnection.findUnique({
+          where: { id: connectionId },
+        });
+        if (!connection) {
+          throw new NotFoundException('Calendar connection not found');
+        }
+        if (
+          connection.accessTokenEncrypted &&
+          connection.tokenExpiresAt &&
+          connection.tokenExpiresAt.getTime() > Date.now() + 60_000
+        ) {
+          return this.cryptoService.decrypt(connection.accessTokenEncrypted);
+        }
+        if (!connection.refreshTokenEncrypted) {
+          throw new ConflictException(
+            'Calendar connection requires reauthorization',
+          );
+        }
+        const config = this.providerConfig(connection.provider);
+        const refreshToken = this.cryptoService.decrypt(
+          connection.refreshTokenEncrypted,
+        );
+        const response = await fetch(
+          connection.provider === 'google'
+            ? 'https://oauth2.googleapis.com/token'
+            : 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              client_id: config.clientId,
+              client_secret: config.clientSecret,
+              grant_type: 'refresh_token',
+              refresh_token: refreshToken,
+              ...(connection.provider === 'microsoft'
+                ? {
+                    scope:
+                      'openid email offline_access User.Read Calendars.ReadWrite',
+                  }
+                : {}),
+            }),
+            signal: this.providerTimeoutSignal(),
+          },
+        );
+        const body = await this.readProviderJson<{
+          access_token: string;
+          refresh_token?: string;
+          expires_in?: number;
+        }>(response);
+        await tx.appointmentCalendarConnection.update({
+          where: { id: connection.id },
+          data: {
+            accessTokenEncrypted: this.cryptoService.encrypt(body.access_token),
+            refreshTokenEncrypted: body.refresh_token
+              ? this.cryptoService.encrypt(body.refresh_token)
+              : undefined,
+            tokenExpiresAt: new Date(
+              Date.now() + (body.expires_in ?? 3600) * 1000,
+            ),
+            status: 'active',
+            lastError: null,
+          },
+        });
+        return body.access_token;
+      },
+      { timeout: providerTimeout + 5_000, maxWait: providerTimeout },
+    );
   }
 
   private async fetchCalendarAccount(

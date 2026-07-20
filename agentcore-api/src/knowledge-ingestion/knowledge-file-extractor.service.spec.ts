@@ -5,12 +5,14 @@ import { KnowledgeOcrService } from './knowledge-ocr.service';
 import * as ExcelJS from 'exceljs';
 
 const getText = jest.fn();
+const getInfo = jest.fn();
 const getScreenshot = jest.fn();
 const destroy = jest.fn();
 
 jest.mock('pdf-parse', () => ({
   PDFParse: jest.fn().mockImplementation(() => ({
     getText,
+    getInfo,
     getScreenshot,
     destroy,
   })),
@@ -19,9 +21,11 @@ jest.mock('pdf-parse', () => ({
 describe('KnowledgeFileExtractorService', () => {
   beforeEach(() => {
     getText.mockReset();
+    getInfo.mockReset();
     getScreenshot.mockReset();
     destroy.mockReset();
     destroy.mockResolvedValue(undefined);
+    getInfo.mockResolvedValue({ total: 2 });
   });
 
   it('extracts text from PDFs', async () => {
@@ -36,7 +40,7 @@ describe('KnowledgeFileExtractorService', () => {
     const service = new KnowledgeFileExtractorService();
 
     const result = await service.extract({
-      buffer: Buffer.from('%PDF sample'),
+      buffer: Buffer.from('%PDF-sample'),
       fileName: 'guide.pdf',
       mimeType: 'application/pdf',
     });
@@ -103,7 +107,7 @@ describe('KnowledgeFileExtractorService', () => {
     const service = new KnowledgeFileExtractorService(undefined, ocrService);
 
     const result = await service.extract({
-      buffer: Buffer.from('%PDF sample'),
+      buffer: Buffer.from('%PDF-sample'),
       fileName: 'mixed.pdf',
       mimeType: 'application/pdf',
       organizationId: 'org-1',
@@ -132,6 +136,7 @@ describe('KnowledgeFileExtractorService', () => {
   });
 
   it('rejects a fully scanned PDF when OCR is not configured', async () => {
+    getInfo.mockResolvedValue({ total: 1 });
     getText.mockResolvedValue({
       text: '',
       total: 1,
@@ -148,11 +153,54 @@ describe('KnowledgeFileExtractorService', () => {
 
     await expect(
       service.extract({
-        buffer: Buffer.from('%PDF scan'),
+        buffer: Buffer.from('%PDF-scan'),
         fileName: 'scan.pdf',
         mimeType: 'application/pdf',
       }),
     ).rejects.toThrow('Configure an OCR provider');
+  });
+
+  it('rejects a mostly scanned PDF instead of indexing partial text', async () => {
+    getInfo.mockResolvedValue({ total: 4 });
+    getText.mockResolvedValue({
+      text: 'One readable page',
+      total: 4,
+      pages: [
+        {
+          num: 1,
+          text: 'One native page with enough readable content for indexing.',
+        },
+        { num: 2, text: '' },
+        { num: 3, text: '' },
+        { num: 4, text: '' },
+      ],
+    });
+    const service = new KnowledgeFileExtractorService(undefined, {
+      isConfigured: jest.fn().mockReturnValue(false),
+      resolveRuntimePolicy: jest.fn().mockResolvedValue(runtimePolicy(false)),
+    } as unknown as KnowledgeOcrService);
+
+    await expect(
+      service.extract({
+        buffer: Buffer.from('%PDF-partial'),
+        fileName: 'partial.pdf',
+        mimeType: 'application/pdf',
+      }),
+    ).rejects.toThrow('document was quarantined from indexing');
+  });
+
+  it('checks PDF page metadata before extracting page text', async () => {
+    getInfo.mockResolvedValue({ total: 5_001 });
+    const service = new KnowledgeFileExtractorService();
+
+    await expect(
+      service.extract({
+        buffer: Buffer.from('%PDF-large'),
+        fileName: 'large.pdf',
+        mimeType: 'application/pdf',
+      }),
+    ).rejects.toThrow('5000 page ingestion limit');
+    expect(getText).not.toHaveBeenCalled();
   });
 
   it('extracts text uploads without PDF parsing', async () => {
@@ -226,6 +274,9 @@ describe('KnowledgeFileExtractorService', () => {
       ocrPageConcurrency: 4,
       ocrRenderWidth: 1_800,
       maxPdfPages: 5_000,
+      maxPdfBytes: 100 * 1024 * 1024,
+      maxOcrPagesPerDocument: 500,
+      maxEmptyOcrPageRatio: 0.25,
       maxExtractedCharacters: 25_000_000,
       pipelineSignature: 'test',
     };

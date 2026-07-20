@@ -5,17 +5,21 @@ import { CryptoModule } from '../crypto/crypto.module';
 import { KnowledgeIngestionModule } from '../knowledge-ingestion/knowledge-ingestion.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ProviderEndpointPolicyModule } from '../ai/provider-endpoint-policy.module';
+import { AIModule } from '../ai/ai.module';
+import { RateLimitModule } from '../rate-limit/rate-limit.module';
 import { AIProvidersController } from './ai-providers.controller';
 import { AIProvidersService } from './ai-providers.service';
 
 @Module({
   imports: [
     AIUsageModule,
+    AIModule,
     AuditModule,
     CryptoModule,
     KnowledgeIngestionModule,
     PrismaModule,
     ProviderEndpointPolicyModule,
+    RateLimitModule,
   ],
   controllers: [AIProvidersController],
   providers: [AIProvidersService],

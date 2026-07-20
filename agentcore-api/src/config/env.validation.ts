@@ -91,6 +91,27 @@ class EnvironmentVariables {
   @IsOptional()
   AI_PROVIDER_MAX_OUTPUT_TOKENS = 1024;
 
+  @Transform(({ value }) => Number(value ?? 12000))
+  @IsInt()
+  @Min(1000)
+  @Max(200000)
+  @IsOptional()
+  AI_CHAT_MAX_INPUT_TOKENS = 12000;
+
+  @Transform(({ value }) => Number(value ?? 6000))
+  @IsInt()
+  @Min(500)
+  @Max(100000)
+  @IsOptional()
+  AI_RAG_CONTEXT_MAX_TOKENS = 6000;
+
+  @Transform(({ value }) => Number(value ?? 2000))
+  @IsInt()
+  @Min(100)
+  @Max(50000)
+  @IsOptional()
+  AI_CHAT_HISTORY_MAX_TOKENS = 2000;
+
   @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean()
   @IsOptional()
@@ -99,6 +120,20 @@ class EnvironmentVariables {
   @IsString()
   @IsOptional()
   AI_PROVIDER_ALLOWED_HOSTS?: string;
+
+  @Transform(({ value }) => Number(value ?? 10))
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  AI_PROVIDER_TEST_RATE_LIMIT = 10;
+
+  @Transform(({ value }) => Number(value ?? 60))
+  @IsInt()
+  @Min(1)
+  @Max(3600)
+  @IsOptional()
+  AI_PROVIDER_TEST_RATE_WINDOW_SECONDS = 60;
 
   @IsString()
   @IsOptional()
@@ -150,6 +185,94 @@ class EnvironmentVariables {
   @IsString()
   @IsOptional()
   REDIS_URL?: string;
+
+  @IsString()
+  @MinLength(32)
+  @IsOptional()
+  VOICE_RELAY_SIGNING_SECRET?: string;
+
+  @Transform(({ value }) => Number(value ?? 120))
+  @IsInt()
+  @Min(30)
+  @Max(600)
+  @IsOptional()
+  VOICE_RELAY_TICKET_TTL_SECONDS = 120;
+
+  @Transform(({ value }) => Number(value ?? 250))
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  @IsOptional()
+  VOICE_WS_MAX_CONNECTIONS = 250;
+
+  @Transform(({ value }) => Number(value ?? 50))
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  @IsOptional()
+  VOICE_WS_MAX_CONNECTIONS_PER_CONFIG = 50;
+
+  @Transform(({ value }) => Number(value ?? 32))
+  @IsInt()
+  @Min(4)
+  @Max(256)
+  @IsOptional()
+  VOICE_WS_MAX_PENDING_MESSAGES = 32;
+
+  @Transform(({ value }) => Number(value ?? 1048576))
+  @IsInt()
+  @Min(65536)
+  @Max(16777216)
+  @IsOptional()
+  VOICE_WS_MAX_BUFFERED_BYTES = 1048576;
+
+  @Transform(({ value }) => Number(value ?? 2000))
+  @IsInt()
+  @Min(100)
+  @Max(30000)
+  @IsOptional()
+  VOICE_WS_BACKPRESSURE_TIMEOUT_MS = 2000;
+
+  @Transform(({ value }) => Number(value ?? 0.35))
+  @Min(0)
+  @Max(1)
+  @IsOptional()
+  VOICE_RAG_MIN_SIMILARITY_SCORE = 0.35;
+
+  @Transform(({ value }) => Number(value ?? 6000))
+  @IsInt()
+  @Min(500)
+  @Max(50000)
+  @IsOptional()
+  VOICE_RAG_MAX_CONTEXT_CHARACTERS = 6000;
+
+  @Transform(({ value }) => Number(value ?? 30))
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  @IsOptional()
+  VOICE_RECORDING_RETENTION_DAYS = 30;
+
+  @Transform(({ value }) => Number(value ?? 3600000))
+  @IsInt()
+  @Min(60000)
+  @Max(86400000)
+  @IsOptional()
+  VOICE_RETENTION_SWEEP_INTERVAL_MS = 3600000;
+
+  @Transform(({ value }) => Number(value ?? 800))
+  @IsInt()
+  @Min(200)
+  @Max(5000)
+  @IsOptional()
+  VOICE_DTMF_INTER_DIGIT_TIMEOUT_MS = 800;
+
+  @Transform(({ value }) => Number(value ?? 1200))
+  @IsInt()
+  @Min(100)
+  @Max(5000)
+  @IsOptional()
+  VOICE_LANGUAGE_DETECTION_TIMEOUT_MS = 1200;
 
   @IsString()
   @IsOptional()
@@ -387,6 +510,13 @@ class EnvironmentVariables {
   @IsOptional()
   APPOINTMENT_MAX_ADVANCE_DAYS = 365;
 
+  @Transform(({ value }) => Number(value ?? 12))
+  @IsInt()
+  @Min(2)
+  @Max(52)
+  @IsOptional()
+  APPOINTMENT_PUBLIC_MAX_RECURRENCE_COUNT = 12;
+
   @IsString()
   @IsOptional()
   GOOGLE_CALENDAR_CLIENT_ID?: string;
@@ -518,6 +648,11 @@ class EnvironmentVariables {
   @IsOptional()
   KNOWLEDGE_OCR_ALLOWED_HOSTS?: string;
 
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  @IsOptional()
+  KNOWLEDGE_OCR_ALLOW_PRIVATE_NETWORKS = false;
+
   @Transform(({ value }) => Number(value ?? 60000))
   @IsInt()
   @Min(1000)
@@ -560,6 +695,27 @@ class EnvironmentVariables {
   @IsOptional()
   KNOWLEDGE_PDF_MAX_PAGES = 5000;
 
+  @Transform(({ value }) => Number(value ?? 104857600))
+  @IsInt()
+  @Min(1048576)
+  @Max(2147483648)
+  @IsOptional()
+  KNOWLEDGE_PDF_MAX_BYTES = 104857600;
+
+  @Transform(({ value }) => Number(value ?? 500))
+  @IsInt()
+  @Min(1)
+  @Max(20000)
+  @IsOptional()
+  KNOWLEDGE_OCR_MAX_PAGES_PER_DOCUMENT = 500;
+
+  @Transform(({ value }) => Number(value ?? 0.25))
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  @IsOptional()
+  KNOWLEDGE_OCR_MAX_EMPTY_PAGE_RATIO = 0.25;
+
   @Transform(({ value }) => Number(value ?? 40))
   @IsInt()
   @Min(0)
@@ -595,7 +751,7 @@ class EnvironmentVariables {
   @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean()
   @IsOptional()
-  MALWARE_SCAN_REQUIRED = false;
+  MALWARE_SCAN_REQUIRED = true;
 
   @Transform(({ value }) => Number(value ?? 15000))
   @IsInt()
@@ -716,6 +872,13 @@ class EnvironmentVariables {
   @IsOptional()
   CUSTOMER_CHAT_MIN_SIMILARITY_SCORE = 0.35;
 
+  @Transform(({ value }) => Number(value ?? 2))
+  @IsInt()
+  @Min(1)
+  @Max(10)
+  @IsOptional()
+  CUSTOMER_CHAT_MAX_CHUNKS_PER_DOCUMENT = 2;
+
   @Transform(
     ({ value }) => value === undefined || value === 'true' || value === true,
   )
@@ -802,6 +965,10 @@ class EnvironmentVariables {
   @IsOptional()
   WHATSAPP_GRAPH_API_VERSION = 'v20.0';
 
+  @IsString()
+  @IsOptional()
+  WHATSAPP_WEBHOOK_PUBLIC_BASE_URL?: string;
+
   @Transform(({ value }) => Number(value ?? 26214400))
   @IsInt()
   @Min(1024)
@@ -837,12 +1004,47 @@ class EnvironmentVariables {
   @IsOptional()
   WHATSAPP_AGENT_MAX_SENDS_PER_WINDOW = 30;
 
+  @Transform(({ value }) => Number(value ?? 1000))
+  @IsInt()
+  @Min(1)
+  @Max(1000000)
+  @IsOptional()
+  WHATSAPP_ORG_MAX_SENDS_PER_WINDOW = 1000;
+
+  @Transform(({ value }) => Number(value ?? 3600))
+  @IsInt()
+  @Min(1)
+  @Max(86400)
+  @IsOptional()
+  WHATSAPP_AUTOMATED_RATE_LIMIT_WINDOW_SECONDS = 3600;
+
+  @Transform(({ value }) => Number(value ?? 1000))
+  @IsInt()
+  @Min(1)
+  @Max(1000000)
+  @IsOptional()
+  WHATSAPP_AUTOMATED_MAX_SENDS_PER_WINDOW = 1000;
+
   @Transform(({ value }) => Number(value ?? 5))
   @IsInt()
   @Min(1)
   @Max(50)
   @IsOptional()
   WHATSAPP_INBOUND_QUEUE_CONCURRENCY = 5;
+
+  @Transform(({ value }) => Number(value ?? 60000))
+  @IsInt()
+  @Min(1000)
+  @Max(300000)
+  @IsOptional()
+  WHATSAPP_CONVERSATION_LOCK_WAIT_MS = 60000;
+
+  @Transform(({ value }) => Number(value ?? 180000))
+  @IsInt()
+  @Min(10000)
+  @Max(900000)
+  @IsOptional()
+  WHATSAPP_CONVERSATION_LEASE_MS = 180000;
 
   @Transform(({ value }) => Number(value ?? 0.35))
   @Min(0)

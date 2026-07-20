@@ -42,7 +42,16 @@ export enum WhatsAppMessageTypeDto {
   document = 'document',
   sticker = 'sticker',
   location = 'location',
+  interactive = 'interactive',
+  contact = 'contact',
+  reaction = 'reaction',
   unknown = 'unknown',
+}
+
+export enum WhatsAppConsentStatusDto {
+  unknown = 'unknown',
+  opted_in = 'opted_in',
+  opted_out = 'opted_out',
 }
 
 export class CreateWhatsAppConfigDto {
@@ -215,6 +224,25 @@ export class SendWhatsAppTemplateMessageDto {
   components?: Record<string, unknown>[];
 }
 
+export class SendWhatsAppProactiveTemplateDto extends SendWhatsAppTemplateMessageDto {
+  @ApiProperty({ example: '+15551234567' })
+  @IsString()
+  @Matches(/^\+?[1-9]\d{7,14}$/, {
+    message: 'contactWaId must be a valid E.164 WhatsApp number',
+  })
+  contactWaId: string;
+
+  @ApiPropertyOptional({ example: 'Ada Customer' })
+  @IsString()
+  @IsOptional()
+  contactName?: string;
+
+  @ApiProperty({ example: 'website_checkout_checkbox' })
+  @IsString()
+  @MinLength(2)
+  optInSource: string;
+}
+
 export enum WhatsAppTemplateCategoryDto {
   marketing = 'MARKETING',
   utility = 'UTILITY',
@@ -288,6 +316,58 @@ export enum WhatsAppOutboundMediaTypeDto {
   document = 'document',
 }
 
+export enum WhatsAppInteractiveKindDto {
+  button = 'button',
+  list = 'list',
+}
+
+export class SendWhatsAppInteractiveMessageDto {
+  @ApiProperty({ enum: WhatsAppInteractiveKindDto })
+  @IsEnum(WhatsAppInteractiveKindDto)
+  kind: WhatsAppInteractiveKindDto;
+
+  @ApiProperty({ example: 'How can we help?' })
+  @IsString()
+  @MinLength(1)
+  body: string;
+
+  @ApiPropertyOptional({ example: 'Choose an option' })
+  @IsString()
+  @IsOptional()
+  header?: string;
+
+  @ApiPropertyOptional({ example: 'AgentCore support' })
+  @IsString()
+  @IsOptional()
+  footer?: string;
+
+  @ApiPropertyOptional({ example: 'View options' })
+  @IsString()
+  @IsOptional()
+  buttonText?: string;
+
+  @ApiPropertyOptional({ example: [{ id: 'sales', title: 'Sales' }] })
+  @IsArray()
+  @ArrayMaxSize(3)
+  @IsObject({ each: true })
+  @IsOptional()
+  buttons?: Record<string, unknown>[];
+
+  @ApiPropertyOptional({
+    example: [
+      {
+        title: 'Departments',
+        rows: [{ id: 'support', title: 'Support' }],
+      },
+    ],
+  })
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsObject({ each: true })
+  @IsOptional()
+  sections?: Record<string, unknown>[];
+}
+
 export class SendWhatsAppMediaMessageDto {
   @ApiProperty({ enum: WhatsAppOutboundMediaTypeDto })
   @IsEnum(WhatsAppOutboundMediaTypeDto)
@@ -318,6 +398,18 @@ export class UpdateWhatsAppConversationStatusDto {
   @ApiProperty({ enum: WhatsAppConversationStatusDto })
   @IsEnum(WhatsAppConversationStatusDto)
   status: WhatsAppConversationStatusDto;
+}
+
+export class UpdateWhatsAppConsentDto {
+  @ApiProperty({ enum: WhatsAppConsentStatusDto })
+  @IsEnum(WhatsAppConsentStatusDto)
+  status: WhatsAppConsentStatusDto;
+
+  @ApiPropertyOptional({ example: 'website_checkout_checkbox' })
+  @IsString()
+  @MinLength(2)
+  @IsOptional()
+  source?: string;
 }
 
 export class AssignWhatsAppConversationDto {

@@ -10,6 +10,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Prisma, WhatsAppAssistantConfig } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
+import twilio from 'twilio';
 import { ChatService, type ChatHistoryMessage } from '../ai/chat.service';
 import { AuditService } from '../audit/audit.service';
 import { AppointmentBookingService } from '../appointment-booking/appointment-booking.service';
@@ -28,12 +29,17 @@ import {
   CreateWhatsAppTemplateDto,
   ListWhatsAppConversationsDto,
   SendWhatsAppAgentMessageDto,
+  SendWhatsAppInteractiveMessageDto,
   SendWhatsAppMediaMessageDto,
+  SendWhatsAppProactiveTemplateDto,
   SendWhatsAppTemplateMessageDto,
   UpdateWhatsAppConfigDto,
+  UpdateWhatsAppConsentDto,
   UpdateWhatsAppConversationStatusDto,
   UpdateWhatsAppTemplateDto,
+  WhatsAppConsentStatusDto,
   WhatsAppInboundWebhookDto,
+  WhatsAppInteractiveKindDto,
 } from './dto/whatsapp-assistant.dto';
 import {
   WhatsAppOutboundResult,
@@ -44,6 +50,7 @@ import { WhatsAppMediaService } from './whatsapp-media.service';
 import {
   isLegacyWebhookPayload,
   parseMetaWebhook,
+  parseTwilioWebhook,
 } from './whatsapp-webhook.types';
 
 type WhatsAppConversationWithMessages = Prisma.WhatsAppConversationGetPayload<{
@@ -53,7 +60,13 @@ type WhatsAppConversationWithMessages = Prisma.WhatsAppConversationGetPayload<{
 }>;
 
 type AgentOutboundMessageType =
-  'text' | 'template' | 'image' | 'audio' | 'video' | 'document';
+  | 'text'
+  | 'template'
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'document'
+  | 'interactive';
 
 type WhatsAppMemoryPolicy = {
   enabled: boolean;
@@ -147,7 +160,6 @@ export class WhatsAppAssistantService {
         name: config.name,
       },
     });
-
     return this.toConfigResponse(config);
   }
 
@@ -630,6 +642,7 @@ export class WhatsAppAssistantService {
   ) {
     const conversation = await this.findConversationForActor(currentUser, id);
     await this.assertWhatsAppEnabled(conversation.organizationId);
+    this.assertNotOptedOut(conversation.consentStatus);
     await this.limitAgentOutbound(currentUser, conversation.id);
 
     const config = await this.prisma.whatsAppAssistantConfig.findUniqueOrThrow({
@@ -667,6 +680,7 @@ export class WhatsAppAssistantService {
     input: SendWhatsAppTemplateMessageDto,
   ) {
     const conversation = await this.findConversationForActor(currentUser, id);
+    this.assertTemplateConsent(conversation.consentStatus);
     await this.limitAgentOutbound(currentUser, conversation.id);
     const config = await this.prisma.whatsAppAssistantConfig.findUniqueOrThrow({
       where: { id: conversation.configId },
@@ -718,12 +732,57 @@ export class WhatsAppAssistantService {
     };
   }
 
+  async sendProactiveTemplate(
+    currentUser: AuthenticatedUser,
+    configId: string,
+    input: SendWhatsAppProactiveTemplateDto,
+  ) {
+    const config = await this.findConfigForActor(currentUser, configId);
+    const now = new Date();
+    const contactWaId = this.normalizePhoneIdentifier(input.contactWaId);
+    const conversation = await this.prisma.whatsAppConversation.upsert({
+      where: {
+        configId_contactWaId: { configId: config.id, contactWaId },
+      },
+      create: {
+        organizationId: config.organizationId,
+        configId: config.id,
+        contactWaId,
+        contactPhone: `+${contactWaId}`,
+        contactName: input.contactName,
+        locale: input.language ?? config.defaultLocale,
+        consentStatus: 'opted_in',
+        consentSource: input.optInSource.trim(),
+        consentedAt: now,
+        lastMessageAt: now,
+      },
+      update: {
+        contactName: input.contactName,
+        contactPhone: `+${contactWaId}`,
+        consentStatus: 'opted_in',
+        consentSource: input.optInSource.trim(),
+        consentedAt: now,
+        optedOutAt: null,
+      },
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'whatsapp.proactive_opt_in_recorded',
+      entityType: 'whatsapp_conversation',
+      entityId: conversation.id,
+      metadata: { source: input.optInSource.trim() },
+    });
+    return this.sendTemplateMessage(currentUser, conversation.id, input);
+  }
+
   async sendMediaMessage(
     currentUser: AuthenticatedUser,
     id: string,
     input: SendWhatsAppMediaMessageDto,
   ) {
     const conversation = await this.findConversationForActor(currentUser, id);
+    this.assertNotOptedOut(conversation.consentStatus);
     await this.limitAgentOutbound(currentUser, conversation.id);
     this.assertSessionWindowOpen(conversation.sessionExpiresAt);
     const config = await this.prisma.whatsAppAssistantConfig.findUniqueOrThrow({
@@ -753,6 +812,138 @@ export class WhatsAppAssistantService {
       conversation: this.toConversationResponse(result.conversation),
       message: this.toMessageResponse(result.message),
       delivery: result.delivery,
+    };
+  }
+
+  async sendInteractiveMessage(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: SendWhatsAppInteractiveMessageDto,
+  ) {
+    const conversation = await this.findConversationForActor(currentUser, id);
+    this.assertNotOptedOut(conversation.consentStatus);
+    this.assertSessionWindowOpen(conversation.sessionExpiresAt);
+    await this.limitAgentOutbound(currentUser, conversation.id);
+    const config = await this.prisma.whatsAppAssistantConfig.findUniqueOrThrow({
+      where: { id: conversation.configId },
+    });
+    const interactive = this.normalizeInteractiveMessage(input);
+    const result = await this.deliverAgentOutbound({
+      currentUser,
+      conversation,
+      type: 'interactive',
+      content: input.body,
+      metadata: { agentId: currentUser.sub, interactive },
+      successAction: 'whatsapp.interactive_sent',
+      successMetadata: { kind: input.kind },
+      deliver: () =>
+        this.outboundService.sendInteractive({
+          config,
+          to: conversation.contactWaId,
+          interactive,
+        }),
+    });
+    return {
+      conversation: this.toConversationResponse(result.conversation),
+      message: this.toMessageResponse(result.message),
+      delivery: result.delivery,
+    };
+  }
+
+  private normalizeInteractiveMessage(
+    input: SendWhatsAppInteractiveMessageDto,
+  ) {
+    const body = input.body.trim();
+    if (!body || body.length > 1_024) {
+      throw new BadRequestException(
+        'Interactive message body must be between 1 and 1024 characters',
+      );
+    }
+    if (input.header && input.header.length > 60) {
+      throw new BadRequestException(
+        'Interactive header is limited to 60 characters',
+      );
+    }
+    if (input.footer && input.footer.length > 60) {
+      throw new BadRequestException(
+        'Interactive footer is limited to 60 characters',
+      );
+    }
+    const common = {
+      type: input.kind,
+      ...(input.header ? { header: { type: 'text', text: input.header } } : {}),
+      body: { text: body },
+      ...(input.footer ? { footer: { text: input.footer } } : {}),
+    };
+    if (input.kind === WhatsAppInteractiveKindDto.button) {
+      const buttons = (input.buttons ?? []).map((button) => ({
+        id: typeof button.id === 'string' ? button.id.trim() : '',
+        title: typeof button.title === 'string' ? button.title.trim() : '',
+      }));
+      if (
+        buttons.length < 1 ||
+        buttons.length > 3 ||
+        buttons.some(
+          (button) =>
+            !button.id ||
+            button.id.length > 256 ||
+            !button.title ||
+            button.title.length > 20,
+        ) ||
+        new Set(buttons.map((button) => button.id)).size !== buttons.length
+      ) {
+        throw new BadRequestException(
+          'Button messages require 1-3 unique buttons (title <= 20, id <= 256 characters)',
+        );
+      }
+      return {
+        ...common,
+        action: {
+          buttons: buttons.map((button) => ({ type: 'reply', reply: button })),
+        },
+      };
+    }
+    const buttonText = input.buttonText?.trim() ?? '';
+    const sections = (input.sections ?? []).map((section) => ({
+      title: typeof section.title === 'string' ? section.title.trim() : '',
+      rows: Array.isArray(section.rows)
+        ? section.rows.map((rowValue) => {
+            const row = this.toUnknownRecord(rowValue);
+            return {
+              id: typeof row.id === 'string' ? row.id.trim() : '',
+              title: typeof row.title === 'string' ? row.title.trim() : '',
+              ...(typeof row.description === 'string' && row.description.trim()
+                ? { description: row.description.trim() }
+                : {}),
+            };
+          })
+        : [],
+    }));
+    const rows = sections.flatMap((section) => section.rows);
+    if (
+      !buttonText ||
+      buttonText.length > 20 ||
+      !sections.length ||
+      rows.length < 1 ||
+      rows.length > 10 ||
+      sections.some((section) => section.title.length > 24) ||
+      rows.some(
+        (row) =>
+          !row.id ||
+          row.id.length > 200 ||
+          !row.title ||
+          row.title.length > 24 ||
+          (row.description?.length ?? 0) > 72,
+      ) ||
+      new Set(rows.map((row) => row.id)).size !== rows.length
+    ) {
+      throw new BadRequestException(
+        'List messages require a button label and 1-10 unique valid rows',
+      );
+    }
+    return {
+      ...common,
+      action: { button: buttonText, sections },
     };
   }
 
@@ -853,6 +1044,13 @@ export class WhatsAppAssistantService {
           }),
         },
       });
+      if (delivery.providerMessageId) {
+        await this.reconcilePendingDeliveryStatus(
+          message.id,
+          input.conversation.organizationId,
+          delivery.providerMessageId,
+        );
+      }
     } catch (error) {
       this.logger.error(
         `Provider accepted WhatsApp message ${pendingMessage.id}, but delivery tracking could not be updated`,
@@ -948,6 +1146,44 @@ export class WhatsAppAssistantService {
     return this.toConversationResponse(updated);
   }
 
+  async updateConversationConsent(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: UpdateWhatsAppConsentDto,
+  ) {
+    const conversation = await this.findConversationForActor(currentUser, id);
+    if (
+      input.status === WhatsAppConsentStatusDto.opted_in &&
+      !input.source?.trim()
+    ) {
+      throw new BadRequestException(
+        'An opt-in source is required to keep auditable consent evidence',
+      );
+    }
+    const now = new Date();
+    const updated = await this.prisma.whatsAppConversation.update({
+      where: { id: conversation.id },
+      data: {
+        consentStatus: input.status,
+        consentSource: input.source?.trim() ?? 'manual_agent_update',
+        consentedAt:
+          input.status === WhatsAppConsentStatusDto.opted_in ? now : null,
+        optedOutAt:
+          input.status === WhatsAppConsentStatusDto.opted_out ? now : null,
+      },
+      include: this.conversationInclude(),
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: conversation.organizationId,
+      action: 'whatsapp.consent_updated',
+      entityType: 'whatsapp_conversation',
+      entityId: conversation.id,
+      metadata: { status: input.status, source: input.source },
+    });
+    return this.toConversationResponse(updated);
+  }
+
   async requestHandoff(currentUser: AuthenticatedUser, id: string) {
     const conversation = await this.findConversationForActor(currentUser, id);
 
@@ -985,15 +1221,27 @@ export class WhatsAppAssistantService {
         'WhatsApp webhook verify token is not configured',
       );
     }
+    const expectedVerifyToken = this.cryptoService.decrypt(
+      config.webhookVerifyTokenEncrypted,
+    );
     if (
       !verifyToken ||
-      verifyToken !==
-        this.cryptoService.decrypt(config.webhookVerifyTokenEncrypted)
+      !this.secureCompareText(expectedVerifyToken, verifyToken)
     ) {
       throw new ForbiddenException('Invalid WhatsApp webhook verify token');
     }
 
     return challenge;
+  }
+
+  private secureCompareText(expected: string, actual: string): boolean {
+    const expectedBuffer = Buffer.from(expected, 'utf8');
+    const actualBuffer = Buffer.from(actual, 'utf8');
+
+    return (
+      expectedBuffer.length === actualBuffer.length &&
+      timingSafeEqual(expectedBuffer, actualBuffer)
+    );
   }
 
   async receiveInboundWebhook(
@@ -1002,35 +1250,43 @@ export class WhatsAppAssistantService {
     rawBody?: Buffer,
     headers?: Record<string, string | string[] | undefined>,
     clientIp = 'unknown',
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
   ) {
     const config = await this.findActiveConfig(configId);
-    this.assertWebhookSignature(config, rawBody, headers);
+    this.assertWebhookSignature(config, rawBody, headers, requestUrl, payload);
     await this.limitWebhook(config.id, clientIp);
     await this.assertWhatsAppEnabled(config.organizationId);
 
     const parsed =
       config.provider === 'meta'
         ? parseMetaWebhook(payload)
-        : isLegacyWebhookPayload(payload)
-          ? { messages: [payload], phoneNumberIds: [], statuses: [] }
-          : parseMetaWebhook(payload);
-
-    if (
-      config.provider === 'meta' &&
-      config.phoneNumberId &&
-      parsed.phoneNumberIds.some((id) => id !== config.phoneNumberId)
-    ) {
-      throw new ForbiddenException(
-        'Webhook phone number does not match this WhatsApp config',
-      );
-    }
+        : config.provider === 'twilio'
+          ? parseTwilioWebhook(payload)
+          : isLegacyWebhookPayload(payload)
+            ? { messages: [payload], phoneNumberIds: [], statuses: [] }
+            : parseMetaWebhook(payload);
+    const matchesConfiguredPhone = (phoneNumberId?: string) =>
+      !config.phoneNumberId ||
+      !phoneNumberId ||
+      this.normalizePhoneIdentifier(phoneNumberId) ===
+        this.normalizePhoneIdentifier(config.phoneNumberId);
+    const messages = parsed.messages.filter((message) =>
+      matchesConfiguredPhone(
+        typeof message.metadata?.phoneNumberId === 'string'
+          ? message.metadata.phoneNumberId
+          : undefined,
+      ),
+    );
+    const statuses = parsed.statuses.filter((status) =>
+      matchesConfiguredPhone(status.phoneNumberId),
+    );
 
     let accepted = 0;
     let duplicates = 0;
-    for (const status of parsed.statuses) {
+    for (const status of statuses) {
       await this.recordDeliveryStatus(config.organizationId, status);
     }
-    for (const input of parsed.messages) {
+    for (const input of messages) {
       const persisted = await this.persistInboundMessage(config, input);
       if (!persisted.created) {
         duplicates += 1;
@@ -1057,7 +1313,12 @@ export class WhatsAppAssistantService {
       }
     }
 
-    return { received: true, accepted, duplicates };
+    return {
+      received: true,
+      accepted,
+      duplicates,
+      ignored: parsed.messages.length - messages.length,
+    };
   }
 
   private async recordDeliveryStatus(
@@ -1077,12 +1338,51 @@ export class WhatsAppAssistantService {
         providerMessageId: status.providerMessageId,
       },
     });
-    if (!message) return;
-
     const timestampSeconds = Number(status.timestamp);
     const callbackAt = Number.isFinite(timestampSeconds)
       ? new Date(timestampSeconds * 1000)
       : new Date();
+    if (!message) {
+      await this.storePendingDeliveryStatus(organizationId, status, callbackAt);
+      // Close the race where the provider id is persisted between the lookup
+      // above and the pending callback upsert.
+      const racedMessage = await this.prisma.whatsAppMessage.findFirst({
+        where: {
+          organizationId,
+          direction: 'outbound',
+          providerMessageId: status.providerMessageId,
+        },
+      });
+      if (racedMessage) {
+        await this.applyDeliveryStatus(racedMessage, status, callbackAt);
+        await this.prisma.whatsAppPendingDeliveryStatus.deleteMany({
+          where: {
+            organizationId,
+            providerMessageId: status.providerMessageId,
+          },
+        });
+      }
+      return;
+    }
+    await this.applyDeliveryStatus(message, status, callbackAt);
+  }
+
+  private async applyDeliveryStatus(
+    message: Prisma.WhatsAppMessageGetPayload<object>,
+    status: {
+      providerMessageId: string;
+      status: string;
+      recipientWaId?: string;
+      errors?: unknown[];
+    },
+    callbackAt: Date,
+  ) {
+    if (
+      this.deliveryStatusRank(status.status) <
+      this.deliveryStatusRank(message.deliveryStatus)
+    ) {
+      return;
+    }
     const deliveredAt = ['delivered', 'read'].includes(status.status)
       ? callbackAt
       : undefined;
@@ -1103,6 +1403,106 @@ export class WhatsAppAssistantService {
     });
   }
 
+  private async storePendingDeliveryStatus(
+    organizationId: string,
+    status: {
+      providerMessageId: string;
+      status: string;
+      recipientWaId?: string;
+      errors?: unknown[];
+    },
+    callbackAt: Date,
+  ) {
+    const existing = await this.prisma.whatsAppPendingDeliveryStatus.findUnique(
+      {
+        where: {
+          organizationId_providerMessageId: {
+            organizationId,
+            providerMessageId: status.providerMessageId,
+          },
+        },
+      },
+    );
+    if (
+      existing &&
+      this.deliveryStatusRank(existing.status) >
+        this.deliveryStatusRank(status.status)
+    ) {
+      return;
+    }
+    await this.prisma.whatsAppPendingDeliveryStatus.upsert({
+      where: {
+        organizationId_providerMessageId: {
+          organizationId,
+          providerMessageId: status.providerMessageId,
+        },
+      },
+      create: {
+        organizationId,
+        providerMessageId: status.providerMessageId,
+        status: status.status,
+        callbackAt,
+        recipientWaId: status.recipientWaId,
+        errors: this.toJsonArray(status.errors),
+      },
+      update: {
+        status: status.status,
+        callbackAt,
+        recipientWaId: status.recipientWaId,
+        errors: this.toJsonArray(status.errors),
+      },
+    });
+  }
+
+  private async reconcilePendingDeliveryStatus(
+    messageId: string,
+    organizationId: string,
+    providerMessageId: string,
+  ) {
+    const pending = await this.prisma.whatsAppPendingDeliveryStatus.findUnique({
+      where: {
+        organizationId_providerMessageId: {
+          organizationId,
+          providerMessageId,
+        },
+      },
+    });
+    if (!pending) return;
+    const message = await this.prisma.whatsAppMessage.findUniqueOrThrow({
+      where: { id: messageId },
+    });
+    await this.applyDeliveryStatus(
+      message,
+      {
+        providerMessageId,
+        status: pending.status,
+        recipientWaId: pending.recipientWaId ?? undefined,
+        errors: Array.isArray(pending.errors) ? pending.errors : undefined,
+      },
+      pending.callbackAt,
+    );
+    await this.prisma.whatsAppPendingDeliveryStatus.delete({
+      where: { id: pending.id },
+    });
+  }
+
+  private deliveryStatusRank(status?: string | null) {
+    return (
+      {
+        pending: 0,
+        sending: 1,
+        accepted: 2,
+        queued: 2,
+        sent: 3,
+        delivered: 4,
+        read: 5,
+        failed: 6,
+        undelivered: 6,
+        deleted: 6,
+      }[status ?? ''] ?? -1
+    );
+  }
+
   async processInboundMessage(messageId: string): Promise<void> {
     const inboundMessage = await this.prisma.whatsAppMessage.findUnique({
       where: { id: messageId },
@@ -1118,16 +1518,34 @@ export class WhatsAppAssistantService {
     }
 
     const { conversation } = inboundMessage;
+    const inboundMetadata = this.toRecord(inboundMessage.metadata);
     if (
       conversation.status !== 'open' ||
-      Boolean(conversation.assignedAgentId)
+      Boolean(conversation.assignedAgentId) ||
+      conversation.consentStatus === 'opted_out' ||
+      Boolean(inboundMetadata.consentCommand) ||
+      inboundMessage.type === 'reaction'
     ) {
       await this.markInboundProcessed(messageId);
       return;
     }
 
+    await this.acquireConversationProcessingLease(
+      conversation.id,
+      inboundMessage.id,
+    );
     try {
-      const metadata = this.toRecord(inboundMessage.metadata);
+      await this.outboundService
+        .markReadAndTyping({
+          config: conversation.config,
+          providerMessageId: inboundMessage.providerMessageId!,
+        })
+        .catch((error) =>
+          this.logger.warn(
+            `Could not mark WhatsApp inbound ${messageId} as read: ${this.errorMessage(error)}`,
+          ),
+        );
+      const metadata = inboundMetadata;
       const isMedia = [
         'image',
         'audio',
@@ -1187,6 +1605,11 @@ export class WhatsAppAssistantService {
         },
       });
       throw error;
+    } finally {
+      await this.releaseConversationProcessingLease(
+        conversation.id,
+        inboundMessage.id,
+      );
     }
   }
 
@@ -1225,49 +1648,20 @@ export class WhatsAppAssistantService {
       'I could not complete that request right now. I have asked a human agent to help you.',
     );
     try {
-      const delivery = await this.outboundService.sendText({
+      await this.deliverAutomatedOutbound({
         config: conversation.config,
-        to: conversation.contactWaId,
+        organizationId: conversation.organizationId,
+        conversationId: conversation.id,
+        contactWaId: conversation.contactWaId,
         content,
-      });
-      await this.prisma.whatsAppMessage.create({
-        data: {
-          organizationId: conversation.organizationId,
-          conversationId: conversation.id,
-          direction: 'outbound',
-          role: 'assistant',
-          type: 'text',
-          providerMessageId: delivery.providerMessageId,
-          content,
-          deliveryStatus: delivery.status,
-          deliveryAttempts: 1,
-          metadata: this.toJsonObject({
-            usedFallback: true,
-            handoffRequested: true,
-            failureCode: 'automatic_reply_failed',
-            delivery,
-          }),
+        automationKey: `failure-notice:${messageId}`,
+        metadata: {
+          usedFallback: true,
+          handoffRequested: true,
+          failureCode: 'automatic_reply_failed',
         },
       });
     } catch (deliveryError) {
-      await this.prisma.whatsAppMessage.create({
-        data: {
-          organizationId: conversation.organizationId,
-          conversationId: conversation.id,
-          direction: 'outbound',
-          role: 'assistant',
-          type: 'text',
-          content,
-          deliveryStatus: 'failed',
-          deliveryError: 'Provider delivery failed after retry attempts',
-          deliveryAttempts: 1,
-          metadata: this.toJsonObject({
-            usedFallback: true,
-            handoffRequested: true,
-            failureCode: 'automatic_reply_and_notice_failed',
-          }),
-        },
-      });
       this.logger.error(
         `WhatsApp failure notice could not be delivered for ${messageId}`,
         deliveryError instanceof Error ? deliveryError.stack : undefined,
@@ -1322,6 +1716,21 @@ export class WhatsAppAssistantService {
 
     const now = new Date();
     const sessionExpiresAt = new Date(now.getTime() + 24 * 60 * 60_000);
+    const consentCommand = this.readConsentCommand(
+      config.settings,
+      input.content,
+    );
+    const consentData = consentCommand
+      ? {
+          consentStatus:
+            consentCommand === 'opt_in'
+              ? ('opted_in' as const)
+              : ('opted_out' as const),
+          consentSource: `inbound_keyword:${consentCommand}`,
+          consentedAt: consentCommand === 'opt_in' ? now : null,
+          optedOutAt: consentCommand === 'opt_out' ? now : null,
+        }
+      : {};
     const conversation = await this.prisma.whatsAppConversation.upsert({
       where: {
         configId_contactWaId: {
@@ -1339,6 +1748,7 @@ export class WhatsAppAssistantService {
         sessionExpiresAt,
         lastMessageAt: now,
         metadata: this.toJsonObject(input.metadata),
+        ...consentData,
       },
       update: {
         contactName: input.contactName,
@@ -1346,6 +1756,7 @@ export class WhatsAppAssistantService {
         locale: input.locale ?? undefined,
         sessionExpiresAt,
         lastMessageAt: now,
+        ...consentData,
       },
       include: this.conversationInclude(),
     });
@@ -1371,7 +1782,10 @@ export class WhatsAppAssistantService {
           mediaUrl: input.mediaUrl,
           mediaMimeType: input.mediaMimeType,
           mediaSha256: input.mediaSha256,
-          metadata: this.toJsonObject(input.metadata),
+          metadata: this.toJsonObject({
+            ...input.metadata,
+            consentCommand,
+          }),
         },
       });
     } catch (error) {
@@ -1400,6 +1814,21 @@ export class WhatsAppAssistantService {
         messageId: inboundMessage.id,
       },
     });
+    if (consentCommand) {
+      await this.auditService.record({
+        organizationId: config.organizationId,
+        action:
+          consentCommand === 'opt_in'
+            ? 'whatsapp.contact_opted_in'
+            : 'whatsapp.contact_opted_out',
+        entityType: 'whatsapp_conversation',
+        entityId: conversation.id,
+        metadata: {
+          source: `inbound_keyword:${consentCommand}`,
+          messageId: inboundMessage.id,
+        },
+      });
+    }
 
     return { messageId: inboundMessage.id, created: true, processed: false };
   }
@@ -1417,6 +1846,30 @@ export class WhatsAppAssistantService {
     message: Prisma.WhatsAppMessageGetPayload<object>;
     delivery: WhatsAppOutboundResult;
   }> {
+    const automationKey = inboundMessageId
+      ? `assistant-reply:${inboundMessageId}`
+      : undefined;
+    const existingReply = automationKey
+      ? await this.prisma.whatsAppMessage.findUnique({
+          where: { automationKey },
+        })
+      : null;
+    if (existingReply) {
+      if (existingReply.deliveryStatus === 'pending' && existingReply.content) {
+        return this.deliverAutomatedOutbound({
+          config,
+          organizationId,
+          conversationId,
+          contactWaId,
+          content: existingReply.content,
+          automationKey,
+          metadata: this.toRecord(existingReply.metadata),
+          existingMessage: existingReply,
+        });
+      }
+      return this.resolveExistingAutomatedOutbound(existingReply, config);
+    }
+
     if (appointmentAction) {
       if (!(await this.isAiOwnedConversation(conversationId))) {
         throw new HumanOwnedConversationError();
@@ -1429,24 +1882,15 @@ export class WhatsAppAssistantService {
       if (!(await this.isAiOwnedConversation(conversationId))) {
         throw new HumanOwnedConversationError();
       }
-      const delivery = await this.outboundService.sendText({
+      return this.deliverAutomatedOutbound({
         config,
-        to: contactWaId,
+        organizationId,
+        conversationId,
+        contactWaId,
         content: answer,
+        automationKey,
+        metadata: { appointmentAction },
       });
-      const message = await this.prisma.whatsAppMessage.create({
-        data: {
-          organizationId,
-          conversationId,
-          direction: 'outbound',
-          role: 'assistant',
-          type: 'text',
-          providerMessageId: delivery.providerMessageId,
-          content: answer,
-          metadata: this.toJsonObject({ appointmentAction, delivery }),
-        },
-      });
-      return { message, delivery };
     }
 
     const memoryPolicy = this.readWhatsAppMemoryPolicy(config.settings);
@@ -1462,6 +1906,7 @@ export class WhatsAppAssistantService {
     let clarificationAttempts = 0;
     let shouldAutoHandoff = false;
     let searchResults: KnowledgeSearchRow[] = [];
+    let citationResults: KnowledgeSearchRow[] = [];
     let answer: string;
     let responseMetadata: Record<string, unknown>;
 
@@ -1538,10 +1983,20 @@ export class WhatsAppAssistantService {
         typeof persistedTopic === 'string'
           ? persistedTopic
           : (previousContactMessage?.content ?? content);
-      const retrievalQuery = isContextualFollowUp
+      const fallbackRetrievalQuery = isContextualFollowUp
         ? `${topicQuery}\nFollow-up request: ${content}`
         : content;
-      const proposedTopicQuery = isContextualFollowUp ? topicQuery : content;
+      const retrievalQuery = isContextualFollowUp
+        ? await this.chatService.rewriteRetrievalQuery({
+            organizationId,
+            question: content,
+            history: conversationHistory,
+            fallbackQuery: fallbackRetrievalQuery,
+          })
+        : content;
+      const proposedTopicQuery = isContextualFollowUp
+        ? retrievalQuery
+        : content;
       const systemUser = this.createSystemUser(organizationId);
       const candidates = await this.knowledgeService.search(systemUser, {
         query: retrievalQuery,
@@ -1557,14 +2012,15 @@ export class WhatsAppAssistantService {
         'WHATSAPP_LEXICAL_RESCUE_MARGIN',
         0.05,
       );
-      searchResults = candidates
-        .filter(
+      searchResults = this.chatService.rerankKnowledgeCandidates(
+        candidates.filter(
           (result) =>
             result.score >= minimumScore ||
             (result.score >= minimumScore - lexicalRescueMargin &&
               this.hasLexicalSupport(retrievalQuery, result.content)),
-        )
-        .slice(0, 5);
+        ),
+        5,
+      );
       const retrievalMetadata = {
         candidateCount: candidates.length,
         acceptedCount: searchResults.length,
@@ -1575,6 +2031,7 @@ export class WhatsAppAssistantService {
         ).length,
         topScore: candidates[0]?.score ?? null,
         contextualFollowUp: isContextualFollowUp,
+        rewrittenQuery: retrievalQuery,
         topicQuery: proposedTopicQuery,
       };
 
@@ -1605,7 +2062,8 @@ export class WhatsAppAssistantService {
         activeTopicQuery = proposedTopicQuery;
         const chatResult = await this.chatService.answerWithContext({
           organizationId,
-          question: `Reply in locale ${locale}. Customer message: ${content}`,
+          question: content,
+          responseLocale: locale,
           history: conversationHistory,
           safeFallback: true,
           context: searchResults.map((result) => ({
@@ -1613,6 +2071,12 @@ export class WhatsAppAssistantService {
             score: result.score,
           })),
         });
+        citationResults = (
+          chatResult.includedContextIndexes ??
+          searchResults.map((_, index) => index)
+        )
+          .map((index) => searchResults[index])
+          .filter((result): result is KnowledgeSearchRow => Boolean(result));
         answer = chatResult.answer;
         responseMetadata = {
           model: chatResult.model,
@@ -1621,6 +2085,7 @@ export class WhatsAppAssistantService {
           usedFallback: chatResult.usedFallback,
           handledWithoutKnowledge: chatResult.handledWithoutKnowledge ?? false,
           error: chatResult.error,
+          promptBudget: chatResult.promptBudget,
           retrieval: retrievalMetadata,
           memory: { clarificationRequested: false, clarificationAttempts: 0 },
         };
@@ -1635,30 +2100,19 @@ export class WhatsAppAssistantService {
     if (!(await this.isAiOwnedConversation(conversationId))) {
       throw new HumanOwnedConversationError();
     }
-    const delivery = await this.outboundService.sendText({
+    const { message, delivery } = await this.deliverAutomatedOutbound({
       config,
-      to: contactWaId,
+      organizationId,
+      conversationId,
+      contactWaId,
       content: answer,
-    });
-    const message = await this.prisma.whatsAppMessage.create({
-      data: {
-        organizationId,
-        conversationId,
-        direction: 'outbound',
-        role: 'assistant',
-        type: 'text',
-        providerMessageId: delivery.providerMessageId,
-        content: answer,
-        deliveryStatus: delivery.status,
-        deliveryAttempts: 1,
-        metadata: this.toJsonObject({
-          ...responseMetadata,
-          delivery,
-          citations: searchResults.map((result) => ({
-            chunkId: result.id,
-            score: result.score,
-          })),
-        }),
+      automationKey,
+      metadata: {
+        ...responseMetadata,
+        citations: citationResults.map((result) => ({
+          chunkId: result.id,
+          score: result.score,
+        })),
       },
     });
 
@@ -1692,6 +2146,150 @@ export class WhatsAppAssistantService {
     }
 
     return { message, delivery };
+  }
+
+  private async deliverAutomatedOutbound(input: {
+    config: WhatsAppAssistantConfig;
+    organizationId: string;
+    conversationId: string;
+    contactWaId: string;
+    content: string;
+    automationKey?: string;
+    metadata: Record<string, unknown>;
+    existingMessage?: Prisma.WhatsAppMessageGetPayload<object>;
+  }): Promise<{
+    message: Prisma.WhatsAppMessageGetPayload<object>;
+    delivery: WhatsAppOutboundResult;
+  }> {
+    await this.limitAutomatedOutbound(input.organizationId);
+    let pendingMessage = input.existingMessage;
+    if (!pendingMessage) {
+      try {
+        pendingMessage = await this.prisma.whatsAppMessage.create({
+          data: {
+            organizationId: input.organizationId,
+            conversationId: input.conversationId,
+            direction: 'outbound',
+            role: 'assistant',
+            type: 'text',
+            automationKey: input.automationKey,
+            content: input.content,
+            deliveryStatus: 'pending',
+            metadata: this.toJsonObject(input.metadata),
+          },
+        });
+      } catch (error) {
+        if (!input.automationKey || !this.isUniqueConstraintError(error)) {
+          throw error;
+        }
+        const existing = await this.prisma.whatsAppMessage.findUniqueOrThrow({
+          where: { automationKey: input.automationKey },
+        });
+        if (existing.deliveryStatus !== 'pending') {
+          return this.resolveExistingAutomatedOutbound(existing, input.config);
+        }
+        pendingMessage = existing;
+      }
+    }
+
+    const claimed = await this.prisma.whatsAppMessage.updateMany({
+      where: { id: pendingMessage.id, deliveryStatus: 'pending' },
+      data: {
+        deliveryStatus: 'sending',
+        deliveryAttempts: { increment: 1 },
+      },
+    });
+    if (claimed.count !== 1) {
+      const current = await this.prisma.whatsAppMessage.findUniqueOrThrow({
+        where: { id: pendingMessage.id },
+      });
+      return this.resolveExistingAutomatedOutbound(current, input.config);
+    }
+
+    let delivery: WhatsAppOutboundResult;
+    try {
+      delivery = await this.outboundService.sendText({
+        config: input.config,
+        to: input.contactWaId,
+        content: input.content,
+      });
+    } catch (error) {
+      await this.prisma.whatsAppMessage.update({
+        where: { id: pendingMessage.id },
+        data: {
+          deliveryStatus: 'failed',
+          deliveryError: 'Provider delivery failed after retry attempts',
+          metadata: this.toJsonObject({
+            ...input.metadata,
+            failedAt: new Date().toISOString(),
+          }),
+        },
+      });
+      throw error;
+    }
+
+    try {
+      const message = await this.prisma.whatsAppMessage.update({
+        where: { id: pendingMessage.id },
+        data: {
+          providerMessageId: delivery.providerMessageId,
+          deliveryStatus: delivery.status,
+          deliveryError: null,
+          metadata: this.toJsonObject({ ...input.metadata, delivery }),
+        },
+      });
+      if (delivery.providerMessageId) {
+        await this.reconcilePendingDeliveryStatus(
+          message.id,
+          input.organizationId,
+          delivery.providerMessageId,
+        );
+      }
+      return { message, delivery };
+    } catch (error) {
+      // The provider already accepted this message. Leaving the durable row in
+      // `sending` makes a worker retry at-most-once instead of sending again.
+      this.logger.error(
+        `Provider accepted automated WhatsApp message ${pendingMessage.id}, but tracking could not be finalized`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      return {
+        message: { ...pendingMessage, deliveryStatus: 'sending' },
+        delivery,
+      };
+    }
+  }
+
+  private resolveExistingAutomatedOutbound(
+    message: Prisma.WhatsAppMessageGetPayload<object>,
+    config: WhatsAppAssistantConfig,
+  ): {
+    message: Prisma.WhatsAppMessageGetPayload<object>;
+    delivery: WhatsAppOutboundResult;
+  } {
+    if (message.deliveryStatus === 'failed') {
+      throw new ServiceUnavailableException(
+        'The automated WhatsApp reply previously failed and will not be resent automatically',
+      );
+    }
+    const trackedStatus = message.deliveryStatus;
+    const status: WhatsAppOutboundResult['status'] = [
+      'queued',
+      'sent',
+      'skipped',
+      'sending',
+      'failed',
+    ].includes(trackedStatus ?? '')
+      ? (trackedStatus as WhatsAppOutboundResult['status'])
+      : 'sending';
+    return {
+      message,
+      delivery: {
+        provider: config.provider,
+        status,
+        providerMessageId: message.providerMessageId ?? undefined,
+      },
+    };
   }
 
   private readAppointmentAction(
@@ -1819,7 +2417,19 @@ export class WhatsAppAssistantService {
     config: WhatsAppAssistantConfig,
     rawBody?: Buffer,
     headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+    payload?: unknown,
   ) {
+    if (config.provider === 'twilio') {
+      this.assertTwilioWebhookSignature(
+        config,
+        rawBody,
+        headers,
+        requestUrl,
+        payload,
+      );
+      return;
+    }
     if (!config.appSecretEncrypted) {
       throw new ForbiddenException(
         'WhatsApp webhook app secret is not configured',
@@ -1845,6 +2455,71 @@ export class WhatsAppAssistantService {
     }
   }
 
+  private assertTwilioWebhookSignature(
+    config: WhatsAppAssistantConfig,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+    payload?: unknown,
+  ) {
+    const signature = this.getHeader(headers, 'x-twilio-signature');
+    if (!signature || !rawBody || !config.accessTokenEncrypted) {
+      throw new ForbiddenException('Invalid Twilio webhook signature');
+    }
+    const url = this.buildWebhookUrl(requestUrl);
+    const authToken = this.cryptoService.decrypt(config.accessTokenEncrypted);
+    const contentType = this.getHeader(headers, 'content-type') ?? '';
+    const valid = contentType.toLowerCase().includes('application/json')
+      ? twilio.validateRequestWithBody(
+          authToken,
+          signature,
+          url,
+          rawBody.toString('utf8'),
+        )
+      : twilio.validateRequest(
+          authToken,
+          signature,
+          url,
+          this.toStringRecord(payload),
+        );
+    if (!valid) {
+      throw new ForbiddenException('Invalid Twilio webhook signature');
+    }
+  }
+
+  private buildWebhookUrl(request?: {
+    protocol?: string;
+    host?: string;
+    originalUrl?: string;
+  }) {
+    const configuredBase = this.configService
+      .get<string>('WHATSAPP_WEBHOOK_PUBLIC_BASE_URL')
+      ?.replace(/\/$/, '');
+    const path = request?.originalUrl ?? '';
+    if (configuredBase) return `${configuredBase}${path}`;
+    if (request?.protocol && request.host) {
+      return `${request.protocol}://${request.host}${path}`;
+    }
+    throw new ForbiddenException('Cannot determine signed webhook URL');
+  }
+
+  private toStringRecord(value: unknown): Record<string, string> {
+    const record =
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : {};
+    return Object.fromEntries(
+      Object.entries(record).map(([key, item]) => [
+        key,
+        typeof item === 'string'
+          ? item
+          : typeof item === 'number' || typeof item === 'boolean'
+            ? item.toString()
+            : '',
+      ]),
+    );
+  }
+
   private getHeader(
     headers: Record<string, string | string[] | undefined> | undefined,
     name: string,
@@ -1861,12 +2536,96 @@ export class WhatsAppAssistantService {
     }
   }
 
+  private assertNotOptedOut(status: string) {
+    if (status === 'opted_out') {
+      throw new ForbiddenException(
+        'This contact opted out of WhatsApp messages. Record a new opt-in before sending.',
+      );
+    }
+  }
+
+  private assertTemplateConsent(status: string) {
+    if (status !== 'opted_in') {
+      throw new ForbiddenException(
+        'An auditable WhatsApp opt-in is required before sending template messages',
+      );
+    }
+  }
+
+  private normalizePhoneIdentifier(value: string) {
+    return value.replace(/^whatsapp:/i, '').replace(/[^0-9]/g, '');
+  }
+
   private async isAiOwnedConversation(conversationId: string) {
     const conversation = await this.prisma.whatsAppConversation.findUnique({
       where: { id: conversationId },
-      select: { status: true, assignedAgentId: true },
+      select: { status: true, assignedAgentId: true, consentStatus: true },
     });
-    return conversation?.status === 'open' && !conversation.assignedAgentId;
+    return (
+      conversation?.status === 'open' &&
+      !conversation.assignedAgentId &&
+      conversation.consentStatus !== 'opted_out'
+    );
+  }
+
+  private async acquireConversationProcessingLease(
+    conversationId: string,
+    messageId: string,
+  ) {
+    const waitMs = this.configService.get<number>(
+      'WHATSAPP_CONVERSATION_LOCK_WAIT_MS',
+      60_000,
+    );
+    const leaseMs = this.configService.get<number>(
+      'WHATSAPP_CONVERSATION_LEASE_MS',
+      180_000,
+    );
+    const deadline = Date.now() + waitMs;
+    do {
+      const earliest = await this.prisma.whatsAppMessage.findFirst({
+        where: {
+          conversationId,
+          direction: 'inbound',
+          processedAt: null,
+        },
+        select: { id: true },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      });
+      if (!earliest || earliest.id === messageId) {
+        const now = new Date();
+        const claimed = await this.prisma.whatsAppConversation.updateMany({
+          where: {
+            id: conversationId,
+            OR: [
+              { processingLeaseMessageId: null },
+              { processingLeaseExpiresAt: { lte: now } },
+            ],
+          },
+          data: {
+            processingLeaseMessageId: messageId,
+            processingLeaseExpiresAt: new Date(now.getTime() + leaseMs),
+          },
+        });
+        if (claimed.count === 1) return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    } while (Date.now() < deadline);
+    throw new ServiceUnavailableException(
+      'WhatsApp conversation is busy; retrying this message in order',
+    );
+  }
+
+  private async releaseConversationProcessingLease(
+    conversationId: string,
+    messageId: string,
+  ) {
+    await this.prisma.whatsAppConversation.updateMany({
+      where: { id: conversationId, processingLeaseMessageId: messageId },
+      data: {
+        processingLeaseMessageId: null,
+        processingLeaseExpiresAt: null,
+      },
+    });
   }
 
   private async markInboundProcessed(messageId: string) {
@@ -1894,6 +2653,43 @@ export class WhatsAppAssistantService {
         keyword.trim().length > 0 &&
         normalized.includes(keyword.trim().toLocaleLowerCase()),
     );
+  }
+
+  private readConsentCommand(
+    settings: Prisma.JsonValue,
+    content?: string,
+  ): 'opt_in' | 'opt_out' | null {
+    if (!content) return null;
+    const configured = this.toRecord(settings);
+    const normalize = (value: string) =>
+      value
+        .trim()
+        .toLocaleLowerCase()
+        .replace(/[^\p{L}\p{N}_-]+/gu, '');
+    const command = normalize(content.split(/\s+/)[0] ?? '');
+    const readKeywords = (key: string, defaults: string[]) => {
+      const value = configured[key];
+      return (Array.isArray(value) ? value : defaults)
+        .filter((item): item is string => typeof item === 'string')
+        .map(normalize);
+    };
+    if (
+      readKeywords('optOutKeywords', [
+        'stop',
+        'unsubscribe',
+        'cancel',
+        'end',
+        'quit',
+      ]).includes(command)
+    ) {
+      return 'opt_out';
+    }
+    if (
+      readKeywords('optInKeywords', ['start', 'subscribe']).includes(command)
+    ) {
+      return 'opt_in';
+    }
+    return null;
   }
 
   private async normalizeWhatsAppSettings(
@@ -1934,6 +2730,16 @@ export class WhatsAppAssistantService {
         'handoffKeywords must be an array of strings',
       );
     }
+    const readConsentKeywords = (key: string, defaults: string[]) => {
+      const value = settings[key] ?? defaults;
+      if (
+        !Array.isArray(value) ||
+        value.some((keyword) => typeof keyword !== 'string' || !keyword.trim())
+      ) {
+        throw new BadRequestException(`${key} must be an array of strings`);
+      }
+      return [...new Set(value.map((keyword) => String(keyword).trim()))];
+    };
 
     return {
       ...settings,
@@ -1941,6 +2747,17 @@ export class WhatsAppAssistantService {
         .map((keyword) => String(keyword).trim())
         .filter(Boolean)
         .slice(0, 50),
+      optOutKeywords: readConsentKeywords('optOutKeywords', [
+        'stop',
+        'unsubscribe',
+        'cancel',
+        'end',
+        'quit',
+      ]),
+      optInKeywords: readConsentKeywords('optInKeywords', [
+        'start',
+        'subscribe',
+      ]),
       knowledgeScope,
       folderIds: knowledgeScope === 'folders' ? folderIds : [],
       memoryEnabled: policy.enabled,
@@ -2268,7 +3085,29 @@ export class WhatsAppAssistantService {
         limit,
         windowSeconds,
       ),
+      this.rateLimitService.consume(
+        `whatsapp-agent:organization:${currentUser.orgId}`,
+        this.configService.get<number>(
+          'WHATSAPP_ORG_MAX_SENDS_PER_WINDOW',
+          1_000,
+        ),
+        windowSeconds,
+      ),
     ]);
+  }
+
+  private limitAutomatedOutbound(organizationId: string) {
+    return this.rateLimitService.consume(
+      `whatsapp-automated:organization:${organizationId}`,
+      this.configService.get<number>(
+        'WHATSAPP_AUTOMATED_MAX_SENDS_PER_WINDOW',
+        1_000,
+      ),
+      this.configService.get<number>(
+        'WHATSAPP_AUTOMATED_RATE_LIMIT_WINDOW_SECONDS',
+        3_600,
+      ),
+    );
   }
 
   private claimForAgent(conversationId: string, agentId: string) {
@@ -2329,8 +3168,15 @@ export class WhatsAppAssistantService {
   private toConversationResponse(
     conversation: WhatsAppConversationWithMessages,
   ) {
+    const {
+      processingLeaseMessageId: _processingLeaseMessageId,
+      processingLeaseExpiresAt: _processingLeaseExpiresAt,
+      ...publicConversation
+    } = conversation;
+    void _processingLeaseMessageId;
+    void _processingLeaseExpiresAt;
     return {
-      ...conversation,
+      ...publicConversation,
       metadata: this.toRecord(conversation.metadata),
       messages: conversation.messages.map((message) =>
         this.toMessageResponse(message),
@@ -2341,8 +3187,10 @@ export class WhatsAppAssistantService {
   private toMessageResponse(
     message: WhatsAppConversationWithMessages['messages'][number],
   ) {
+    const { automationKey: _automationKey, ...publicMessage } = message;
+    void _automationKey;
     return {
-      ...message,
+      ...publicMessage,
       metadata: this.toRecord(message.metadata),
     };
   }
@@ -3145,6 +3993,12 @@ export class WhatsAppAssistantService {
     }
 
     return value;
+  }
+
+  private toUnknownRecord(value: unknown): Record<string, unknown> {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
   }
 
   private isSuperAdmin(user: AuthenticatedUser): boolean {

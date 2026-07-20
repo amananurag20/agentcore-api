@@ -30,6 +30,7 @@ export interface ExtractedKnowledgeFile {
 export class KnowledgeFileExtractorService {
   private readonly maxCharacters: number;
   private readonly maxPdfPages: number;
+  private readonly maxPdfBytes: number;
   private readonly nativeTextMinimumCharacters: number;
   private readonly nativeTextMinimumRatio: number;
   private readonly ocrPageConcurrency: number;
@@ -44,6 +45,9 @@ export class KnowledgeFileExtractorService {
       25_000_000;
     this.maxPdfPages =
       this.configService?.get<number>('KNOWLEDGE_PDF_MAX_PAGES') ?? 5_000;
+    this.maxPdfBytes =
+      this.configService?.get<number>('KNOWLEDGE_PDF_MAX_BYTES') ??
+      100 * 1024 * 1024;
     this.nativeTextMinimumCharacters =
       this.configService?.get<number>(
         'KNOWLEDGE_PDF_NATIVE_TEXT_MIN_CHARACTERS_PER_PAGE',
@@ -73,6 +77,7 @@ export class KnowledgeFileExtractorService {
       mimeType === 'application/pdf' ||
       this.hasExtension(input.fileName, '.pdf')
     ) {
+      this.assertMagicBytes(input.buffer, 'pdf');
       return this.extractPdf(input, policy);
     }
 
@@ -82,6 +87,7 @@ export class KnowledgeFileExtractorService {
         this.hasExtension(input.fileName, extension),
       )
     ) {
+      this.assertMagicBytes(input.buffer, 'text');
       return {
         text: this.assertWithinLimit(
           this.cleanText(input.buffer.toString('utf8')),
@@ -96,6 +102,7 @@ export class KnowledgeFileExtractorService {
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
       this.hasExtension(input.fileName, '.docx')
     ) {
+      this.assertMagicBytes(input.buffer, 'zip');
       return this.extractDocx(input.buffer, policy.maxExtractedCharacters);
     }
 
@@ -104,6 +111,7 @@ export class KnowledgeFileExtractorService {
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
       this.hasExtension(input.fileName, '.xlsx')
     ) {
+      this.assertMagicBytes(input.buffer, 'zip');
       return this.extractSpreadsheet(
         input.buffer,
         policy.maxExtractedCharacters,
@@ -123,17 +131,23 @@ export class KnowledgeFileExtractorService {
     },
     policy: KnowledgeExtractionRuntimePolicy,
   ): Promise<ExtractedKnowledgeFile> {
+    if (input.buffer.length > policy.maxPdfBytes) {
+      throw new BadRequestException(
+        `PDF exceeds the ${policy.maxPdfBytes} byte ingestion limit`,
+      );
+    }
     const parser = new PDFParse({ data: input.buffer });
 
     try {
-      const result = await parser.getText({
-        pageJoiner: '',
-      });
-      if (result.total > policy.maxPdfPages) {
+      const info = await parser.getInfo();
+      if (info.total > policy.maxPdfPages) {
         throw new BadRequestException(
           `PDF exceeds the ${policy.maxPdfPages} page ingestion limit`,
         );
       }
+      const result = await parser.getText({
+        pageJoiner: '',
+      });
 
       const nativePages = result.pages?.length
         ? result.pages.map((page) => ({
@@ -162,6 +176,11 @@ export class KnowledgeFileExtractorService {
       const pagesNeedingOcr = pages.filter(
         (page) => page.extractionMethod === 'unprocessed',
       );
+      if (pagesNeedingOcr.length > policy.maxOcrPagesPerDocument) {
+        throw new BadRequestException(
+          `PDF requires OCR for ${pagesNeedingOcr.length} pages, exceeding the ${policy.maxOcrPagesPerDocument} page OCR budget`,
+        );
+      }
 
       if (pagesNeedingOcr.length && this.ocrService?.isConfigured(policy)) {
         for (
@@ -227,6 +246,15 @@ export class KnowledgeFileExtractorService {
       const unprocessedPages = pages.filter(
         (page) => page.extractionMethod === 'unprocessed',
       );
+      const unresolvedPages = [...emptyOcrPages, ...unprocessedPages];
+      if (
+        pages.length > 0 &&
+        unresolvedPages.length / pages.length > policy.maxEmptyOcrPageRatio
+      ) {
+        throw new BadRequestException(
+          `Text extraction failed for ${unresolvedPages.length} of ${pages.length} pages; document was quarantined from indexing`,
+        );
+      }
       return {
         text,
         pages: extractedPages,
@@ -245,6 +273,18 @@ export class KnowledgeFileExtractorService {
           unprocessedPages: unprocessedPages.map((page) => page.pageNumber),
         },
       };
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : '';
+      if (
+        message.includes('password') ||
+        message.includes('encrypted') ||
+        message.includes('passwordexception')
+      ) {
+        throw new BadRequestException(
+          'Encrypted or password-protected PDFs are not supported',
+        );
+      }
+      throw error;
     } finally {
       await parser.destroy();
     }
@@ -381,8 +421,38 @@ export class KnowledgeFileExtractorService {
       ocrPageConcurrency: this.ocrPageConcurrency,
       ocrRenderWidth: this.ocrRenderWidth,
       maxPdfPages: this.maxPdfPages,
+      maxPdfBytes: this.maxPdfBytes,
+      maxOcrPagesPerDocument:
+        this.configService?.get<number>(
+          'KNOWLEDGE_OCR_MAX_PAGES_PER_DOCUMENT',
+        ) ?? 500,
+      maxEmptyOcrPageRatio:
+        this.configService?.get<number>('KNOWLEDGE_OCR_MAX_EMPTY_PAGE_RATIO') ??
+        0.25,
       maxExtractedCharacters: this.maxCharacters,
       pipelineSignature: 'disabled',
     };
+  }
+
+  private assertMagicBytes(
+    buffer: Buffer,
+    expected: 'pdf' | 'zip' | 'text',
+  ): void {
+    const isPdf = buffer.subarray(0, 5).toString('ascii') === '%PDF-';
+    const isZip =
+      buffer.length >= 4 &&
+      buffer[0] === 0x50 &&
+      buffer[1] === 0x4b &&
+      [0x03, 0x05, 0x07].includes(buffer[2]) &&
+      [0x04, 0x06, 0x08].includes(buffer[3]);
+    if (
+      (expected === 'pdf' && !isPdf) ||
+      (expected === 'zip' && !isZip) ||
+      (expected === 'text' && buffer.subarray(0, 8192).includes(0))
+    ) {
+      throw new BadRequestException(
+        'Uploaded file contents do not match the declared file type',
+      );
+    }
   }
 }

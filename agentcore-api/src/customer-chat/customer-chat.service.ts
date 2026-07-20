@@ -284,6 +284,13 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             status: 'open',
             assignedAgentId: conversation.assignedAgentId ?? currentUser.sub,
             lastMessageAt: now,
+            expiresAt: this.addDays(
+              now,
+              this.configService.get<number>(
+                'CUSTOMER_CHAT_RETENTION_DAYS',
+                90,
+              ),
+            ),
             version: { increment: 1 },
           },
         });
@@ -351,11 +358,22 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     }
 
     const expectedVersion = input.expectedVersion ?? conversation.version;
+    const now = new Date();
     const updatedConversation = await this.prisma.$transaction(
       async (transaction) => {
         const changed = await transaction.customerChatConversation.updateMany({
           where: { id: conversation.id, version: expectedVersion },
-          data: { assignedAgentId, version: { increment: 1 } },
+          data: {
+            assignedAgentId,
+            expiresAt: this.addDays(
+              now,
+              this.configService.get<number>(
+                'CUSTOMER_CHAT_RETENTION_DAYS',
+                90,
+              ),
+            ),
+            version: { increment: 1 },
+          },
         });
         if (changed.count === 0) {
           throw this.conversationConflict();
@@ -401,6 +419,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     );
 
     const expectedVersion = input.expectedVersion ?? conversation.version;
+    const now = new Date();
     const updatedConversation = await this.prisma.$transaction(
       async (transaction) => {
         const changed = await transaction.customerChatConversation.updateMany({
@@ -410,8 +429,15 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             handoffRequestedAt:
               input.status ===
               CustomerChatConversationStatusDto.waiting_for_agent
-                ? (conversation.handoffRequestedAt ?? new Date())
+                ? (conversation.handoffRequestedAt ?? now)
                 : conversation.handoffRequestedAt,
+            expiresAt: this.addDays(
+              now,
+              this.configService.get<number>(
+                'CUSTOMER_CHAT_RETENTION_DAYS',
+                90,
+              ),
+            ),
             version: { increment: 1 },
           },
         });
@@ -820,6 +846,13 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             where: { id: conversation.id, status: { not: 'closed' } },
             data: {
               status: 'closed',
+              expiresAt: this.addDays(
+                new Date(),
+                this.configService.get<number>(
+                  'CUSTOMER_CHAT_RETENTION_DAYS',
+                  90,
+                ),
+              ),
               version: { increment: 1 },
             },
           })
@@ -832,7 +865,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         action: 'customer_chat.conversation_closed',
         entityType: 'customer_chat_conversation',
         entityId: conversation.id,
-        metadata: { source: 'public_widget', reason: 'visitor_started_new_chat' },
+        metadata: {
+          source: 'public_widget',
+          reason: 'visitor_started_new_chat',
+        },
       });
       await this.publishConversationEvent(
         updatedConversation,
@@ -984,6 +1020,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     let answer: string;
     let metadata: Record<string, unknown>;
     let searchResults: KnowledgeSearchRow[] = [];
+    let citationResults: KnowledgeSearchRow[] = [];
     let shouldAutoHandoff = false;
     const memoryPolicy = this.readWidgetMemoryPolicy(
       conversation.widgetConfig?.settings,
@@ -995,6 +1032,9 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     let clarificationAttempts = 0;
     let clarificationRequested = false;
     let streamedAnswer = false;
+    let responseLocale = this.readWidgetLocale(
+      conversation.widgetConfig?.settings,
+    );
 
     try {
       this.throwIfAborted(callbacks.signal);
@@ -1043,6 +1083,12 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
               role: message.role === 'visitor' ? 'user' : 'assistant',
               content: message.content,
             }));
+          responseLocale = await this.chatService.detectLanguage(
+            conversation.organizationId,
+            input.content,
+            responseLocale,
+            callbacks.signal,
+          );
           const previousVisitorMessage = [...conversationHistory]
             .reverse()
             .find((message) => message.role === 'user');
@@ -1089,23 +1135,37 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             ...currentUser,
             orgId: conversation.organizationId,
           };
-          const retrievalQuery = isContextualFollowUp
+          const fallbackRetrievalQuery = isContextualFollowUp
             ? `${topicQuery}\nFollow-up request: ${input.content}`
             : input.content;
-          const proposedTopicQuery = isContextualFollowUp
-            ? topicQuery
+          const retrievalQuery = conversationHistory.length
+            ? await this.chatService.rewriteRetrievalQuery({
+                organizationId: conversation.organizationId,
+                question: input.content,
+                history: conversationHistory,
+                fallbackQuery: fallbackRetrievalQuery,
+                signal: callbacks.signal,
+              })
             : input.content;
-          const candidates = await this.knowledgeService.search(searchUser, {
+          const proposedTopicQuery = retrievalQuery;
+          const searchInput = {
             query: retrievalQuery,
             limit: 10,
-            productKey: 'customer_chat',
+            productKey: 'customer_chat' as const,
             folderIds:
               conversation.widgetConfig?.knowledgeScope === 'folders'
                 ? conversation.widgetConfig.folderScopes.map(
                     (scope) => scope.folderId,
                   )
                 : undefined,
-          });
+          };
+          const [candidates, clearanceDiagnostics] = await Promise.all([
+            this.knowledgeService.search(searchUser, searchInput),
+            this.knowledgeService.getSearchClearanceDiagnostics(
+              searchUser,
+              searchInput,
+            ),
+          ]);
           const minimumScore = this.configService.get<number>(
             'CUSTOMER_CHAT_MIN_SIMILARITY_SCORE',
             0.35,
@@ -1114,14 +1174,15 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             'CUSTOMER_CHAT_LEXICAL_RESCUE_MARGIN',
             0.05,
           );
-          searchResults = candidates
-            .filter(
+          searchResults = this.selectDiverseKnowledgeCandidates(
+            candidates.filter(
               (result) =>
                 result.score >= minimumScore ||
                 (result.score >= minimumScore - lexicalRescueMargin &&
                   this.hasLexicalSupport(retrievalQuery, result.content)),
-            )
-            .slice(0, 5);
+            ),
+            5,
+          );
           const lexicalRescueCount = searchResults.filter(
             (result) => result.score < minimumScore,
           ).length;
@@ -1133,7 +1194,14 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             lexicalRescueCount,
             topScore: candidates[0]?.score ?? null,
             contextualFollowUp: isContextualFollowUp,
+            rewrittenQuery: retrievalQuery,
             topicQuery: proposedTopicQuery,
+            responseLocale,
+            effectiveClearance: clearanceDiagnostics.effectiveClearance,
+            clearanceFilteredCount: clearanceDiagnostics.excludedChunkCount,
+            clearanceBlockedAll:
+              candidates.length === 0 &&
+              clearanceDiagnostics.excludedChunkCount > 0,
           };
 
           if (searchResults.length === 0) {
@@ -1183,7 +1251,18 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
                   }
                 : undefined,
               onReplace: callbacks.onReplace,
+              responseLocale,
             });
+            citationResults = chatResult.usedFallback
+              ? []
+              : (
+                  chatResult.includedContextIndexes ??
+                  searchResults.map((_, index) => index)
+                )
+                  .map((index) => searchResults[index])
+                  .filter((result): result is KnowledgeSearchRow =>
+                    Boolean(result),
+                  );
             answer = chatResult.answer;
             if (streamedAnswer && chatResult.usedFallback) {
               await callbacks.onReplace?.(answer);
@@ -1196,6 +1275,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
               handledWithoutKnowledge:
                 chatResult.handledWithoutKnowledge ?? false,
               error: chatResult.error,
+              promptBudget: chatResult.promptBudget,
               retrieval: retrievalMetadata,
               memory: {
                 clarificationRequested: false,
@@ -1242,6 +1322,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
 
     const assistantMessage = await this.prisma.$transaction(
       async (transaction) => {
+        const activityAt = new Date();
         const claimed = await transaction.customerChatConversation.updateMany({
           where: {
             id: conversation.id,
@@ -1250,8 +1331,15 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
           },
           data: {
             status: shouldAutoHandoff ? 'waiting_for_agent' : 'open',
-            handoffRequestedAt: shouldAutoHandoff ? new Date() : undefined,
-            lastMessageAt: new Date(),
+            handoffRequestedAt: shouldAutoHandoff ? activityAt : undefined,
+            lastMessageAt: activityAt,
+            expiresAt: this.addDays(
+              activityAt,
+              this.configService.get<number>(
+                'CUSTOMER_CHAT_RETENTION_DAYS',
+                90,
+              ),
+            ),
             metadata: this.toJsonObject({
               ...this.toRecord(conversation.metadata),
               memory: {
@@ -1274,7 +1362,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             content: answer,
             metadata: this.toJsonObject(metadata),
             citations: {
-              create: searchResults.map((result) => ({
+              create: citationResults.map((result) => ({
                 chunkId: result.id,
                 score: result.score,
               })),
@@ -1286,6 +1374,9 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     );
 
     const updatedConversation = await this.loadConversation(conversation.id);
+    if (!assistantMessage && streamedAnswer) {
+      await callbacks.onReplace?.('');
+    }
     if (assistantMessage) {
       await this.publishConversationEvent(
         updatedConversation,
@@ -1360,6 +1451,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
 
     const assistantMessage = await this.prisma.$transaction(
       async (transaction) => {
+        const activityAt = new Date();
         const claimed = await transaction.customerChatConversation.updateMany({
           where: {
             id: conversation.id,
@@ -1368,8 +1460,15 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
           },
           data: {
             status: 'waiting_for_agent',
-            handoffRequestedAt: new Date(),
-            lastMessageAt: new Date(),
+            handoffRequestedAt: activityAt,
+            lastMessageAt: activityAt,
+            expiresAt: this.addDays(
+              activityAt,
+              this.configService.get<number>(
+                'CUSTOMER_CHAT_RETENTION_DAYS',
+                90,
+              ),
+            ),
             version: { increment: 1 },
           },
         });
@@ -1440,12 +1539,18 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     conversationId: string,
     organizationId: string,
   ): Promise<ConversationWithMessages> {
+    const now = new Date();
     return this.prisma.$transaction(async (transaction) => {
       const changed = await transaction.customerChatConversation.updateMany({
         where: { id: conversationId, status: { not: 'waiting_for_agent' } },
         data: {
           status: 'waiting_for_agent',
-          handoffRequestedAt: new Date(),
+          handoffRequestedAt: now,
+          lastMessageAt: now,
+          expiresAt: this.addDays(
+            now,
+            this.configService.get<number>('CUSTOMER_CHAT_RETENTION_DAYS', 90),
+          ),
           version: { increment: 1 },
         },
       });
@@ -1503,7 +1608,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
   private async purgeExpiredConversations() {
     try {
       const result = await this.prisma.customerChatConversation.deleteMany({
-        where: { expiresAt: { lte: new Date() } },
+        where: {
+          status: 'closed',
+          expiresAt: { lte: new Date() },
+        },
       });
       if (result.count > 0) {
         this.logger.log(
@@ -1996,6 +2104,23 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private readWidgetLocale(
+    value: Prisma.JsonValue | Record<string, unknown> | null | undefined,
+  ): string {
+    const settings =
+      value && !Array.isArray(value) && typeof value === 'object'
+        ? (value as Record<string, unknown>)
+        : {};
+    const configured = settings.locale ?? settings.language;
+    if (
+      typeof configured === 'string' &&
+      /^[a-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$/.test(configured.trim())
+    ) {
+      return configured.trim().replaceAll('_', '-');
+    }
+    return 'en';
+  }
+
   private readConversationMemory(value: Prisma.JsonValue): {
     activeTopicQuery: string | null;
     clarificationRequested: boolean;
@@ -2133,6 +2258,33 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     const matchedTerms = queryTerms.filter((term) => contentTerms.has(term));
     const requiredMatches = queryTerms.length <= 2 ? 1 : 2;
     return matchedTerms.length >= Math.min(requiredMatches, queryTerms.length);
+  }
+
+  private selectDiverseKnowledgeCandidates(
+    candidates: KnowledgeSearchRow[],
+    limit: number,
+  ): KnowledgeSearchRow[] {
+    const maxPerDocument = Math.max(
+      1,
+      this.configService.get<number>(
+        'CUSTOMER_CHAT_MAX_CHUNKS_PER_DOCUMENT',
+        2,
+      ),
+    );
+    const reranked = this.chatService.rerankKnowledgeCandidates(
+      candidates,
+      Math.min(candidates.length, Math.max(limit * 3, limit)),
+    );
+    const documentCounts = new Map<string, number>();
+    const selected: KnowledgeSearchRow[] = [];
+    for (const candidate of reranked) {
+      const count = documentCounts.get(candidate.documentId) ?? 0;
+      if (count >= maxPerDocument) continue;
+      selected.push(candidate);
+      documentCounts.set(candidate.documentId, count + 1);
+      if (selected.length >= limit) break;
+    }
+    return selected;
   }
 
   private tokenizeForLexicalMatch(value: string): string[] {

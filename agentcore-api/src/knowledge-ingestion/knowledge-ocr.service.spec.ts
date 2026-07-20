@@ -91,7 +91,7 @@ describe('KnowledgeOcrService', () => {
     const service = new KnowledgeOcrService(
       config({
         KNOWLEDGE_OCR_PRIMARY_ENDPOINT: 'http://ocr.local/process',
-        KNOWLEDGE_OCR_FALLBACK_ENDPOINT: 'https://ocr-gateway/process',
+        KNOWLEDGE_OCR_FALLBACK_ENDPOINT: 'https://ocr-gateway.local/process',
         KNOWLEDGE_OCR_MIN_CONFIDENCE: 0.75,
       }),
       prisma,
@@ -122,6 +122,40 @@ describe('KnowledgeOcrService', () => {
     });
   });
 
+  it('uses fallback when the primary provider omits confidence', async () => {
+    const prisma = {
+      knowledgeExtractionConfig: {
+        findUnique: jest.fn().mockResolvedValue(null),
+      },
+      knowledgeOcrPageCache: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        update: jest.fn(),
+        upsert: jest.fn().mockResolvedValue({}),
+      },
+    } as unknown as PrismaService;
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(response({ text: 'uncertain text' }))
+      .mockResolvedValueOnce(
+        response({ text: 'verified fallback text', confidence: 0.95 }),
+      );
+    const service = new KnowledgeOcrService(
+      config({
+        KNOWLEDGE_OCR_PRIMARY_ENDPOINT: 'http://ocr.local/process',
+        KNOWLEDGE_OCR_FALLBACK_ENDPOINT: 'https://ocr-gateway.local/process',
+      }),
+      prisma,
+    );
+
+    const result = await service.recognizePage({
+      image: Buffer.from('page image'),
+      pageNumber: 4,
+    });
+
+    expect(result.text).toBe('verified fallback text');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('uses managed fallback when the primary provider is unavailable', async () => {
     const prisma = {
       knowledgeExtractionConfig: {
@@ -146,7 +180,7 @@ describe('KnowledgeOcrService', () => {
     const service = new KnowledgeOcrService(
       config({
         KNOWLEDGE_OCR_PRIMARY_ENDPOINT: 'http://ocr.local/process',
-        KNOWLEDGE_OCR_FALLBACK_ENDPOINT: 'https://ocr-gateway/process',
+        KNOWLEDGE_OCR_FALLBACK_ENDPOINT: 'https://ocr-gateway.local/process',
         KNOWLEDGE_OCR_MAX_RETRIES: 0,
       }),
       prisma,
@@ -225,8 +259,12 @@ describe('KnowledgeOcrService', () => {
   });
 
   function config(values: Record<string, unknown>) {
+    const defaults = {
+      KNOWLEDGE_OCR_ALLOWED_HOSTS: 'ocr.local,ocr-gateway.local',
+      KNOWLEDGE_OCR_ALLOW_PRIVATE_NETWORKS: true,
+    };
     return {
-      get: jest.fn((key: string) => values[key]),
+      get: jest.fn((key: string) => ({ ...defaults, ...values })[key]),
     } as unknown as ConfigService;
   }
 

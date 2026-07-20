@@ -7,12 +7,15 @@ import {
   Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { Prisma, VoiceReceptionistConfig } from '@prisma/client';
-import { ChatService } from '../ai/chat.service';
+import { ChatHistoryMessage, ChatService } from '../ai/chat.service';
 import { AuditService } from '../audit/audit.service';
 import { AppointmentBookingService } from '../appointment-booking/appointment-booking.service';
-import { AppointmentActionDto } from '../appointment-booking/dto/appointment-action.dto';
+import {
+  AppointmentActionDto,
+  AppointmentActionTypeDto,
+} from '../appointment-booking/dto/appointment-action.dto';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
@@ -65,6 +68,28 @@ export type ConversationRelayPromptResult =
       type: 'end';
       handoffData: string;
     };
+
+export type ConversationRelayGenerationCallbacks = {
+  signal?: AbortSignal;
+  onDelta?: (delta: string) => void | Promise<void>;
+  onReplace?: (content: string) => void | Promise<void>;
+};
+
+export type AuthorizedConversationRelay = {
+  config: VoiceReceptionistConfig;
+  connectionId: string;
+  expectedCallSid: string;
+  ticketId: string;
+};
+
+type RelayTokenPayload = {
+  v: 1;
+  ticketId: string;
+  configId: string;
+  callSid: string;
+  nonce: string;
+  expiresAt: number;
+};
 
 @Injectable()
 export class VoiceReceptionistService {
@@ -327,13 +352,16 @@ export class VoiceReceptionistService {
 
   async getRecording(currentUser: AuthenticatedUser, id: string) {
     const call = await this.findCallForActor(currentUser, id);
-    if (!call.recordingUrl) {
+    const recordingUrl = call.recordingUrlEncrypted
+      ? this.cryptoService.decrypt(call.recordingUrlEncrypted)
+      : call.recordingUrl;
+    if (!recordingUrl) {
       throw new NotFoundException('Voice recording not found');
     }
     const config = await this.prisma.voiceReceptionistConfig.findUniqueOrThrow({
       where: { id: call.configId },
     });
-    return this.outboundService.downloadRecording(config, call.recordingUrl);
+    return this.outboundService.downloadRecording(config, recordingUrl);
   }
 
   async getAnalytics(
@@ -469,7 +497,7 @@ export class VoiceReceptionistService {
       content: input.content,
     });
 
-    const event = await this.prisma.voiceCallEvent.create({
+    const event = await this.createVoiceEvent({
       data: {
         organizationId: call.organizationId,
         callId: call.id,
@@ -560,7 +588,7 @@ export class VoiceReceptionistService {
       include: this.callInclude(),
     });
 
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: call.organizationId,
         callId: call.id,
@@ -600,7 +628,7 @@ export class VoiceReceptionistService {
       : null;
     const summary = browserAgent
       ? await this.createHandoffSummary(config, call)
-      : call.summary;
+      : this.readVoiceCallSummary(call);
     let action = browserAgent
       ? await this.safeProviderAction(config.provider, () =>
           this.outboundService.transferCallToClient({
@@ -650,13 +678,16 @@ export class VoiceReceptionistService {
             : undefined) ??
           call.assignedAgentId ??
           fallbackAgent?.id,
-        summary,
+        summary: null,
+        summaryEncrypted: summary
+          ? this.cryptoService.encrypt(summary)
+          : undefined,
         lastEventAt: new Date(),
       },
       include: this.callInclude(),
     });
 
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: call.organizationId,
         callId: call.id,
@@ -670,7 +701,7 @@ export class VoiceReceptionistService {
           notifications,
           transport,
           browserAgentId: browserAgent?.userId,
-          summary,
+          summaryProtected: Boolean(summary),
         }),
       },
     });
@@ -721,7 +752,7 @@ export class VoiceReceptionistService {
       status = 'completed';
     }
 
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: call.organizationId,
         callId: call.id,
@@ -799,7 +830,7 @@ export class VoiceReceptionistService {
 
     const now = new Date();
     const call = await this.upsertCall(config, input, now);
-    const inboundEvent = await this.prisma.voiceCallEvent.create({
+    const inboundEvent = await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -877,7 +908,7 @@ export class VoiceReceptionistService {
             content: greeting,
           }),
         );
-        await this.prisma.voiceCallEvent.create({
+        await this.createVoiceEvent({
           data: {
             organizationId: config.organizationId,
             callId: call.id,
@@ -936,7 +967,7 @@ export class VoiceReceptionistService {
           providerCallId: call.providerCallId,
         }),
       );
-      await this.prisma.voiceCallEvent.create({
+      await this.createVoiceEvent({
         data: {
           organizationId: config.organizationId,
           callId: call.id,
@@ -970,7 +1001,10 @@ export class VoiceReceptionistService {
           endedAt: now,
           durationSeconds,
           lastEventAt: now,
-          summary: input.content,
+          summary: null,
+          summaryEncrypted: input.content
+            ? this.cryptoService.encrypt(input.content)
+            : undefined,
           metadata: this.toJsonObject({
             ...this.toRecord(call.metadata),
             ...input.metadata,
@@ -1034,7 +1068,7 @@ export class VoiceReceptionistService {
       new Date(),
     );
     if (!call.events.some((event) => event.type === 'call_started')) {
-      await this.prisma.voiceCallEvent.create({
+      await this.createVoiceEvent({
         data: {
           organizationId: config.organizationId,
           callId: call.id,
@@ -1078,7 +1112,7 @@ export class VoiceReceptionistService {
       (event) => this.toRecord(event.metadata).greeting === true,
     );
     if (!greetingPlayed) {
-      await this.prisma.voiceCallEvent.create({
+      await this.createVoiceEvent({
         data: {
           organizationId: config.organizationId,
           callId: call.id,
@@ -1093,39 +1127,176 @@ export class VoiceReceptionistService {
       });
     }
     if (useConversationRelay) {
-      return this.outboundService.buildConversationRelayTwiml(config, greeting);
+      const relayToken = await this.createConversationRelayTicket(
+        config,
+        input.CallSid,
+      );
+      return this.outboundService.buildConversationRelayTwiml(
+        config,
+        greeting,
+        relayToken,
+      );
     }
     return this.outboundService.buildGatherTwiml(config, greeting);
   }
 
   async authorizeConversationRelay(
     configId: string,
-    signature: string | undefined,
-  ): Promise<VoiceReceptionistConfig> {
+    relayToken: string | undefined,
+    connectionId: string,
+    signature?: string,
+    requestUrl?: string,
+  ): Promise<AuthorizedConversationRelay> {
     const config = await this.findActiveConfig(configId);
     await this.assertVoiceEnabled(config.organizationId);
-    const required = this.configService.get<boolean>(
-      'VOICE_WEBHOOK_SIGNATURE_REQUIRED',
-      true,
+    const payload = this.verifyRelayToken(configId, relayToken);
+    if (signature) {
+      if (!config.apiKeyEncrypted || !requestUrl) {
+        throw new ForbiddenException('Invalid Twilio WebSocket signature');
+      }
+      const expected = createHmac(
+        'sha1',
+        this.cryptoService.decrypt(config.apiKeyEncrypted),
+      )
+        .update(requestUrl)
+        .digest('base64');
+      if (!this.secureCompareText(expected, signature)) {
+        throw new ForbiddenException('Invalid Twilio WebSocket signature');
+      }
+    }
+
+    const now = new Date();
+    const claimed = await this.prisma.voiceRelayTicket.updateMany({
+      where: {
+        id: payload.ticketId,
+        organizationId: config.organizationId,
+        configId,
+        providerCallId: payload.callSid,
+        nonceHash: this.hashRelayNonce(payload.nonce),
+        expiresAt: { gt: now },
+        connectionId: null,
+        claimCount: { lt: 3 },
+      },
+      data: {
+        connectionId,
+        claimedAt: now,
+        claimCount: { increment: 1 },
+      },
+    });
+    if (claimed.count !== 1) {
+      throw new ForbiddenException('Relay ticket is expired or already active');
+    }
+    return {
+      config,
+      connectionId,
+      expectedCallSid: payload.callSid,
+      ticketId: payload.ticketId,
+    };
+  }
+
+  async releaseConversationRelay(
+    ticketId: string,
+    connectionId: string,
+  ): Promise<void> {
+    await this.prisma.voiceRelayTicket.updateMany({
+      where: { id: ticketId, connectionId },
+      data: { connectionId: null, claimedAt: null },
+    });
+  }
+
+  private async createConversationRelayTicket(
+    config: VoiceReceptionistConfig,
+    callSid: string,
+  ): Promise<string> {
+    const ttlSeconds = this.configService.get<number>(
+      'VOICE_RELAY_TICKET_TTL_SECONDS',
+      120,
     );
-    if (!required && !signature) return config;
-    if (!signature || !config.apiKeyEncrypted) {
-      throw new ForbiddenException('Invalid Twilio WebSocket signature');
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+    const nonce = randomBytes(32).toString('base64url');
+    const ticket = await this.prisma.voiceRelayTicket.upsert({
+      where: {
+        configId_providerCallId: {
+          configId: config.id,
+          providerCallId: callSid,
+        },
+      },
+      create: {
+        organizationId: config.organizationId,
+        configId: config.id,
+        providerCallId: callSid,
+        nonceHash: this.hashRelayNonce(nonce),
+        expiresAt,
+      },
+      update: {
+        nonceHash: this.hashRelayNonce(nonce),
+        expiresAt,
+        connectionId: null,
+        claimedAt: null,
+        claimCount: 0,
+      },
+    });
+    void this.prisma.voiceRelayTicket
+      .deleteMany({ where: { expiresAt: { lt: new Date() } } })
+      .catch(() => undefined);
+    const payload: RelayTokenPayload = {
+      v: 1,
+      ticketId: ticket.id,
+      configId: config.id,
+      callSid,
+      nonce,
+      expiresAt: expiresAt.getTime(),
+    };
+    const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    return `${encoded}.${this.signRelayPayload(encoded)}`;
+  }
+
+  private verifyRelayToken(
+    configId: string,
+    relayToken?: string,
+  ): RelayTokenPayload {
+    const [encoded, signature, extra] = relayToken?.split('.') ?? [];
+    if (!encoded || !signature || extra) {
+      throw new ForbiddenException('A valid per-call relay ticket is required');
     }
-    const requestUrl = this.outboundService.getConversationRelayUrl(config);
-    if (!requestUrl) {
-      throw new ForbiddenException('ConversationRelay URL is not configured');
-    }
-    const expected = createHmac(
-      'sha1',
-      this.cryptoService.decrypt(config.apiKeyEncrypted),
-    )
-      .update(requestUrl)
-      .digest('base64');
+    const expected = this.signRelayPayload(encoded);
     if (!this.secureCompareText(expected, signature)) {
-      throw new ForbiddenException('Invalid Twilio WebSocket signature');
+      throw new ForbiddenException('Invalid relay ticket signature');
     }
-    return config;
+    let payload: RelayTokenPayload;
+    try {
+      payload = JSON.parse(
+        Buffer.from(encoded, 'base64url').toString('utf8'),
+      ) as RelayTokenPayload;
+    } catch {
+      throw new ForbiddenException('Invalid relay ticket payload');
+    }
+    if (
+      payload.v !== 1 ||
+      payload.configId !== configId ||
+      !payload.ticketId ||
+      !payload.callSid ||
+      !payload.nonce ||
+      !Number.isFinite(payload.expiresAt) ||
+      payload.expiresAt <= Date.now()
+    ) {
+      throw new ForbiddenException('Relay ticket is expired or invalid');
+    }
+    return payload;
+  }
+
+  private signRelayPayload(payload: string): string {
+    const secret =
+      this.configService.get<string>('VOICE_RELAY_SIGNING_SECRET') ??
+      this.configService.get<string>('AI_CONFIG_ENCRYPTION_KEY');
+    if (!secret || secret.length < 32) {
+      throw new ForbiddenException('Relay signing secret is not configured');
+    }
+    return createHmac('sha256', secret).update(payload).digest('base64url');
+  }
+
+  private hashRelayNonce(nonce: string): string {
+    return createHash('sha256').update(nonce).digest('hex');
   }
 
   async handleConversationRelaySetup(
@@ -1147,7 +1318,7 @@ export class VoiceReceptionistService {
         }),
       },
     });
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1165,10 +1336,34 @@ export class VoiceReceptionistService {
     content: string,
     digits?: string,
     language?: string,
+    callbacks: ConversationRelayGenerationCallbacks = {},
   ): Promise<ConversationRelayPromptResult> {
     const call = await this.findCallByProvider(config.id, callSid);
     const normalizedContent = content.trim();
-    await this.prisma.voiceCallEvent.create({
+    const languageSignals = [
+      AbortSignal.timeout(
+        this.configService.get<number>(
+          'VOICE_LANGUAGE_DETECTION_TIMEOUT_MS',
+          1200,
+        ),
+      ),
+      ...(callbacks.signal ? [callbacks.signal] : []),
+    ];
+    const detectedLanguage = digits
+      ? (language ?? call.locale)
+      : await this.chatService.detectLanguage(
+          config.organizationId,
+          normalizedContent,
+          language ?? call.locale ?? config.defaultLocale,
+          AbortSignal.any(languageSignals),
+        );
+    if (detectedLanguage && detectedLanguage !== call.locale) {
+      await this.prisma.voiceCall.update({
+        where: { id: call.id },
+        data: { locale: detectedLanguage },
+      });
+    }
+    await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1178,15 +1373,25 @@ export class VoiceReceptionistService {
         metadata: this.toJsonObject({
           transport: 'conversation-relay',
           digits,
-          language,
+          language: detectedLanguage,
         }),
       },
     });
+    if (!digits) {
+      const appointmentResult = await this.maybeHandleVoiceAppointment(
+        config,
+        call,
+        normalizedContent,
+        detectedLanguage,
+        callbacks,
+      );
+      if (appointmentResult) return appointmentResult;
+    }
     const route = digits
       ? this.matchDtmfRoute(config, digits)
       : this.matchKeywordRoute(config, normalizedContent);
     if (route) {
-      await this.prisma.voiceCallEvent.create({
+      await this.createVoiceEvent({
         data: {
           organizationId: config.organizationId,
           callId: call.id,
@@ -1243,11 +1448,12 @@ export class VoiceReceptionistService {
       normalizedContent,
       undefined,
       'inline',
+      callbacks,
     );
     return {
       type: 'text',
       content: reply.event.content ?? 'How else can I help?',
-      language,
+      language: detectedLanguage,
     };
   }
 
@@ -1258,7 +1464,7 @@ export class VoiceReceptionistService {
     durationUntilInterruptMs?: number,
   ): Promise<void> {
     const call = await this.findCallByProvider(config.id, callSid);
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1288,7 +1494,7 @@ export class VoiceReceptionistService {
     );
     const call = await this.findOrCreateCallbackCall(config, input.CallSid);
     const handoff = this.parseConversationRelayHandoff(input.HandoffData);
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1377,7 +1583,7 @@ export class VoiceReceptionistService {
         'I did not catch that. How can I help?',
       );
     }
-    const inboundEvent = await this.prisma.voiceCallEvent.create({
+    const inboundEvent = await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1392,7 +1598,7 @@ export class VoiceReceptionistService {
       ? this.matchDtmfRoute(config, input.Digits)
       : this.matchKeywordRoute(config, content);
     if (route) {
-      await this.prisma.voiceCallEvent.create({
+      await this.createVoiceEvent({
         data: {
           organizationId: config.organizationId,
           callId: call.id,
@@ -1498,7 +1704,7 @@ export class VoiceReceptionistService {
       },
       include: this.callInclude(),
     });
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1527,7 +1733,7 @@ export class VoiceReceptionistService {
     );
     const call = await this.findCallByProvider(config.id, input.CallSid);
     const answered = input.DialCallStatus === 'completed';
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1600,7 +1806,7 @@ export class VoiceReceptionistService {
         data: { status: 'in_progress', lastEventAt: new Date() },
       });
     }
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1639,7 +1845,10 @@ export class VoiceReceptionistService {
       data: {
         status: 'voicemail',
         recordingSid: input.RecordingSid,
-        recordingUrl: input.RecordingUrl,
+        recordingUrl: null,
+        recordingUrlEncrypted: input.RecordingUrl
+          ? this.cryptoService.encrypt(input.RecordingUrl)
+          : undefined,
         recordingDurationSeconds,
         lastEventAt: new Date(),
       },
@@ -1656,8 +1865,14 @@ export class VoiceReceptionistService {
       ? this.toRecord(existingEvent.metadata)
       : {};
     const eventData = {
-      content: input.TranscriptionText,
-      audioUrl: input.RecordingUrl,
+      content: null,
+      contentEncrypted: input.TranscriptionText
+        ? this.cryptoService.encrypt(input.TranscriptionText)
+        : undefined,
+      audioUrl: null,
+      audioUrlEncrypted: input.RecordingUrl
+        ? this.cryptoService.encrypt(input.RecordingUrl)
+        : undefined,
       metadata: this.toJsonObject({
         ...previousMetadata,
         recordingSid: input.RecordingSid,
@@ -1671,7 +1886,7 @@ export class VoiceReceptionistService {
           where: { id: existingEvent.id },
           data: eventData,
         })
-      : await this.prisma.voiceCallEvent.create({
+      : await this.createVoiceEvent({
           data: {
             organizationId: config.organizationId,
             callId: call.id,
@@ -1713,6 +1928,7 @@ export class VoiceReceptionistService {
     content: string,
     appointmentAction?: AppointmentActionDto,
     delivery: 'provider' | 'inline' = 'provider',
+    callbacks: ConversationRelayGenerationCallbacks = {},
   ): Promise<{
     event: Prisma.VoiceCallEventGetPayload<object>;
     action: VoiceProviderActionResult;
@@ -1741,7 +1957,7 @@ export class VoiceReceptionistService {
         answer,
         delivery,
       );
-      const event = await this.prisma.voiceCallEvent.create({
+      const event = await this.createVoiceEvent({
         data: {
           organizationId: config.organizationId,
           callId: call.id,
@@ -1763,30 +1979,50 @@ export class VoiceReceptionistService {
       'VOICE_AI_TIMEOUT_MS',
       8000,
     );
+    const timeoutController = new AbortController();
+    const timeout = setTimeout(
+      () => timeoutController.abort('voice-ai-timeout'),
+      timeoutMs,
+    );
+    const abortFromCaller = () =>
+      timeoutController.abort(callbacks.signal?.reason ?? 'caller-interrupt');
+    callbacks.signal?.addEventListener('abort', abortFromCaller, {
+      once: true,
+    });
     let searchResults: Awaited<ReturnType<KnowledgeService['search']>> = [];
     let chatResult: Awaited<ReturnType<ChatService['answerWithContext']>>;
     try {
-      searchResults = await this.withTimeout(
-        this.knowledgeService.search(systemUser, {
-          query: content,
-          limit: 5,
+      this.throwIfAborted(timeoutController.signal);
+      const candidates = await this.knowledgeService.search(
+        systemUser,
+        {
+          query: this.buildVoiceRetrievalQuery(call, content),
+          limit: 8,
           productKey: 'voice_receptionist',
-        }),
-        timeoutMs,
+        },
+        timeoutController.signal,
       );
-      chatResult = await this.withTimeout(
-        this.chatService.answerWithContext({
-          organizationId: config.organizationId,
-          question: this.buildConversationQuestion(call, content),
-          safeFallback: true,
-          context: searchResults.map((result) => ({
-            content: result.content,
-            score: result.score,
-          })),
-        }),
-        timeoutMs,
-      );
+      this.throwIfAborted(timeoutController.signal);
+      searchResults = this.filterVoiceKnowledge(candidates);
+      chatResult = await this.chatService.answerWithContext({
+        organizationId: config.organizationId,
+        question: content,
+        history: this.buildVoiceChatHistory(call),
+        safeFallback: true,
+        context: searchResults.map((result) => ({
+          content: result.content,
+          score: result.score,
+        })),
+        signal: timeoutController.signal,
+        onDelta: callbacks.onDelta,
+        onReplace: callbacks.onReplace,
+      });
     } catch (error) {
+      if (timeoutController.signal.aborted || callbacks.signal?.aborted) {
+        throw this.abortError(
+          timeoutController.signal.reason ?? callbacks.signal?.reason,
+        );
+      }
       chatResult = {
         answer: this.getSettingString(
           config,
@@ -1799,6 +2035,9 @@ export class VoiceReceptionistService {
         usedFallback: true,
         error: error instanceof Error ? error.message : 'Voice AI failed',
       };
+    } finally {
+      clearTimeout(timeout);
+      callbacks.signal?.removeEventListener('abort', abortFromCaller);
     }
 
     const action = await this.deliverAssistantReply(
@@ -1807,7 +2046,7 @@ export class VoiceReceptionistService {
       chatResult.answer,
       delivery,
     );
-    const event = await this.prisma.voiceCallEvent.create({
+    const event = await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1830,6 +2069,303 @@ export class VoiceReceptionistService {
     });
 
     return { event, action };
+  }
+
+  private async maybeHandleVoiceAppointment(
+    config: VoiceReceptionistConfig,
+    call: VoiceCallWithEvents,
+    content: string,
+    language: string,
+    callbacks: ConversationRelayGenerationCallbacks,
+  ): Promise<ConversationRelayPromptResult | undefined> {
+    const callMetadata = this.toRecord(call.metadata);
+    const encryptedPending = callMetadata.voiceAppointmentPending;
+    const pending =
+      typeof encryptedPending === 'string'
+        ? this.decryptAppointmentAction(encryptedPending)
+        : undefined;
+    const isAppointmentIntent =
+      Boolean(pending) ||
+      /\b(appointment|booking|book|schedule|availability|available time|service)\b/i.test(
+        content,
+      );
+    if (!isAppointmentIntent) return undefined;
+
+    if (pending) {
+      if (/\b(no|cancel|never mind|do not)\b/i.test(content)) {
+        await this.storePendingVoiceAppointment(call, undefined);
+        return this.storeInlineVoiceReply(
+          config,
+          call,
+          'Okay, I have not booked that appointment.',
+          language,
+        );
+      }
+      if (
+        /\b(yes|confirm|confirmed|go ahead|book it|correct)\b/i.test(content)
+      ) {
+        await this.storePendingVoiceAppointment(call, undefined);
+        const reply = await this.createAssistantReply(
+          config,
+          call,
+          content,
+          pending,
+          'inline',
+          callbacks,
+        );
+        return {
+          type: 'text',
+          content: reply.event.content ?? 'Your appointment is booked.',
+          language,
+        };
+      }
+      return this.storeInlineVoiceReply(
+        config,
+        call,
+        'Please say yes to confirm the appointment, or no to cancel.',
+        language,
+      );
+    }
+
+    let serviceRows: Array<{ id: string; name: string }> = [];
+    try {
+      const servicesResult = await this.appointmentBookingService.executeAction(
+        config.organizationId,
+        { action: AppointmentActionTypeDto.list_services },
+      );
+      const services: unknown[] = Array.isArray(servicesResult.data)
+        ? servicesResult.data
+        : [];
+      serviceRows = services.flatMap((service) => {
+        if (!service || typeof service !== 'object' || Array.isArray(service)) {
+          return [];
+        }
+        const record = service as Record<string, unknown>;
+        return typeof record.id === 'string' && typeof record.name === 'string'
+          ? [{ id: record.id, name: record.name }]
+          : [];
+      });
+    } catch {
+      return this.storeInlineVoiceReply(
+        config,
+        call,
+        'Appointment booking is not available right now. I can connect you with a person instead.',
+        language,
+      );
+    }
+    const businessHours = this.toRecord(
+      this.toRecord(config.settings).businessHours as Prisma.JsonValue,
+    );
+    const timezone =
+      typeof businessHours.timezone === 'string'
+        ? businessHours.timezone
+        : 'UTC';
+    const tool = await this.chatService.extractVoiceAppointmentTool({
+      organizationId: config.organizationId,
+      utterance: content,
+      history: this.buildVoiceChatHistory(call),
+      services: serviceRows,
+      timezone,
+      signal: callbacks.signal,
+    });
+    if (!tool || tool.action === 'none') return undefined;
+
+    if (tool.action === 'list_services') {
+      const action: AppointmentActionDto = {
+        action: AppointmentActionTypeDto.list_services,
+      };
+      const reply = await this.createAssistantReply(
+        config,
+        call,
+        content,
+        action,
+        'inline',
+        callbacks,
+      );
+      return { type: 'text', content: reply.event.content ?? '', language };
+    }
+
+    if (tool.action === 'list_availability') {
+      if (!tool.serviceId || !tool.date) {
+        return this.storeInlineVoiceReply(
+          config,
+          call,
+          'Which service and date would you like?',
+          language,
+        );
+      }
+      const action: AppointmentActionDto = {
+        action: AppointmentActionTypeDto.list_availability,
+        serviceId: tool.serviceId,
+        date: tool.date,
+        timezone: tool.timezone ?? timezone,
+      };
+      const reply = await this.createAssistantReply(
+        config,
+        call,
+        content,
+        action,
+        'inline',
+        callbacks,
+      );
+      return { type: 'text', content: reply.event.content ?? '', language };
+    }
+
+    if (!tool.serviceId || !tool.startAt || !tool.customerName) {
+      return this.storeInlineVoiceReply(
+        config,
+        call,
+        'To book, please tell me the service, preferred date and time, and your name.',
+        language,
+      );
+    }
+    const action: AppointmentActionDto = {
+      action: AppointmentActionTypeDto.book,
+      serviceId: tool.serviceId,
+      startAt: tool.startAt,
+      timezone: tool.timezone ?? timezone,
+      customerName: tool.customerName,
+      customerEmail: tool.customerEmail,
+      customerPhone: tool.customerPhone ?? call.fromNumber ?? undefined,
+      partySize: tool.partySize,
+    };
+    await this.storePendingVoiceAppointment(call, action);
+    const serviceName =
+      serviceRows.find((service) => service.id === action.serviceId)?.name ??
+      'the selected service';
+    return this.storeInlineVoiceReply(
+      config,
+      call,
+      `Please confirm: book ${serviceName} for ${action.customerName} at ${action.startAt}. Say yes to confirm or no to cancel.`,
+      language,
+    );
+  }
+
+  private async storeInlineVoiceReply(
+    config: VoiceReceptionistConfig,
+    call: VoiceCallWithEvents,
+    content: string,
+    language: string,
+  ): Promise<ConversationRelayPromptResult> {
+    await this.createVoiceEvent({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: 'assistant_response',
+        role: 'assistant',
+        content,
+        metadata: this.toJsonObject({
+          transport: 'conversation-relay',
+          appointmentTool: true,
+        }),
+      },
+    });
+    return { type: 'text', content, language };
+  }
+
+  private async storePendingVoiceAppointment(
+    call: VoiceCallWithEvents,
+    action?: AppointmentActionDto,
+  ): Promise<void> {
+    const metadata = this.toRecord(call.metadata);
+    const next = { ...metadata };
+    if (action) {
+      next.voiceAppointmentPending = this.cryptoService.encrypt(
+        JSON.stringify(action),
+      );
+    } else {
+      delete next.voiceAppointmentPending;
+    }
+    await this.prisma.voiceCall.update({
+      where: { id: call.id },
+      data: { metadata: this.toJsonObject(next) },
+    });
+  }
+
+  private decryptAppointmentAction(
+    encrypted: string,
+  ): AppointmentActionDto | undefined {
+    try {
+      const value = JSON.parse(
+        this.cryptoService.decrypt(encrypted),
+      ) as AppointmentActionDto;
+      return value.action === AppointmentActionTypeDto.book ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private filterVoiceKnowledge<T extends { content: string; score: number }>(
+    candidates: T[],
+  ): T[] {
+    const minimumScore = this.configService.get<number>(
+      'VOICE_RAG_MIN_SIMILARITY_SCORE',
+      0.35,
+    );
+    let remainingCharacters = this.configService.get<number>(
+      'VOICE_RAG_MAX_CONTEXT_CHARACTERS',
+      6000,
+    );
+    const accepted: T[] = [];
+    for (const candidate of candidates) {
+      if (candidate.score < minimumScore || remainingCharacters <= 0) continue;
+      const content = candidate.content.slice(0, remainingCharacters);
+      if (!content.trim()) continue;
+      accepted.push({ ...candidate, content });
+      remainingCharacters -= content.length;
+    }
+    return accepted.slice(0, 5);
+  }
+
+  private buildVoiceRetrievalQuery(
+    call: VoiceCallWithEvents,
+    currentMessage: string,
+  ): string {
+    const priorCallerTurns = call.events
+      .flatMap((event) => {
+        const eventContent = this.readVoiceEventContent(event)?.trim();
+        return event.role === 'caller' &&
+          ['transcript', 'stt_final'].includes(event.type) &&
+          eventContent
+          ? [eventContent]
+          : [];
+      })
+      .slice(-2);
+    return [...priorCallerTurns, currentMessage.trim()].join('\n').slice(-1500);
+  }
+
+  private buildVoiceChatHistory(
+    call: VoiceCallWithEvents,
+  ): ChatHistoryMessage[] {
+    return call.events
+      .flatMap((event) => {
+        const eventContent = this.readVoiceEventContent(event)?.trim();
+        return eventContent &&
+          (event.role === 'caller' || event.role === 'assistant')
+          ? [
+              {
+                role:
+                  event.role === 'assistant'
+                    ? ('assistant' as const)
+                    : ('user' as const),
+                content: eventContent,
+              },
+            ]
+          : [];
+      })
+      .slice(-10);
+  }
+
+  private throwIfAborted(signal: AbortSignal): void {
+    if (signal.aborted) throw this.abortError(signal.reason);
+  }
+
+  private abortError(reason?: unknown): Error {
+    const error = new Error(
+      typeof reason === 'string' ? reason : 'Voice generation aborted',
+    );
+    error.name = 'AbortError';
+    return error;
   }
 
   private readAppointmentAction(
@@ -1883,17 +2419,19 @@ export class VoiceReceptionistService {
     currentMessage: string,
   ): string {
     const history = call.events
-      .filter(
-        (event) =>
-          event.content &&
-          ['caller', 'assistant', 'agent'].includes(event.role) &&
-          ['transcript', 'assistant_response'].includes(event.type),
-      )
-      .slice(-10)
-      .map((event) => {
+      .flatMap((event) => {
+        const eventContent = this.readVoiceEventContent(event);
+        if (
+          !eventContent ||
+          !['caller', 'assistant', 'agent'].includes(event.role) ||
+          !['transcript', 'assistant_response'].includes(event.type)
+        ) {
+          return [];
+        }
         const speaker = event.role === 'caller' ? 'Caller' : 'Receptionist';
-        return `${speaker}: ${event.content}`;
+        return [`${speaker}: ${eventContent}`];
       })
+      .slice(-10)
       .join('\n')
       .slice(-3500);
     return history
@@ -1906,13 +2444,14 @@ export class VoiceReceptionistService {
     call: VoiceCallWithEvents,
   ): Promise<string> {
     const transcript = call.events
-      .filter(
-        (event) =>
-          event.content &&
-          ['caller', 'assistant', 'agent'].includes(event.role),
-      )
+      .flatMap((event) => {
+        const eventContent = this.readVoiceEventContent(event);
+        return eventContent &&
+          ['caller', 'assistant', 'agent'].includes(event.role)
+          ? [`${event.role}: ${eventContent}`]
+          : [];
+      })
       .slice(-12)
-      .map((event) => `${event.role}: ${event.content}`)
       .join('\n');
     const fallback = transcript
       ? transcript.slice(0, 700)
@@ -1970,11 +2509,12 @@ export class VoiceReceptionistService {
       data: {
         status: 'transferred',
         assignedAgentId: agent.userId,
-        summary,
+        summary: null,
+        summaryEncrypted: this.cryptoService.encrypt(summary),
         lastEventAt: new Date(),
       },
     });
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId: config.organizationId,
         callId: call.id,
@@ -1984,7 +2524,7 @@ export class VoiceReceptionistService {
         metadata: this.toJsonObject({
           transport: 'browser',
           assignedAgentId: agent.userId,
-          summary,
+          summaryProtected: true,
         }),
       },
     });
@@ -2194,7 +2734,7 @@ export class VoiceReceptionistService {
     content: string,
     action: VoiceProviderActionResult | { provider: 'mock'; status: string },
   ) {
-    await this.prisma.voiceCallEvent.create({
+    await this.createVoiceEvent({
       data: {
         organizationId,
         callId,
@@ -2845,6 +3385,11 @@ export class VoiceReceptionistService {
   private toCallResponse(call: VoiceCallWithEvents) {
     return {
       ...call,
+      recordingUrl:
+        call.recordingUrl || call.recordingUrlEncrypted ? 'protected' : null,
+      recordingUrlEncrypted: undefined,
+      summary: this.readVoiceCallSummary(call),
+      summaryEncrypted: undefined,
       metadata: this.toRecord(call.metadata),
       events: call.events.map((event) => this.toEventResponse(event)),
     };
@@ -2853,8 +3398,57 @@ export class VoiceReceptionistService {
   private toEventResponse(event: VoiceCallWithEvents['events'][number]) {
     return {
       ...event,
+      content: this.readVoiceEventContent(event),
+      contentEncrypted: undefined,
+      audioUrl: null,
+      audioUrlEncrypted: undefined,
       metadata: this.toRecord(event.metadata),
     };
+  }
+
+  private async createVoiceEvent(args: {
+    data: Prisma.VoiceCallEventUncheckedCreateInput;
+  }): Promise<Prisma.VoiceCallEventGetPayload<object>> {
+    const content =
+      typeof args.data.content === 'string' ? args.data.content : null;
+    const shouldEncrypt =
+      Boolean(content) &&
+      ['caller', 'assistant', 'agent'].includes(args.data.role ?? 'system');
+    const created = await this.prisma.voiceCallEvent.create({
+      data: shouldEncrypt
+        ? {
+            ...args.data,
+            content: null,
+            contentEncrypted: this.cryptoService.encrypt(content!),
+          }
+        : args.data,
+    });
+    return shouldEncrypt ? { ...created, content } : created;
+  }
+
+  private readVoiceEventContent(
+    event: Pick<
+      VoiceCallWithEvents['events'][number],
+      'content' | 'contentEncrypted'
+    >,
+  ): string | null {
+    if (!event.contentEncrypted) return event.content;
+    try {
+      return this.cryptoService.decrypt(event.contentEncrypted);
+    } catch {
+      return null;
+    }
+  }
+
+  private readVoiceCallSummary(
+    call: Pick<VoiceCallWithEvents, 'summary' | 'summaryEncrypted'>,
+  ): string | null {
+    if (!call.summaryEncrypted) return call.summary;
+    try {
+      return this.cryptoService.decrypt(call.summaryEncrypted);
+    } catch {
+      return null;
+    }
   }
 
   private createSystemUser(organizationId: string): AuthenticatedUser {

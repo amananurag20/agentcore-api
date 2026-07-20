@@ -69,6 +69,11 @@ export interface KnowledgeSearchRow {
   embeddingProvider: string | null;
 }
 
+export interface KnowledgeSearchClearanceDiagnostics {
+  effectiveClearance: number;
+  excludedChunkCount: number;
+}
+
 @Injectable()
 export class KnowledgeService {
   constructor(
@@ -951,6 +956,7 @@ export class KnowledgeService {
   async search(
     currentUser: AuthenticatedUser,
     input: SearchKnowledgeDto,
+    signal?: AbortSignal,
   ): Promise<KnowledgeSearchRow[]> {
     if (input.sourceId) {
       await this.findSourceForActor(currentUser, input.sourceId);
@@ -959,6 +965,7 @@ export class KnowledgeService {
     const embedding = await this.embeddingsService.embedText({
       organizationId: currentUser.orgId,
       text: input.query,
+      signal,
     });
     if (embedding.isFallback) {
       throw new ServiceUnavailableException(
@@ -1010,6 +1017,36 @@ export class KnowledgeService {
       ORDER BY "embedding" <=> ${toPgVector(embedding.vector)}::vector
       LIMIT ${limit}
     `;
+  }
+
+  async getSearchClearanceDiagnostics(
+    currentUser: AuthenticatedUser,
+    input: SearchKnowledgeDto,
+  ): Promise<KnowledgeSearchClearanceDiagnostics> {
+    const effectiveClearance = input.productKey
+      ? this.policyService.getEffectiveClearance(currentUser, input.productKey)
+      : (currentUser.clearanceLevel ?? 0);
+    const folderIds = input.folderIds?.length
+      ? await this.expandFolderIdsForSearch(currentUser.orgId, input.folderIds)
+      : [];
+    const excludedChunkCount = await this.prisma.knowledgeChunk.count({
+      where: {
+        organizationId: currentUser.orgId,
+        sensitivityLevel: { gt: effectiveClearance },
+        isQuarantined: false,
+        embeddingModel: { not: null },
+        embeddingProvider: { not: null },
+        ...(input.sourceId ? { sourceId: input.sourceId } : {}),
+        ...(input.productKey
+          ? { productVisibility: { has: input.productKey } }
+          : {}),
+        ...(folderIds.length
+          ? { source: { is: { folderId: { in: folderIds } } } }
+          : {}),
+      },
+    });
+
+    return { effectiveClearance, excludedChunkCount };
   }
 
   private async expandFolderIdsForSearch(

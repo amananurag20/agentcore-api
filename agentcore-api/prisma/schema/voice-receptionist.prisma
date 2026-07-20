@@ -1,29 +1,50 @@
 model VoiceReceptionistConfig {
-  id                          String            @id @default(uuid())
-  organizationId              String            @map("organization_id")
-  organization                Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  provider                    VoiceProviderType @default(twilio)
-  status                      VoiceConfigStatus @default(active)
+  id                          String             @id @default(uuid())
+  organizationId              String             @map("organization_id")
+  organization                Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  provider                    VoiceProviderType  @default(twilio)
+  status                      VoiceConfigStatus  @default(active)
   name                        String
-  phoneNumber                 String?           @map("phone_number")
-  sipDomain                   String?           @map("sip_domain")
-  webhookVerifyTokenEncrypted String?           @map("webhook_verify_token_encrypted")
-  apiKeyEncrypted             String?           @map("api_key_encrypted")
-  sttProvider                 String?           @map("stt_provider")
-  sttModel                    String?           @map("stt_model")
-  ttsProvider                 String?           @map("tts_provider")
-  ttsVoice                    String?           @map("tts_voice")
-  defaultLocale               String            @default("en") @map("default_locale")
-  transferPhoneNumber         String?           @map("transfer_phone_number")
-  voicemailEnabled            Boolean           @default(true) @map("voicemail_enabled")
-  settings                    Json              @default("{}")
+  phoneNumber                 String?            @map("phone_number")
+  sipDomain                   String?            @map("sip_domain")
+  webhookVerifyTokenEncrypted String?            @map("webhook_verify_token_encrypted")
+  apiKeyEncrypted             String?            @map("api_key_encrypted")
+  sttProvider                 String?            @map("stt_provider")
+  sttModel                    String?            @map("stt_model")
+  ttsProvider                 String?            @map("tts_provider")
+  ttsVoice                    String?            @map("tts_voice")
+  defaultLocale               String             @default("en") @map("default_locale")
+  transferPhoneNumber         String?            @map("transfer_phone_number")
+  voicemailEnabled            Boolean            @default(true) @map("voicemail_enabled")
+  settings                    Json               @default("{}")
   calls                       VoiceCall[]
-  createdAt                   DateTime          @default(now()) @map("created_at")
-  updatedAt                   DateTime          @updatedAt @map("updated_at")
+  relayTickets                VoiceRelayTicket[]
+  createdAt                   DateTime           @default(now()) @map("created_at")
+  updatedAt                   DateTime           @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
   @@index([phoneNumber])
   @@map("voice_receptionist_configs")
+}
+
+model VoiceRelayTicket {
+  id             String                  @id @default(uuid())
+  organizationId String                  @map("organization_id")
+  organization   Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  configId       String                  @map("config_id")
+  config         VoiceReceptionistConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  providerCallId String                  @map("provider_call_id")
+  nonceHash      String                  @unique @map("nonce_hash")
+  expiresAt      DateTime                @map("expires_at")
+  connectionId   String?                 @map("connection_id")
+  claimedAt      DateTime?               @map("claimed_at")
+  claimCount     Int                     @default(0) @map("claim_count")
+  createdAt      DateTime                @default(now()) @map("created_at")
+
+  @@index([configId, expiresAt])
+  @@index([providerCallId])
+  @@unique([configId, providerCallId])
+  @@map("voice_relay_tickets")
 }
 
 model VoiceCall {
@@ -45,9 +66,11 @@ model VoiceCall {
   durationSeconds          Int?                    @map("duration_seconds")
   recordingSid             String?                 @map("recording_sid")
   recordingUrl             String?                 @map("recording_url")
+  recordingUrlEncrypted    String?                 @db.Text @map("recording_url_encrypted")
   recordingDurationSeconds Int?                    @map("recording_duration_seconds")
   lastEventAt              DateTime                @default(now()) @map("last_event_at")
   summary                  String?
+  summaryEncrypted         String?                 @db.Text @map("summary_encrypted")
   metadata                 Json                    @default("{}")
   events                   VoiceCallEvent[]
   createdAt                DateTime                @default(now()) @map("created_at")
@@ -71,8 +94,10 @@ model VoiceCallEvent {
   type           VoiceCallEventType
   role           String             @default("system")
   content        String?
+  contentEncrypted String?            @db.Text @map("content_encrypted")
   confidence     Float?
   audioUrl       String?            @map("audio_url")
+  audioUrlEncrypted String?         @db.Text @map("audio_url_encrypted")
   metadata       Json               @default("{}")
   createdAt      DateTime           @default(now()) @map("created_at")
 

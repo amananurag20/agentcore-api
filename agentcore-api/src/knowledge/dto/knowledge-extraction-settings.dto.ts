@@ -56,10 +56,14 @@ export class CreateKnowledgeOcrProviderDto {
   @IsOptional()
   status?: 'active' | 'inactive';
 
-  @ApiProperty({ example: 'http://ocr-tesseract:8080/ocr' })
+  @ApiPropertyOptional({
+    description:
+      'Required for custom and Azure providers. AWS, Google, and local Tesseract use native adapters.',
+  })
   @IsUrl({ require_tld: false, protocols: ['http', 'https'] })
   @MaxLength(2048)
-  endpoint: string;
+  @IsOptional()
+  endpoint?: string;
 
   @ApiPropertyOptional({ description: 'Write-only provider credential.' })
   @IsString()

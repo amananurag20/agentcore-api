@@ -22,7 +22,8 @@ export class TextChunkerService {
     let cursor = 0;
 
     while (cursor < text.length) {
-      const end = Math.min(cursor + this.chunkSize, text.length);
+      const hardEnd = Math.min(cursor + this.chunkSize, text.length);
+      const end = this.findBoundary(text, cursor, hardEnd);
       const content = text.slice(cursor, end).trim();
 
       if (content) {
@@ -38,8 +39,23 @@ export class TextChunkerService {
       }
 
       cursor = Math.max(end - this.overlapSize, cursor + 1);
+      while (cursor > 0 && cursor < text.length && !/\s/.test(text[cursor])) {
+        cursor -= 1;
+      }
     }
 
     return chunks;
+  }
+
+  private findBoundary(text: string, start: number, hardEnd: number): number {
+    if (hardEnd === text.length) return hardEnd;
+    const minimumEnd = Math.min(
+      hardEnd,
+      start + Math.floor(this.chunkSize * 0.7),
+    );
+    for (let index = hardEnd; index >= minimumEnd; index -= 1) {
+      if (/\s/.test(text[index] ?? '')) return index;
+    }
+    return hardEnd;
   }
 }

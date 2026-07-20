@@ -46,4 +46,43 @@ describe('AppointmentReminderDeliveryService templates', () => {
     expect(content.message).toContain('Hi Ada, 2 seats for Consultation');
     expect(content.emailSubject).toBe('Upcoming Consultation');
   });
+
+  it('does not send transactional waitlist messages through opted-out channels', async () => {
+    const prisma = {
+      appointmentReminderSuppression: {
+        findMany: jest.fn().mockResolvedValue([
+          { channel: 'email', contactNormalized: 'ada@example.com' },
+          { channel: 'sms', contactNormalized: '+15551234567' },
+        ]),
+      },
+    };
+    const service = new AppointmentReminderDeliveryService(
+      {
+        get: jest.fn((key: string) =>
+          key === 'RESEND_API_KEY' || key === 'APPOINTMENT_EMAIL_FROM'
+            ? 'configured'
+            : undefined,
+        ),
+      } as never,
+      {} as never,
+      prisma as never,
+    );
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn();
+
+    try {
+      await expect(
+        service.deliverTransactional({
+          organizationId: 'org-1',
+          email: 'Ada@Example.com',
+          phone: '+15551234567',
+          subject: 'Waitlist offer',
+          message: 'A slot is available',
+        }),
+      ).resolves.toEqual([]);
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
 });

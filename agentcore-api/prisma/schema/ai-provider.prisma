@@ -21,6 +21,7 @@ model AIProviderConfig {
   validationLatency Int?                        @map("validation_latency_ms")
   validationError   String?                     @map("validation_error")
   validatedModels   Json                        @default("[]") @map("validated_models")
+  deletedAt         DateTime?                   @map("deleted_at")
   createdAt         DateTime                    @default(now()) @map("created_at")
   updatedAt         DateTime                    @updatedAt @map("updated_at")
 
@@ -34,7 +35,7 @@ model AIProviderUsageDaily {
   organizationId      String           @map("organization_id")
   organization        Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   providerConfigId    String           @map("provider_config_id")
-  providerConfig      AIProviderConfig @relation(fields: [providerConfigId], references: [id], onDelete: Cascade)
+  providerConfig      AIProviderConfig @relation(fields: [providerConfigId], references: [id], onDelete: Restrict)
   usageDate           DateTime         @map("usage_date") @db.Date
   capability          String
   model               String

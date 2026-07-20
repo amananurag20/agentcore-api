@@ -10,6 +10,7 @@ import { KnowledgeClassificationService } from './knowledge-classification.servi
 import { KnowledgeIngestionQueueService } from './knowledge-ingestion-queue.service';
 import { KnowledgeIngestionService } from './knowledge-ingestion.service';
 import { KnowledgeOcrService } from './knowledge-ocr.service';
+import { OcrEndpointPolicyService } from './ocr-endpoint-policy.service';
 import { TextChunkerService } from './text-chunker.service';
 import { UrlScraperService } from './url-scraper.service';
 
@@ -28,6 +29,7 @@ import { UrlScraperService } from './url-scraper.service';
     KnowledgeIngestionQueueService,
     KnowledgeIngestionService,
     KnowledgeOcrService,
+    OcrEndpointPolicyService,
     TextChunkerService,
     UrlScraperService,
   ],
@@ -36,6 +38,7 @@ import { UrlScraperService } from './url-scraper.service';
     KnowledgeIngestionQueueService,
     KnowledgeIngestionService,
     KnowledgeOcrService,
+    OcrEndpointPolicyService,
   ],
 })
 export class KnowledgeIngestionModule {}

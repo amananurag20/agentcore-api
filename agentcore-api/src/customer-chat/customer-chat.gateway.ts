@@ -9,7 +9,7 @@ import { HttpAdapterHost } from '@nestjs/core';
 import { randomUUID } from 'node:crypto';
 import { IncomingMessage, Server as HttpServer } from 'node:http';
 import type { Subscription } from 'rxjs';
-import { Server as SocketIOServer, Socket } from 'socket.io';
+import { DefaultEventsMap, Server as SocketIOServer, Socket } from 'socket.io';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { CustomerChatRealtimeService } from './customer-chat-realtime.service';
 import { CustomerChatService } from './customer-chat.service';
@@ -35,11 +35,23 @@ type SocketSession = {
   realtimeSubscription?: Subscription;
 };
 
-type AuthenticatedSocket = Socket & {
-  data: Socket['data'] & {
-    customerChatSession?: SocketSession;
-  };
+type CustomerChatSocketData = {
+  customerChatSession?: SocketSession;
 };
+
+type AuthenticatedSocket = Socket<
+  DefaultEventsMap,
+  DefaultEventsMap,
+  DefaultEventsMap,
+  CustomerChatSocketData
+>;
+
+type CustomerChatSocketServer = SocketIOServer<
+  DefaultEventsMap,
+  DefaultEventsMap,
+  DefaultEventsMap,
+  CustomerChatSocketData
+>;
 
 @Injectable()
 export class CustomerChatGateway
@@ -48,7 +60,7 @@ export class CustomerChatGateway
   private readonly logger = new Logger(CustomerChatGateway.name);
   private readonly sessions = new Map<string, SocketSession>();
   private readonly connectionsByConversation = new Map<string, number>();
-  private server?: SocketIOServer;
+  private server?: CustomerChatSocketServer;
 
   constructor(
     private readonly configService: ConfigService,
@@ -65,7 +77,12 @@ export class CustomerChatGateway
       'CUSTOMER_CHAT_WS_HEARTBEAT_MS',
       25000,
     );
-    this.server = new SocketIOServer(httpServer, {
+    this.server = new SocketIOServer<
+      DefaultEventsMap,
+      DefaultEventsMap,
+      DefaultEventsMap,
+      CustomerChatSocketData
+    >(httpServer, {
       path: '/api/v1/customer-chat/widget/socket.io',
       serveClient: true,
       transports: ['websocket'],
@@ -84,10 +101,12 @@ export class CustomerChatGateway
       },
     });
     this.server.use((socket, next) => {
-      void this.authenticate(socket as AuthenticatedSocket)
+      void this.authenticate(socket)
         .then(() => next())
         .catch((error: unknown) => {
-          const authError = new Error(this.publicErrorMessage(error)) as Error & {
+          const authError = new Error(
+            this.publicErrorMessage(error),
+          ) as Error & {
             data?: Record<string, string>;
           };
           authError.data = {
@@ -97,16 +116,14 @@ export class CustomerChatGateway
           next(authError);
         });
     });
-    this.server.on('connection', (socket) =>
-      this.openSession(socket as AuthenticatedSocket),
-    );
+    this.server.on('connection', (socket) => this.openSession(socket));
   }
 
   onApplicationShutdown(): void {
     for (const socket of this.server?.sockets.sockets.values() ?? []) {
       socket.disconnect(true);
     }
-    this.server?.close();
+    void this.server?.close();
     this.server = undefined;
   }
 
@@ -297,6 +314,12 @@ export class CustomerChatGateway
       );
       if (abortController.signal.aborted) {
         socket.emit('message.cancelled', { clientMessageId });
+      } else if (!result.assistantMessage) {
+        socket.emit('message.discarded', {
+          clientMessageId,
+          reason: 'generation_superseded',
+          conversation: result.conversation,
+        });
       } else {
         socket.emit('message.completed', { clientMessageId, result });
       }

@@ -38,6 +38,7 @@ export interface AIEmbeddingRequest {
   baseUrl?: string | null;
   model: string;
   text: string;
+  signal?: AbortSignal;
 }
 
 export interface AIEmbeddingResponse {

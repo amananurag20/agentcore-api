@@ -2,8 +2,8 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
@@ -15,8 +15,9 @@ import { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
-import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-ingestion.service';
 import { ProviderEndpointPolicyService } from '../ai/provider-endpoint-policy.service';
+import { AIAdapterRegistryService } from '../ai/adapters/ai-adapter-registry.service';
+import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { CreateAIProviderDto } from './dto/create-ai-provider.dto';
 import { UpdateAIProviderDto } from './dto/update-ai-provider.dto';
 
@@ -31,17 +32,16 @@ type SafeAIProviderConfig = Omit<
 
 @Injectable()
 export class AIProvidersService {
-  private readonly logger = new Logger(AIProvidersService.name);
-
   constructor(
     private readonly auditService: AuditService,
     private readonly aiUsageService: AIUsageService,
     private readonly configService: ConfigService,
     private readonly cryptoService: CryptoService,
     private readonly ingestionQueue: KnowledgeIngestionQueueService,
-    private readonly ingestionService: KnowledgeIngestionService,
     private readonly prisma: PrismaService,
     private readonly endpointPolicy: ProviderEndpointPolicyService,
+    private readonly adapterRegistry: AIAdapterRegistryService,
+    private readonly rateLimit: RateLimitService,
   ) {}
 
   async list(
@@ -53,7 +53,7 @@ export class AIProvidersService {
       requestedOrganizationId,
     );
     const configs = await this.prisma.aIProviderConfig.findMany({
-      where: { organizationId },
+      where: { organizationId, deletedAt: null },
       orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }],
     });
     const summaries = await this.aiUsageService.summarizeMany(configs);
@@ -78,7 +78,7 @@ export class AIProvidersService {
       settings: input.settings ?? {},
     });
     const providerCount = await this.prisma.aIProviderConfig.count({
-      where: { organizationId },
+      where: { organizationId, deletedAt: null },
     });
     const previousEmbeddingConfig =
       await this.findActiveEmbeddingConfig(organizationId);
@@ -135,8 +135,16 @@ export class AIProvidersService {
   async validate(currentUser: AuthenticatedUser, id: string) {
     const config = await this.findConfigForActor(currentUser, id);
     const startedAt = Date.now();
+    await this.rateLimit.consume(
+      `ai-provider-test:${config.organizationId}:${currentUser.sub}:${id}`,
+      this.configService.get<number>('AI_PROVIDER_TEST_RATE_LIMIT') ?? 10,
+      this.configService.get<number>('AI_PROVIDER_TEST_RATE_WINDOW_SECONDS') ??
+        60,
+      'Too many AI provider tests. Please wait before trying again.',
+    );
 
     try {
+      await this.endpointPolicy.assertProviderAllowed(config);
       const result = await this.validateProvider(config);
       const updated = await this.prisma.aIProviderConfig.update({
         where: { id },
@@ -192,8 +200,9 @@ export class AIProvidersService {
       existing.organizationId,
     );
     const config = await this.prisma.$transaction(async (client) => {
+      await client.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${existing.organizationId}))`;
       await client.aIProviderConfig.updateMany({
-        where: { organizationId: existing.organizationId },
+        where: { organizationId: existing.organizationId, deletedAt: null },
         data: { priority: 100 },
       });
       return client.aIProviderConfig.update({
@@ -351,7 +360,15 @@ export class AIProvidersService {
     const previousEmbeddingConfig = await this.findActiveEmbeddingConfig(
       config.organizationId,
     );
-    await this.prisma.aIProviderConfig.delete({ where: { id } });
+    await this.prisma.aIProviderConfig.update({
+      where: { id },
+      data: {
+        deletedAt: new Date(),
+        status: 'inactive',
+        priority: 100,
+        apiKeyEncrypted: null,
+      },
+    });
 
     await this.auditService.record({
       actor: currentUser,
@@ -377,8 +394,8 @@ export class AIProvidersService {
     currentUser: AuthenticatedUser,
     id: string,
   ): Promise<AIProviderConfig> {
-    const config = await this.prisma.aIProviderConfig.findUnique({
-      where: { id },
+    const config = await this.prisma.aIProviderConfig.findFirst({
+      where: { id, deletedAt: null },
     });
 
     if (!config) {
@@ -431,6 +448,7 @@ export class AIProvidersService {
           status: 'active',
           validationStatus: 'verified',
           embeddingModel: { not: null },
+          deletedAt: null,
         },
       });
     }
@@ -440,6 +458,7 @@ export class AIProvidersService {
         status: 'active',
         validationStatus: 'verified',
         embeddingModel: { not: null },
+        deletedAt: null,
       },
       orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }],
     });
@@ -458,52 +477,24 @@ export class AIProvidersService {
       return;
     }
 
-    if (this.ingestionQueue.isEnabled()) {
-      const fingerprint = createHash('sha256')
-        .update(`${this.embeddingSpaceIdentity(activeConfig)}:${Date.now()}`)
-        .digest('hex')
-        .slice(0, 16);
-      await this.ingestionQueue.enqueueOrganizationReembedding({
-        organizationId,
-        fingerprint,
-        reason: 'embedding_model_changed',
-      });
-      return;
-    }
-
-    this.logger.warn(
-      `Redis is disabled; re-embedding organization ${organizationId} in bounded local batches`,
-    );
-    while (true) {
-      const sources = await this.prisma.knowledgeSource.findMany({
+    if (!this.ingestionQueue.isEnabled()) {
+      const indexedSources = await this.prisma.knowledgeSource.count({
         where: { organizationId, status: 'ready' },
-        select: { id: true },
-        orderBy: { id: 'asc' },
-        take: 10,
       });
-      if (sources.length === 0) return;
-      for (const source of sources) {
-        await this.prisma.knowledgeSource.update({
-          where: { id: source.id },
-          data: { status: 'pending', errorMessage: null },
-        });
-        try {
-          await this.ingestionService.ingestSource({
-            organizationId,
-            sourceId: source.id,
-            reason: 'embedding_model_changed' as const,
-          });
-        } catch (error) {
-          await this.prisma.knowledgeSource.update({
-            where: { id: source.id },
-            data: {
-              status: 'failed',
-              errorMessage: `Knowledge re-embedding failed: ${this.toErrorMessage(error)}`,
-            },
-          });
-        }
-      }
+      if (indexedSources === 0) return;
+      throw new ServiceUnavailableException(
+        'Redis must be available to schedule knowledge re-embedding',
+      );
     }
+    const fingerprint = createHash('sha256')
+      .update(`${this.embeddingSpaceIdentity(activeConfig)}:${Date.now()}`)
+      .digest('hex')
+      .slice(0, 16);
+    await this.ingestionQueue.enqueueOrganizationReembedding({
+      organizationId,
+      fingerprint,
+      reason: 'embedding_model_changed',
+    });
   }
 
   private embeddingSpaceIdentity(config: AIProviderConfig | null): string {
@@ -603,6 +594,7 @@ export class AIProvidersService {
           `Provider returned ${response.status}: ${await this.providerError(response)}`,
         );
       }
+      await this.verifyEmbeddingDimensions(config, apiKey);
       return { models: [config.chatModel] };
     }
 
@@ -656,7 +648,35 @@ export class AIProvidersService {
         `Credentials are valid, but configured model access was not found: ${missingModels.join(', ')}`,
       );
     }
+    await this.verifyEmbeddingDimensions(config, apiKey);
     return { models: availableModels.slice(0, 200) };
+  }
+
+  private async verifyEmbeddingDimensions(
+    config: AIProviderConfig,
+    apiKey?: string,
+  ): Promise<void> {
+    if (!config.embeddingModel) return;
+    const adapter = this.adapterRegistry.getAdapter(config);
+    if (!adapter.createEmbedding) {
+      throw new Error('Configured provider does not support embeddings');
+    }
+    const result = await adapter.createEmbedding({
+      apiKey,
+      baseUrl: config.baseUrl,
+      model: config.embeddingModel,
+      text: 'AgentCore embedding dimension verification',
+    });
+    const expected =
+      this.configService.get<number>('DEFAULT_EMBEDDING_DIMENSIONS') ?? 1536;
+    if (
+      result.vector.length !== expected ||
+      result.vector.some((value) => !Number.isFinite(value))
+    ) {
+      throw new Error(
+        `Embedding model returned ${result.vector.length} dimensions; the knowledge index requires ${expected}`,
+      );
+    }
   }
 
   private validBaseUrl(value: string): string {

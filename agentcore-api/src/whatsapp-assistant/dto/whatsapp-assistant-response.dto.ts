@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   WhatsAppConfigStatusDto,
+  WhatsAppConsentStatusDto,
   WhatsAppConversationStatusDto,
   WhatsAppMessageTypeDto,
   WhatsAppProviderTypeDto,
@@ -156,6 +157,18 @@ export class WhatsAppConversationResponseDto {
 
   @ApiPropertyOptional()
   assignedAgentId?: string | null;
+
+  @ApiProperty({ enum: WhatsAppConsentStatusDto })
+  consentStatus: WhatsAppConsentStatusDto;
+
+  @ApiPropertyOptional()
+  consentSource?: string | null;
+
+  @ApiPropertyOptional()
+  consentedAt?: Date | null;
+
+  @ApiPropertyOptional()
+  optedOutAt?: Date | null;
 
   @ApiPropertyOptional()
   sessionExpiresAt?: Date | null;

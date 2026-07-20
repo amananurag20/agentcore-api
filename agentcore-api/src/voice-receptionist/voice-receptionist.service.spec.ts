@@ -11,8 +11,16 @@ import { VoiceReceptionistService } from './voice-receptionist.service';
 type TestableVoiceService = {
   authorizeConversationRelay(
     configId: string,
-    signature: string | undefined,
-  ): Promise<VoiceReceptionistConfig>;
+    relayToken: string | undefined,
+    connectionId: string,
+  ): Promise<{ config: VoiceReceptionistConfig; expectedCallSid: string }>;
+  createConversationRelayTicket(
+    config: VoiceReceptionistConfig,
+    callSid: string,
+  ): Promise<string>;
+  createVoiceEvent(args: {
+    data: Record<string, unknown>;
+  }): Promise<Record<string, unknown>>;
   evaluateBusinessHours(config: VoiceReceptionistConfig): { isOpen: boolean };
   assertWebhookSignature(
     config: VoiceReceptionistConfig,
@@ -57,13 +65,23 @@ describe('VoiceReceptionistService hardening', () => {
     updatedAt: new Date('2026-01-01T00:00:00Z'),
   } as VoiceReceptionistConfig;
 
-  function createService(values: Record<string, unknown> = {}) {
+  function createService(
+    values: Record<string, unknown> = {},
+    onEventPersist?: (data: Record<string, unknown>) => void,
+  ) {
     const configService = {
       get: jest.fn(
         (key: string, fallback?: unknown) => values[key] ?? fallback,
       ),
     } as unknown as ConfigService;
-    const cryptoService = { decrypt: jest.fn(() => secret) };
+    const cryptoService = {
+      decrypt: jest.fn((value: string) =>
+        value.startsWith('encrypted:')
+          ? value.slice('encrypted:'.length)
+          : secret,
+      ),
+      encrypt: jest.fn((value: string) => `encrypted:${value}`),
+    };
     const outboundService = {
       getConversationRelayUrl: jest.fn(
         () =>
@@ -76,6 +94,17 @@ describe('VoiceReceptionistService hardening', () => {
       },
       organizationProduct: {
         findFirst: jest.fn().mockResolvedValue({ id: 'product-1' }),
+      },
+      voiceRelayTicket: {
+        upsert: jest.fn().mockResolvedValue({ id: 'ticket-1' }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      voiceCallEvent: {
+        create: jest.fn((args: { data: Record<string, unknown> }) => {
+          onEventPersist?.(args.data);
+          return Promise.resolve({ id: 'event-1', ...args.data });
+        }),
       },
     };
     return new VoiceReceptionistService(
@@ -184,22 +213,24 @@ describe('VoiceReceptionistService hardening', () => {
     ).not.toThrow();
   });
 
-  it('fails closed and accepts only the signed ConversationRelay WebSocket URL', async () => {
+  it('requires a per-call relay ticket and binds it to the expected CallSid', async () => {
     const service = createService({
-      VOICE_WEBHOOK_SIGNATURE_REQUIRED: true,
+      AI_CONFIG_ENCRYPTION_KEY: 'x'.repeat(32),
     });
     await expect(
-      service.authorizeConversationRelay('config-1', undefined),
+      service.authorizeConversationRelay('config-1', undefined, 'socket-1'),
     ).rejects.toThrow(ForbiddenException);
 
-    const signature = createHmac('sha1', secret)
-      .update(
-        'wss://voice.example.com/api/v1/voice-receptionist/stream/config-1',
-      )
-      .digest('base64');
+    const ticket = await service.createConversationRelayTicket(
+      baseConfig,
+      'CA123',
+    );
     await expect(
-      service.authorizeConversationRelay('config-1', signature),
-    ).resolves.toEqual(baseConfig);
+      service.authorizeConversationRelay('config-1', ticket, 'socket-1'),
+    ).resolves.toMatchObject({
+      config: baseConfig,
+      expectedCallSid: 'CA123',
+    });
   });
 
   it('includes recent caller and receptionist turns in follow-up questions', () => {
@@ -225,5 +256,28 @@ describe('VoiceReceptionistService hardening', () => {
     expect(question).toContain('Caller: What are your hours?');
     expect(question).toContain('Receptionist: We open at nine.');
     expect(question).toContain('Caller: What about Saturday?');
+  });
+
+  it('encrypts caller and assistant transcript content before persistence', async () => {
+    let persisted: Record<string, unknown> | undefined;
+    const service = createService({}, (data) => {
+      persisted = data;
+    });
+
+    const returned = await service.createVoiceEvent({
+      data: {
+        organizationId: 'org-1',
+        callId: 'call-1',
+        type: 'transcript',
+        role: 'caller',
+        content: 'My account number is 1234',
+      },
+    });
+
+    expect(persisted).toMatchObject({
+      content: null,
+      contentEncrypted: 'encrypted:My account number is 1234',
+    });
+    expect(returned.content).toBe('My account number is 1234');
   });
 });

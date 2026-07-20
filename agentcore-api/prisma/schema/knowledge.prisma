@@ -216,7 +216,7 @@ model KnowledgeOcrProviderConfig {
   name               String
   provider           KnowledgeOcrProviderType
   status             KnowledgeOcrProviderStatus  @default(active)
-  endpoint           String
+  endpoint           String?
   apiKeyEncrypted    String?                     @map("api_key_encrypted")
   settings           Json                        @default("{}")
   primaryForConfigs  KnowledgeExtractionConfig[] @relation("PrimaryOcrProvider")

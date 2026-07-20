@@ -481,16 +481,14 @@ export class KnowledgeIngestionService {
         bucket: source.storageBucket,
         key: source.storageKey,
       });
-      if (source.malwareScanStatus === 'pending') {
-        const scan = await this.fileSecurity.scan(fileBuffer);
-        await this.prisma.knowledgeSource.update({
-          where: { id: source.id },
-          data: {
-            malwareScanStatus: scan.status,
-            malwareScanMessage: scan.message,
-          },
-        });
-      }
+      const scan = await this.fileSecurity.scan(fileBuffer);
+      await this.prisma.knowledgeSource.update({
+        where: { id: source.id },
+        data: {
+          malwareScanStatus: scan.status,
+          malwareScanMessage: scan.message,
+        },
+      });
       const extracted = await this.fileExtractor.extract({
         buffer: fileBuffer,
         fileName: source.fileName,

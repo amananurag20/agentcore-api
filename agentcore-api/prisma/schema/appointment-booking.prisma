@@ -181,6 +181,8 @@ model AppointmentBooking {
   customerPhone        String?                      @map("customer_phone")
   startAt              DateTime                     @map("start_at")
   endAt                DateTime                     @map("end_at")
+  blockedStartAt       DateTime                     @map("blocked_start_at") @ignore
+  blockedEndAt         DateTime                     @map("blocked_end_at") @ignore
   timezone             String                       @default("UTC")
   notes                String?
   cancellationReason   String?                      @map("cancellation_reason")

@@ -83,4 +83,49 @@ describe('WhatsAppMediaService', () => {
       }),
     );
   });
+
+  it('rejects a Meta CDN redirect to a non-Meta host before following it', async () => {
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            url: 'https://lookaside.fbsbx.com/whatsapp_business/attachments/1',
+            mime_type: 'image/jpeg',
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'http://169.254.169.254/latest/meta-data' },
+        }),
+      );
+    const service = new WhatsAppMediaService(
+      {} as never,
+      { get: (_key: string, fallback: unknown) => fallback } as never,
+      { decrypt: () => 'access-token' } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    await expect(
+      service.downloadStoreAndDescribe({
+        config: {
+          accessTokenEncrypted: 'encrypted',
+          phoneNumberId: 'phone-1',
+        } as WhatsAppAssistantConfig,
+        message: {
+          id: 'message-1',
+          organizationId: 'org-1',
+          type: 'image',
+          metadata: { mediaId: 'media-1' },
+        } as WhatsAppMessage,
+      }),
+    ).rejects.toThrow('invalid media URL');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

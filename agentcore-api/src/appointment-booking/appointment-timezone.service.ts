@@ -106,6 +106,26 @@ export class AppointmentTimezoneService {
     return `${this.pad(parts.hour)}:${this.pad(parts.minute)}:${this.pad(parts.second)}`;
   }
 
+  shiftWallClock(
+    occurrence: Date,
+    reference: Date,
+    requested: Date,
+    timezone: string,
+  ): Date {
+    const referenceDate = this.dateInZone(reference, timezone);
+    const requestedDate = this.dateInZone(requested, timezone);
+    const dayShift = Math.round(
+      (Date.parse(`${requestedDate}T00:00:00.000Z`) -
+        Date.parse(`${referenceDate}T00:00:00.000Z`)) /
+        (24 * 60 * 60_000),
+    );
+    return this.localToUtc(
+      this.addLocalDays(this.dateInZone(occurrence, timezone), dayShift),
+      this.timeInZone(requested, timezone),
+      timezone,
+    );
+  }
+
   private partsInZone(instant: Date, timezone: string): LocalDateTime {
     const formatter = new Intl.DateTimeFormat('en-CA', {
       timeZone: timezone,

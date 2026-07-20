@@ -10,7 +10,7 @@ import { CryptoService } from '../crypto/crypto.service';
 
 export interface WhatsAppOutboundResult {
   provider: 'mock' | 'meta' | 'twilio' | 'custom';
-  status: 'queued' | 'sent' | 'skipped';
+  status: 'queued' | 'sent' | 'skipped' | 'sending' | 'failed';
   providerMessageId?: string;
 }
 
@@ -114,6 +114,55 @@ export class WhatsAppOutboundService {
         }),
       input.link ? () => this.sendTwilioMedia(input) : undefined,
     );
+  }
+
+  async sendInteractive(input: {
+    config: WhatsAppAssistantConfig;
+    to: string;
+    interactive: Record<string, unknown>;
+  }): Promise<WhatsAppOutboundResult> {
+    return this.send(input, () =>
+      this.sendMetaMessage(input.config, input.to, {
+        type: 'interactive',
+        interactive: input.interactive,
+      }),
+    );
+  }
+
+  async markReadAndTyping(input: {
+    config: WhatsAppAssistantConfig;
+    providerMessageId: string;
+  }): Promise<void> {
+    const mode =
+      this.configService.get<'mock' | 'live'>('WHATSAPP_OUTBOUND_MODE') ??
+      'mock';
+    if (mode !== 'live' || input.config.provider !== 'meta') return;
+    const { accessToken, phoneNumberId } = this.metaMessagingCredentials(
+      input.config,
+    );
+    const response = await this.fetchWithRetry(
+      new URL(
+        `${this.graphBaseUrl()}/${encodeURIComponent(phoneNumberId)}/messages`,
+      ),
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          status: 'read',
+          message_id: input.providerMessageId,
+          typing_indicator: { type: 'text' },
+        }),
+      },
+    );
+    if (!response.ok) {
+      throw new ServiceUnavailableException(
+        `Meta read receipt failed with ${response.status}`,
+      );
+    }
   }
 
   async listMetaTemplates(

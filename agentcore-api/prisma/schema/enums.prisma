@@ -232,7 +232,16 @@ enum WhatsAppMessageType {
   document
   sticker
   location
+  interactive
+  contact
+  reaction
   unknown
+}
+
+enum WhatsAppConsentStatus {
+  unknown
+  opted_in
+  opted_out
 }
 
 enum VoiceProviderType {

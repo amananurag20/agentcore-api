@@ -166,6 +166,7 @@ export class OllamaAdapter implements AIProviderAdapter {
           prompt: input.text,
         }),
       },
+      input.signal,
     );
 
     if (!response.ok) {

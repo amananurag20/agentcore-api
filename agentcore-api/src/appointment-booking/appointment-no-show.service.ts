@@ -42,7 +42,7 @@ export class AppointmentNoShowService implements OnModuleInit, OnModuleDestroy {
     try {
       const bookings = await this.prisma.appointmentBooking.findMany({
         where: {
-          status: 'confirmed',
+          status: { in: ['pending', 'confirmed'] },
           checkedInAt: null,
           endAt: { lt: now },
         },
@@ -71,7 +71,7 @@ export class AppointmentNoShowService implements OnModuleInit, OnModuleDestroy {
         const transitioned = await this.prisma.appointmentBooking.updateMany({
           where: {
             id: booking.id,
-            status: 'confirmed',
+            status: { in: ['pending', 'confirmed'] },
             checkedInAt: null,
           },
           data: { status: 'no_show' },

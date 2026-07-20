@@ -2,8 +2,9 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
+  Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
@@ -17,6 +18,7 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CryptoService } from '../crypto/crypto.service';
 import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
 import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-ingestion.service';
+import { OcrEndpointPolicyService } from '../knowledge-ingestion/ocr-endpoint-policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CreateKnowledgeOcrProviderDto,
@@ -56,8 +58,6 @@ interface EffectiveExtractionSettings {
 
 @Injectable()
 export class KnowledgeSettingsService {
-  private readonly logger = new Logger(KnowledgeSettingsService.name);
-
   constructor(
     private readonly auditService: AuditService,
     private readonly configService: ConfigService,
@@ -65,7 +65,10 @@ export class KnowledgeSettingsService {
     private readonly ingestionQueue: KnowledgeIngestionQueueService,
     private readonly ingestionService: KnowledgeIngestionService,
     private readonly prisma: PrismaService,
-  ) {}
+    @Optional() private readonly ocrEndpointPolicy?: OcrEndpointPolicyService,
+  ) {
+    void this.ingestionService;
+  }
 
   async getExtractionSettings(
     currentUser: AuthenticatedUser,
@@ -124,6 +127,15 @@ export class KnowledgeSettingsService {
       input.embeddingProviderId,
     );
 
+    if (
+      (previous?.embeddingProviderId ?? null) !==
+      (input.embeddingProviderId === undefined
+        ? current.embeddingProviderId
+        : input.embeddingProviderId)
+    ) {
+      await this.assertReembeddingCanBeScheduled(organizationId);
+    }
+
     const data = this.settingsData(current, input);
     const config = await this.prisma.knowledgeExtractionConfig.upsert({
       where: { organizationId },
@@ -177,14 +189,17 @@ export class KnowledgeSettingsService {
       currentUser,
       input.organizationId,
     );
-    this.assertEndpointAllowed(input.endpoint);
+    this.validateOcrProviderConfiguration(input);
+    if (input.endpoint) {
+      await this.assertEndpointAllowed(input.endpoint, Boolean(input.apiKey));
+    }
     const provider = await this.prisma.knowledgeOcrProviderConfig.create({
       data: {
         organizationId,
         name: input.name.trim(),
         provider: input.provider,
         status: input.status ?? 'active',
-        endpoint: input.endpoint,
+        endpoint: input.endpoint ?? null,
         apiKeyEncrypted: input.apiKey
           ? this.cryptoService.encrypt(input.apiKey)
           : null,
@@ -221,7 +236,28 @@ export class KnowledgeSettingsService {
         'OCR providers cannot be moved between organizations',
       );
     }
-    if (input.endpoint) this.assertEndpointAllowed(input.endpoint);
+    const effectiveEndpoint =
+      input.endpoint === undefined ? existing.endpoint : input.endpoint;
+    if (effectiveEndpoint && (input.endpoint || input.apiKey !== undefined)) {
+      await this.assertEndpointAllowed(
+        effectiveEndpoint,
+        input.apiKey === undefined
+          ? Boolean(existing.apiKeyEncrypted)
+          : Boolean(input.apiKey),
+      );
+    }
+    this.validateOcrProviderConfiguration({
+      provider: input.provider ?? existing.provider,
+      endpoint:
+        input.endpoint === undefined ? existing.endpoint : input.endpoint,
+      apiKey:
+        input.apiKey === undefined
+          ? existing.apiKeyEncrypted
+            ? 'configured'
+            : undefined
+          : input.apiKey,
+      settings: input.settings ?? this.toRecord(existing.settings),
+    });
     if (input.status === 'inactive' && existing.status === 'active') {
       const selected = await this.prisma.knowledgeExtractionConfig.findFirst({
         where: {
@@ -365,13 +401,15 @@ export class KnowledgeSettingsService {
         id,
         organizationId,
         status: 'active',
+        validationStatus: 'verified',
         embeddingModel: { not: null },
+        deletedAt: null,
       },
       select: { id: true },
     });
     if (!provider) {
       throw new BadRequestException(
-        'Embedding provider must be active, include an embedding model, and belong to this workspace',
+        'Embedding provider must be active, verified, include an embedding model, and belong to this workspace',
       );
     }
   }
@@ -445,51 +483,28 @@ export class KnowledgeSettingsService {
   }
 
   private async scheduleReembedding(organizationId: string) {
-    if (this.ingestionQueue.isEnabled()) {
-      const fingerprint = createHash('sha256')
-        .update(`${organizationId}:${Date.now()}`)
-        .digest('hex')
-        .slice(0, 16);
-      await this.ingestionQueue.enqueueOrganizationReembedding({
-        organizationId,
-        fingerprint,
-        reason: 'embedding_model_changed',
-      });
-      return;
-    }
+    const fingerprint = createHash('sha256')
+      .update(`${organizationId}:${Date.now()}`)
+      .digest('hex')
+      .slice(0, 16);
+    await this.ingestionQueue.enqueueOrganizationReembedding({
+      organizationId,
+      fingerprint,
+      reason: 'embedding_model_changed',
+    });
+  }
 
-    this.logger.warn(
-      `Redis is disabled; re-indexing organization ${organizationId} in bounded local batches`,
-    );
-    while (true) {
-      const sources = await this.prisma.knowledgeSource.findMany({
-        where: { organizationId, status: 'ready' },
-        select: { id: true },
-        orderBy: { id: 'asc' },
-        take: 10,
-      });
-      if (!sources.length) return;
-      for (const source of sources) {
-        await this.prisma.knowledgeSource.update({
-          where: { id: source.id },
-          data: { status: 'pending', errorMessage: null },
-        });
-        try {
-          await this.ingestionService.ingestSource({
-            organizationId,
-            sourceId: source.id,
-            reason: 'embedding_model_changed' as const,
-          });
-        } catch (error) {
-          await this.prisma.knowledgeSource.update({
-            where: { id: source.id },
-            data: {
-              status: 'failed',
-              errorMessage: `Knowledge re-indexing failed: ${this.errorMessage(error)}`,
-            },
-          });
-        }
-      }
+  private async assertReembeddingCanBeScheduled(
+    organizationId: string,
+  ): Promise<void> {
+    if (this.ingestionQueue.isEnabled()) return;
+    const indexedSources = await this.prisma.knowledgeSource.count({
+      where: { organizationId, status: 'ready' },
+    });
+    if (indexedSources > 0) {
+      throw new ServiceUnavailableException(
+        'Redis must be available before changing the embedding provider for an indexed workspace',
+      );
     }
   }
 
@@ -534,32 +549,60 @@ export class KnowledgeSettingsService {
       : {};
   }
 
-  private errorMessage(error: unknown) {
-    return error instanceof Error ? error.message : String(error);
+  private async assertEndpointAllowed(
+    endpoint: string,
+    hasApiKey: boolean,
+  ): Promise<void> {
+    const policy =
+      this.ocrEndpointPolicy ??
+      new OcrEndpointPolicyService(this.configService);
+    await policy.assertAllowed(endpoint, hasApiKey);
   }
 
-  private assertEndpointAllowed(endpoint: string) {
-    const allowedHosts = this.configService
-      .get<string>('KNOWLEDGE_OCR_ALLOWED_HOSTS')
-      ?.split(',')
-      .map((value) => value.trim().toLowerCase())
-      .filter(Boolean);
-    if (!allowedHosts?.length) {
-      if (this.configService.get<string>('NODE_ENV') === 'production') {
-        throw new BadRequestException(
-          'OCR endpoint hosts must be allowlisted by the deployment operator',
-        );
-      }
-      return;
-    }
-    const url = new URL(endpoint);
+  private validateOcrProviderConfiguration(input: {
+    provider: string;
+    endpoint?: string | null;
+    apiKey?: string;
+    settings?: Record<string, unknown>;
+  }): void {
     if (
-      !allowedHosts.includes(url.host.toLowerCase()) &&
-      !allowedHosts.includes(url.hostname.toLowerCase())
+      (input.provider === 'custom' ||
+        input.provider === 'azure_document_intelligence') &&
+      !input.endpoint
     ) {
       throw new BadRequestException(
-        'OCR endpoint host is not allowed by the deployment policy',
+        `${input.provider} OCR requires an endpoint`,
       );
+    }
+    if (input.provider === 'azure_document_intelligence' && !input.apiKey) {
+      throw new BadRequestException(
+        'Azure Document Intelligence requires an API key',
+      );
+    }
+    if (input.provider === 'google_document_ai') {
+      const settings = input.settings ?? {};
+      for (const key of ['projectId', 'location', 'processorId']) {
+        if (typeof settings[key] !== 'string' || !settings[key]) {
+          throw new BadRequestException(
+            `Google Document AI requires settings.${key}`,
+          );
+        }
+      }
+    }
+    if (input.provider === 'aws_textract' && input.apiKey) {
+      try {
+        const credentials = JSON.parse(input.apiKey) as Record<string, unknown>;
+        if (
+          typeof credentials.accessKeyId !== 'string' ||
+          typeof credentials.secretAccessKey !== 'string'
+        ) {
+          throw new Error('invalid credentials');
+        }
+      } catch {
+        throw new BadRequestException(
+          'AWS Textract API key must be credential JSON with accessKeyId and secretAccessKey, or left empty for the AWS credential chain',
+        );
+      }
     }
   }
 }

@@ -89,13 +89,39 @@ export class AppointmentReminderDeliveryService {
   }
 
   async deliverTransactional(input: {
+    organizationId?: string;
     email?: string | null;
     phone?: string | null;
     subject: string;
     message: string;
   }): Promise<ReminderDeliveryResult[]> {
     const results: ReminderDeliveryResult[] = [];
-    if (input.email) {
+    const contacts = [
+      input.email?.trim().toLowerCase(),
+      input.phone?.replace(/\s+/g, ''),
+    ].filter((value): value is string => Boolean(value));
+    const suppressions = input.organizationId
+      ? await this.prisma.appointmentReminderSuppression.findMany({
+          where: {
+            organizationId: input.organizationId,
+            contactNormalized: { in: contacts },
+          },
+          select: { channel: true, contactNormalized: true },
+        })
+      : [];
+    const isSuppressed = (channel: string, contact?: string | null) =>
+      Boolean(
+        contact &&
+        suppressions.some(
+          (item) =>
+            item.channel === channel &&
+            item.contactNormalized ===
+              (channel === 'email'
+                ? contact.trim().toLowerCase()
+                : contact.replace(/\s+/g, '')),
+        ),
+      );
+    if (input.email && !isSuppressed('email', input.email)) {
       const email = await this.sendEmailMessage(
         input.email,
         input.subject,
@@ -103,7 +129,7 @@ export class AppointmentReminderDeliveryService {
       );
       if (email) results.push(email);
     }
-    if (input.phone) {
+    if (input.phone && !isSuppressed('sms', input.phone)) {
       const sms = await this.sendSms(input.phone, input.message);
       if (sms) results.push(sms);
     }

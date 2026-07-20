@@ -52,11 +52,12 @@ describe('VoiceOutboundService TwiML', () => {
     const twiml = service.buildConversationRelayTwiml(
       config,
       'Welcome & hello',
+      'per-call-ticket',
     );
 
     expect(twiml).toContain('<Connect action="https://voice.example.com');
     expect(twiml).toContain(
-      'url="wss://voice.example.com/api/v1/voice-receptionist/stream/config-1"',
+      'url="wss://voice.example.com/api/v1/voice-receptionist/stream/config-1?relayToken=per-call-ticket"',
     );
     expect(twiml).toContain('welcomeGreeting="Welcome &amp; hello"');
     expect(twiml).toContain('interruptible="any"');
@@ -74,6 +75,12 @@ describe('VoiceOutboundService TwiML', () => {
     expect(transfer).toContain('callerId="+15551234567"');
     expect(transfer).toContain('/config-1/twilio/dial');
     expect(voicemail).toContain('<Record maxLength="90"');
+    expect(voicemail).toContain(
+      'This voicemail will be recorded and transcribed',
+    );
+    expect(voicemail.indexOf('will be recorded')).toBeLessThan(
+      voicemail.indexOf('<Record'),
+    );
     expect(voicemail).toContain('recordingStatusCallback=');
     expect(voicemail).toContain('transcribe="true"');
     expect(voicemail).toContain('/config-1/twilio/recording');

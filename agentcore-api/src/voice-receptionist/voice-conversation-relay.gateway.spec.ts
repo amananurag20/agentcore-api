@@ -6,7 +6,7 @@ type TestableGateway = {
     socket: { readyState: number; send: jest.Mock },
     content: string,
     language?: string,
-  ): void;
+  ): Promise<void>;
   handleMessage(
     socket: {
       readyState: number;
@@ -15,16 +15,20 @@ type TestableGateway = {
     },
     session: {
       config: object;
+      authorization: { expectedCallSid: string };
+      connectionId: string;
       callSid?: string;
       generation: number;
       durationTimer: NodeJS.Timeout;
+      activePrompt?: { controller: AbortController; generation: number };
+      closed: boolean;
     },
     data: Buffer,
   ): Promise<void>;
 };
 
 describe('VoiceConversationRelayGateway', () => {
-  it('streams interruptible text tokens and marks the final token', () => {
+  it('streams interruptible text tokens and marks the final token', async () => {
     const gateway = new VoiceConversationRelayGateway(
       { get: jest.fn() } as never,
       {} as never,
@@ -33,7 +37,7 @@ describe('VoiceConversationRelayGateway', () => {
     ) as unknown as TestableGateway;
     const socket = { readyState: WebSocket.OPEN, send: jest.fn() };
 
-    gateway.streamText(socket, 'Hello there', 'en-US');
+    await gateway.streamText(socket, 'Hello there', 'en-US');
 
     const messages: Array<Record<string, unknown>> = [];
     for (const [value] of socket.send.mock.calls as Array<[string]>) {
@@ -49,6 +53,60 @@ describe('VoiceConversationRelayGateway', () => {
       lang: 'en-US',
     });
     expect(messages[1]).toMatchObject({ token: 'there', last: true });
+  });
+
+  it('waits for the outbound WebSocket buffer to drain before sending', async () => {
+    const gateway = new VoiceConversationRelayGateway(
+      {
+        get: jest.fn((key: string, fallback?: unknown) =>
+          key === 'VOICE_WS_MAX_BUFFERED_BYTES' ? 100 : fallback,
+        ),
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    ) as unknown as TestableGateway;
+    let bufferedAmount = 200;
+    const socket = {
+      readyState: WebSocket.OPEN,
+      send: jest.fn(),
+      get bufferedAmount() {
+        return bufferedAmount;
+      },
+    };
+    setTimeout(() => {
+      bufferedAmount = 0;
+    }, 20);
+
+    await gateway.streamText(socket, 'Hello');
+    expect(socket.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes a relay whose outbound buffer remains stalled', async () => {
+    const gateway = new VoiceConversationRelayGateway(
+      {
+        get: jest.fn((key: string, fallback?: unknown) => {
+          if (key === 'VOICE_WS_MAX_BUFFERED_BYTES') return 100;
+          if (key === 'VOICE_WS_BACKPRESSURE_TIMEOUT_MS') return 20;
+          return fallback;
+        }),
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    ) as unknown as TestableGateway;
+    const socket = {
+      readyState: WebSocket.OPEN,
+      bufferedAmount: 200,
+      send: jest.fn(),
+      close: jest.fn(),
+    };
+
+    await expect(gateway.streamText(socket, 'Hello')).rejects.toThrow(
+      'outbound buffer stalled',
+    );
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(socket.close).toHaveBeenCalledWith(1013, 'Outbound buffer stalled');
   });
 
   it('invalidates an in-flight AI reply when the caller interrupts', async () => {
@@ -81,9 +139,12 @@ describe('VoiceConversationRelayGateway', () => {
     };
     const session = {
       config: {},
+      authorization: { expectedCallSid: 'CA123' },
+      connectionId: 'socket-1',
       callSid: 'CA123',
       generation: 0,
       durationTimer: setTimeout(() => undefined, 60_000),
+      closed: false,
     };
 
     const pendingPrompt = gateway.handleMessage(
@@ -109,5 +170,97 @@ describe('VoiceConversationRelayGateway', () => {
 
     expect(voiceService.handleConversationRelayInterrupt).toHaveBeenCalled();
     expect(socket.send).not.toHaveBeenCalled();
+  });
+
+  it('rejects setup when Twilio presents a CallSid not bound to the ticket', async () => {
+    const gateway = new VoiceConversationRelayGateway(
+      { get: jest.fn() } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    ) as unknown as TestableGateway;
+    const socket = {
+      readyState: WebSocket.OPEN,
+      send: jest.fn(),
+      close: jest.fn(),
+    };
+    const session = {
+      config: { id: 'config-1' },
+      authorization: { expectedCallSid: 'CA-expected' },
+      connectionId: 'socket-1',
+      generation: 0,
+      durationTimer: setTimeout(() => undefined, 60_000),
+      closed: false,
+    };
+
+    await gateway.handleMessage(
+      socket,
+      session,
+      Buffer.from(
+        JSON.stringify({
+          type: 'setup',
+          sessionId: 'VX123',
+          callSid: 'CA-attacker',
+        }),
+      ),
+    );
+    clearTimeout(session.durationTimer);
+    expect(socket.close).toHaveBeenCalledWith(1008, 'Invalid setup');
+  });
+
+  it('forwards model deltas immediately and then marks the talk cycle final', async () => {
+    const voiceService = {
+      handleConversationRelayPrompt: jest.fn(async (...args: unknown[]) => {
+        const callbacks = args[5] as {
+          onDelta: (delta: string) => Promise<void>;
+        };
+        await callbacks.onDelta('Hello ');
+        await callbacks.onDelta('there');
+        return { type: 'text', content: 'Hello there' };
+      }),
+    };
+    const gateway = new VoiceConversationRelayGateway(
+      { get: jest.fn() } as never,
+      {} as never,
+      voiceService as never,
+      { touch: jest.fn(), publish: jest.fn() } as never,
+    ) as unknown as TestableGateway;
+    const socket = {
+      readyState: WebSocket.OPEN,
+      send: jest.fn(),
+      close: jest.fn(),
+    };
+    const session = {
+      config: { organizationId: 'org-1' },
+      authorization: { expectedCallSid: 'CA123' },
+      connectionId: 'socket-1',
+      callSid: 'CA123',
+      generation: 0,
+      durationTimer: setTimeout(() => undefined, 60_000),
+      closed: false,
+    };
+
+    await gateway.handleMessage(
+      socket,
+      session,
+      Buffer.from(
+        JSON.stringify({
+          type: 'prompt',
+          voicePrompt: 'Hi',
+          lang: 'en-US',
+          last: true,
+        }),
+      ),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    clearTimeout(session.durationTimer);
+    const sent = (socket.send.mock.calls as Array<[string]>).map(
+      ([raw]) => JSON.parse(raw) as Record<string, unknown>,
+    );
+    expect(sent).toEqual([
+      expect.objectContaining({ token: 'Hello ', last: false }),
+      expect.objectContaining({ token: 'there', last: false }),
+      expect.objectContaining({ token: '', last: true }),
+    ]);
   });
 });

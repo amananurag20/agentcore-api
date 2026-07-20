@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { WhatsAppAssistantConfig } from '@prisma/client';
 import { createHmac } from 'crypto';
+import twilio from 'twilio';
 import { WhatsAppAssistantService } from './whatsapp-assistant.service';
 
 function createService(
@@ -19,14 +20,43 @@ function createService(
   },
   knowledge: Record<string, unknown> = { search: jest.fn() },
 ) {
+  const prismaWithDefaults = {
+    ...prisma,
+    whatsAppMessage: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      findUniqueOrThrow: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn(
+        ({ where, data }: { where: { id: string }; data: object }) =>
+          Promise.resolve({ id: where.id, metadata: {}, ...data }),
+      ),
+      ...((prisma.whatsAppMessage as Record<string, unknown> | undefined) ??
+        {}),
+    },
+    whatsAppPendingDeliveryStatus: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      ...((prisma.whatsAppPendingDeliveryStatus as
+        Record<string, unknown> | undefined) ?? {}),
+    },
+  };
+  const chatWithRetrieval = {
+    rewriteRetrievalQuery: jest.fn(
+      ({ fallbackQuery }: { fallbackQuery: string }) =>
+        Promise.resolve(fallbackQuery),
+    ),
+    rerankKnowledgeCandidates: jest.fn((candidates: unknown[], limit: number) =>
+      candidates.slice(0, limit),
+    ),
+    ...chat,
+  };
   return new WhatsAppAssistantService(
     audit as never,
     {} as never,
-    chat as never,
+    chatWithRetrieval as never,
     { decrypt: () => 'app-secret' } as never,
     knowledge as never,
     outbound as never,
-    prisma as never,
+    prismaWithDefaults as never,
     { enqueue: jest.fn(), isEnabled: () => true } as never,
     {
       get: (key: string, fallback?: unknown) =>
@@ -539,6 +569,119 @@ describe('WhatsAppAssistantService hardening', () => {
     ).toThrow(ForbiddenException);
   });
 
+  it('validates Twilio form webhooks against the exact public request URL', () => {
+    const service = createService() as unknown as {
+      assertWebhookSignature(
+        config: WhatsAppAssistantConfig,
+        rawBody: Buffer,
+        headers: Record<string, string>,
+        requestUrl: { protocol: string; host: string; originalUrl: string },
+        payload: Record<string, string>,
+      ): void;
+    };
+    const payload = {
+      MessageSid: 'SM123',
+      From: 'whatsapp:+15551234567',
+      To: 'whatsapp:+15557654321',
+      Body: 'Hello',
+    };
+    const url =
+      'https://api.example.com/api/v1/whatsapp-assistant/webhook/config-1';
+    const signature = twilio.getExpectedTwilioSignature(
+      'app-secret',
+      url,
+      payload,
+    );
+    expect(() =>
+      service.assertWebhookSignature(
+        {
+          id: 'config-1',
+          provider: 'twilio',
+          accessTokenEncrypted: 'encrypted',
+        } as WhatsAppAssistantConfig,
+        Buffer.from(new URLSearchParams(payload).toString()),
+        {
+          'x-twilio-signature': signature,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        {
+          protocol: 'https',
+          host: 'api.example.com',
+          originalUrl: '/api/v1/whatsapp-assistant/webhook/config-1',
+        },
+        payload,
+      ),
+    ).not.toThrow();
+  });
+
+  it('ranks delivery callbacks so late lower statuses cannot regress read', () => {
+    const service = createService() as unknown as {
+      deliveryStatusRank(status?: string): number;
+    };
+    expect(service.deliveryStatusRank('read')).toBeGreaterThan(
+      service.deliveryStatusRank('delivered'),
+    );
+    expect(service.deliveryStatusRank('delivered')).toBeGreaterThan(
+      service.deliveryStatusRank('sent'),
+    );
+  });
+
+  it('stores delivery callbacks that arrive before the outbound provider id is persisted', async () => {
+    let stored:
+      { create: { providerMessageId: string; status: string } } | undefined;
+    const upsert = jest.fn(
+      (input: { create: { providerMessageId: string; status: string } }) => {
+        stored = input;
+        return Promise.resolve({});
+      },
+    );
+    const service = createService({
+      whatsAppMessage: { findFirst: jest.fn().mockResolvedValue(null) },
+      whatsAppPendingDeliveryStatus: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert,
+      },
+    }) as unknown as {
+      recordDeliveryStatus(
+        organizationId: string,
+        status: { providerMessageId: string; status: string },
+      ): Promise<void>;
+    };
+
+    await service.recordDeliveryStatus('org-1', {
+      providerMessageId: 'wamid.early',
+      status: 'delivered',
+    });
+    expect(stored?.create).toMatchObject({
+      providerMessageId: 'wamid.early',
+      status: 'delivered',
+    });
+  });
+
+  it('ignores a late delivered callback after a message is already read', async () => {
+    const update = jest.fn();
+    const service = createService({
+      whatsAppMessage: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'outbound-1',
+          deliveryStatus: 'read',
+          metadata: {},
+        }),
+        update,
+      },
+    }) as unknown as {
+      recordDeliveryStatus(
+        organizationId: string,
+        status: { providerMessageId: string; status: string },
+      ): Promise<void>;
+    };
+    await service.recordDeliveryStatus('org-1', {
+      providerMessageId: 'wamid.1',
+      status: 'delivered',
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('fails webhook verification closed when required configuration or parameters are missing', async () => {
     const findFirst = jest.fn().mockResolvedValue({
       id: 'config-1',
@@ -598,7 +741,15 @@ describe('WhatsAppAssistantService hardening', () => {
       service.verifyWebhook(
         'config-1',
         'subscribe',
-        'wrong-token',
+        'app-secrex',
+        'challenge-value',
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      service.verifyWebhook(
+        'config-1',
+        'subscribe',
+        'wrong-length-token',
         'challenge-value',
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
@@ -1085,5 +1236,114 @@ describe('WhatsAppAssistantService hardening', () => {
       deliveryError: 'Provider delivery failed after retry attempts',
       deliveryAttempts: { increment: 1 },
     });
+  });
+
+  it('does not resend an automated reply when provider acceptance cannot be finalized in the database', async () => {
+    const pendingMessage = {
+      id: 'pending-reply',
+      organizationId: 'org-1',
+      conversationId: 'conversation-1',
+      direction: 'outbound',
+      role: 'assistant',
+      type: 'text',
+      content: 'Hello from AI',
+      automationKey: 'assistant-reply:inbound-1',
+      deliveryStatus: 'sending',
+      providerMessageId: null,
+      metadata: {},
+    };
+    const findMessage = jest
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(pendingMessage);
+    const sendText = jest.fn().mockResolvedValue({
+      provider: 'meta',
+      status: 'sent',
+      providerMessageId: 'wamid.accepted',
+    });
+    const service = createService(
+      {
+        whatsAppConversation: {
+          findUnique: jest
+            .fn()
+            .mockResolvedValueOnce({ metadata: {} })
+            .mockResolvedValueOnce({
+              status: 'open',
+              assignedAgentId: null,
+              consentStatus: 'unknown',
+            }),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        whatsAppMessage: {
+          findUnique: findMessage,
+          create: jest.fn().mockResolvedValue({
+            ...pendingMessage,
+            deliveryStatus: 'pending',
+          }),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          update: jest
+            .fn()
+            .mockRejectedValue(new Error('database temporarily unavailable')),
+        },
+      },
+      { consume: jest.fn().mockResolvedValue(undefined) },
+      { sendText },
+      { record: jest.fn().mockResolvedValue(undefined) },
+      {
+        answerConversationally: jest.fn().mockReturnValue({
+          answer: 'Hello from AI',
+          model: 'local-intent',
+          provider: 'local',
+          adapter: 'local-intent',
+          usedFallback: false,
+          handledWithoutKnowledge: true,
+        }),
+      },
+    ) as unknown as {
+      createAssistantReply(
+        config: WhatsAppAssistantConfig,
+        organizationId: string,
+        conversationId: string,
+        contactWaId: string,
+        content: string,
+        appointmentAction: undefined,
+        locale: string,
+        inboundMessageId: string,
+      ): Promise<unknown>;
+    };
+
+    const args = [
+      { id: 'config-1', provider: 'meta', settings: {} },
+      'org-1',
+      'conversation-1',
+      '15551234567',
+      'Hello',
+      undefined,
+      'en',
+      'inbound-1',
+    ] as const;
+    await service.createAssistantReply(...(args as never));
+    await service.createAssistantReply(...(args as never));
+
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it('recognizes STOP/START consent commands and requires opt-in for templates', () => {
+    const service = createService() as unknown as {
+      readConsentCommand(
+        settings: Record<string, unknown>,
+        content?: string,
+      ): 'opt_in' | 'opt_out' | null;
+      assertTemplateConsent(status: string): void;
+    };
+    expect(service.readConsentCommand({}, 'STOP')).toBe('opt_out');
+    expect(service.readConsentCommand({}, 'unsubscribe please')).toBe(
+      'opt_out',
+    );
+    expect(service.readConsentCommand({}, 'START')).toBe('opt_in');
+    expect(() => service.assertTemplateConsent('unknown')).toThrow(
+      ForbiddenException,
+    );
+    expect(() => service.assertTemplateConsent('opted_in')).not.toThrow();
   });
 });

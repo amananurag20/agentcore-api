@@ -22,7 +22,7 @@ export class FileSecurityService {
     this.host = this.configService.get<string>('CLAMAV_HOST');
     this.port = this.configService.get<number>('CLAMAV_PORT') ?? 3310;
     this.required =
-      this.configService.get<boolean>('MALWARE_SCAN_REQUIRED') ?? false;
+      this.configService.get<boolean>('MALWARE_SCAN_REQUIRED') ?? true;
     this.timeoutMs =
       this.configService.get<number>('MALWARE_SCAN_TIMEOUT_MS') ?? 15_000;
   }

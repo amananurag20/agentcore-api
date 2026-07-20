@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AppointmentBookingService } from './appointment-booking.service';
+import { AppointmentTimezoneService } from './appointment-timezone.service';
 
 describe('AppointmentBookingService concurrency errors', () => {
   const prisma = { $transaction: jest.fn() };
@@ -165,5 +166,70 @@ describe('AppointmentBookingService group capacity', () => {
         partySize: 2,
       }),
     ).resolves.toBe(true);
+  });
+});
+
+describe('AppointmentBookingService availability snapshots', () => {
+  it('skips a DST-gap window and does not issue conflict queries per slot', async () => {
+    const serviceRecord = {
+      id: 'service-1',
+      organizationId: 'org-1',
+      durationMinutes: 30,
+      bufferBeforeMinutes: 0,
+      bufferAfterMinutes: 0,
+      maxAttendees: 1,
+      status: 'active',
+    };
+    const prisma = {
+      appointmentService: {
+        findFirst: jest.fn().mockResolvedValue(serviceRecord),
+      },
+      appointmentStaff: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'staff-1',
+            name: 'Ada',
+            timezone: 'America/New_York',
+            availability: [
+              { dayOfWeek: 0, startTime: '02:30', endTime: '03:00' },
+              { dayOfWeek: 0, startTime: '03:30', endTime: '04:00' },
+            ],
+          },
+        ]),
+      },
+      appointmentBlackout: { findMany: jest.fn().mockResolvedValue([]) },
+      appointmentServiceResource: { findMany: jest.fn().mockResolvedValue([]) },
+      appointmentBooking: { findMany: jest.fn().mockResolvedValue([]) },
+      appointmentStaffTimeOff: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const bookingService = new AppointmentBookingService(
+      {} as never,
+      { listExternalBusyIntervals: jest.fn().mockResolvedValue([]) } as never,
+      {
+        get: jest.fn((key: string, fallback: unknown) =>
+          key === 'APPOINTMENT_MAX_ADVANCE_DAYS' ? 1000 : fallback,
+        ),
+      } as never,
+      {} as never,
+      {} as never,
+      prisma as never,
+      new AppointmentTimezoneService(),
+    ) as unknown as {
+      listAvailableSlots(
+        organizationId: string,
+        input: { serviceId: string; date: string; timezone: string },
+      ): Promise<Array<{ startAt: Date }>>;
+    };
+
+    const slots = await bookingService.listAvailableSlots('org-1', {
+      serviceId: 'service-1',
+      date: '2027-03-14',
+      timezone: 'America/New_York',
+    });
+
+    expect(slots.map((slot) => slot.startAt.toISOString())).toEqual([
+      '2027-03-14T07:30:00.000Z',
+    ]);
+    expect(prisma.appointmentBooking.findMany).toHaveBeenCalledTimes(1);
   });
 });

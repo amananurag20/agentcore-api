@@ -34,7 +34,7 @@ export class VoiceOutboundService {
   }): Promise<VoiceProviderActionResult> {
     if (
       input.providerCallId &&
-      this.runtimeService?.sendText(input.providerCallId, input.content)
+      (await this.runtimeService?.sendText(input.providerCallId, input.content))
     ) {
       return {
         provider: 'twilio',
@@ -244,6 +244,39 @@ export class VoiceOutboundService {
     };
   }
 
+  async deleteRecording(
+    config: VoiceReceptionistConfig,
+    recordingSid: string,
+  ): Promise<void> {
+    if (!/^RE[A-Za-z0-9]{16,64}$/.test(recordingSid)) {
+      throw new BadRequestException('Invalid Twilio recording SID');
+    }
+    const accountSid = this.getTwilioAccountSid(config);
+    const authToken = config.apiKeyEncrypted
+      ? this.cryptoService.decrypt(config.apiKeyEncrypted)
+      : undefined;
+    if (!accountSid || !authToken) {
+      throw new ServiceUnavailableException('Twilio credentials are missing');
+    }
+    const response = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Recordings/${recordingSid}.json`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`,
+        },
+        signal: AbortSignal.timeout(
+          this.configService.get<number>('VOICE_PROVIDER_TIMEOUT_MS', 5_000),
+        ),
+      },
+    );
+    if (!response.ok && response.status !== 404) {
+      throw new ServiceUnavailableException(
+        `Twilio recording deletion failed with status ${response.status}`,
+      );
+    }
+  }
+
   private mockSpeakText(input: {
     config: VoiceReceptionistConfig;
     providerCallId?: string | null;
@@ -396,24 +429,34 @@ export class VoiceOutboundService {
     return Boolean(this.getConversationRelayUrl(config));
   }
 
-  getConversationRelayUrl(config: VoiceReceptionistConfig): string | undefined {
+  getConversationRelayUrl(
+    config: VoiceReceptionistConfig,
+    relayToken?: string,
+  ): string | undefined {
     const configured = this.toRecord(config.settings).conversationRelayUrl;
+    let relayUrl: string | undefined;
     if (typeof configured === 'string' && /^wss:\/\//.test(configured)) {
-      return configured;
+      relayUrl = configured;
     }
     const baseUrl = this.configService
       .get<string>('VOICE_CONVERSATION_RELAY_PUBLIC_BASE_URL')
       ?.replace(/\/$/, '');
-    return baseUrl && /^wss:\/\//.test(baseUrl)
-      ? `${baseUrl}/api/v1/voice-receptionist/stream/${config.id}`
-      : undefined;
+    relayUrl ??=
+      baseUrl && /^wss:\/\//.test(baseUrl)
+        ? `${baseUrl}/api/v1/voice-receptionist/stream/${config.id}`
+        : undefined;
+    if (!relayUrl || !relayToken) return relayUrl;
+    const url = new URL(relayUrl);
+    url.searchParams.set('relayToken', relayToken);
+    return url.toString();
   }
 
   buildConversationRelayTwiml(
     config: VoiceReceptionistConfig,
     greeting: string,
+    relayToken: string,
   ): string {
-    const relayUrl = this.getConversationRelayUrl(config);
+    const relayUrl = this.getConversationRelayUrl(config, relayToken);
     if (!relayUrl) {
       throw new ServiceUnavailableException(
         'VOICE_CONVERSATION_RELAY_PUBLIC_BASE_URL or settings.conversationRelayUrl is required',
@@ -492,6 +535,11 @@ export class VoiceOutboundService {
 
   buildVoicemailTwiml(config: VoiceReceptionistConfig): string {
     const settings = this.toRecord(config.settings);
+    const consent =
+      typeof settings.recordingConsentMessage === 'string' &&
+      settings.recordingConsentMessage.trim()
+        ? settings.recordingConsentMessage
+        : 'This voicemail will be recorded and transcribed so our team can respond. If you do not consent, please hang up now.';
     const prompt =
       typeof settings.voicemailPrompt === 'string'
         ? settings.voicemailPrompt
@@ -511,7 +559,7 @@ export class VoiceOutboundService {
       );
     }
     const callback = this.escapeTwiml(callbackUrl);
-    return `<Response>${this.sayTwiml(config, prompt)}<Record maxLength="${maxLength}" playBeep="true" action="${callback}" method="POST" recordingStatusCallback="${callback}" recordingStatusCallbackMethod="POST" transcribe="true" transcribeCallback="${callback}"/><Hangup/></Response>`;
+    return `<Response>${this.sayTwiml(config, consent)}${this.sayTwiml(config, prompt)}<Record maxLength="${maxLength}" playBeep="true" action="${callback}" method="POST" recordingStatusCallback="${callback}" recordingStatusCallbackMethod="POST" transcribe="true" transcribeCallback="${callback}"/><Hangup/></Response>`;
   }
 
   buildCloseTwiml(config: VoiceReceptionistConfig, content: string): string {

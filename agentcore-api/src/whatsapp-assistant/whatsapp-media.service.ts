@@ -173,9 +173,10 @@ export class WhatsAppMediaService {
 
     const downloadUrl = new URL(metadataBody.url);
     this.assertMetaMediaHost(downloadUrl);
-    const response = await this.fetchWithRetry(downloadUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    const response = await this.fetchMetaMediaWithSafeRedirects(
+      downloadUrl,
+      accessToken,
+    );
     if (!response.ok) {
       throw new ServiceUnavailableException(
         `Meta media download failed with ${response.status}`,
@@ -185,10 +186,7 @@ export class WhatsAppMediaService {
     if (Number.isFinite(declaredLength) && declaredLength > this.maxBytes) {
       throw new BadRequestException('WhatsApp media exceeds the size limit');
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > this.maxBytes) {
-      throw new BadRequestException('WhatsApp media exceeds the size limit');
-    }
+    const buffer = await this.readSizeLimitedBody(response);
 
     return {
       buffer,
@@ -319,6 +317,53 @@ export class WhatsAppMediaService {
     ) {
       throw new BadRequestException('Meta returned an invalid media URL');
     }
+  }
+
+  private async fetchMetaMediaWithSafeRedirects(
+    initialUrl: URL,
+    accessToken: string,
+  ): Promise<Response> {
+    let currentUrl = initialUrl;
+    for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
+      this.assertMetaMediaHost(currentUrl);
+      const response = await this.fetchWithRetry(currentUrl, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        redirect: 'manual',
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) {
+        return response;
+      }
+      const location = response.headers.get('location');
+      if (!location || redirectCount === 3) {
+        throw new BadRequestException('Meta media redirect was invalid');
+      }
+      currentUrl = new URL(location, currentUrl);
+    }
+    throw new BadRequestException('Meta media redirect limit exceeded');
+  }
+
+  private async readSizeLimitedBody(response: Response): Promise<Buffer> {
+    if (!response.body) return Buffer.alloc(0);
+    const reader = response.body.getReader();
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > this.maxBytes) {
+          await reader.cancel();
+          throw new BadRequestException(
+            'WhatsApp media exceeds the size limit',
+          );
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return Buffer.concat(chunks, total);
   }
 
   private async fetchWithRetry(url: URL, init: RequestInit) {

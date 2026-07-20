@@ -10,6 +10,7 @@ import {
   Query,
   Req,
   Sse,
+  UseFilters,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -54,6 +55,7 @@ import {
   UpdateCustomerChatWidgetConfigDto,
 } from './dto/update-widget-config.dto';
 import { CustomerChatService } from './customer-chat.service';
+import { PublicCustomerChatExceptionFilter } from './public-customer-chat-exception.filter';
 
 @ApiTags('Customer Chat')
 @ApiBearerAuth('bearer')
@@ -250,6 +252,7 @@ export class CustomerChatController {
 
 @ApiTags('Customer Chat Widget')
 @Controller('customer-chat/widget')
+@UseFilters(PublicCustomerChatExceptionFilter)
 export class CustomerChatWidgetController {
   constructor(
     private readonly configService: ConfigService,

@@ -163,6 +163,7 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
           input: input.text,
         }),
       },
+      input.signal,
     );
 
     if (!response.ok) {

@@ -48,4 +48,16 @@ describe('AppointmentTimezoneService', () => {
       ),
     ).toBe('09:45:30');
   });
+
+  it('shifts future recurrences by wall clock across a DST boundary', () => {
+    const selected = new Date('2026-02-23T14:00:00.000Z'); // 09:00 EST
+    const requested = new Date('2026-02-23T15:00:00.000Z'); // 10:00 EST
+    const afterDst = new Date('2026-03-16T13:00:00.000Z'); // 09:00 EDT
+
+    expect(
+      service
+        .shiftWallClock(afterDst, selected, requested, 'America/New_York')
+        .toISOString(),
+    ).toBe('2026-03-16T14:00:00.000Z'); // 10:00 EDT
+  });
 });

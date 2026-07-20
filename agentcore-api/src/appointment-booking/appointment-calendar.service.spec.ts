@@ -25,13 +25,19 @@ describe('AppointmentCalendarService', () => {
   };
 
   const prisma = {
+    $queryRaw: jest.fn(),
+    $transaction: jest.fn(),
     appointmentStaff: { findUnique: jest.fn() },
     appointmentCalendarConnection: {
       upsert: jest.fn(),
+      findUnique: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
     },
   };
+  prisma.$transaction.mockImplementation(
+    (callback: (client: typeof prisma) => Promise<unknown>) => callback(prisma),
+  );
   const configValues: Record<string, unknown> = {
     GOOGLE_CALENDAR_CLIENT_ID: 'google-client',
     GOOGLE_CALENDAR_CLIENT_SECRET: 'google-secret',
@@ -176,6 +182,45 @@ describe('AppointmentCalendarService', () => {
       expect(update.where.id).toBe(connection.id);
       expect(update.data.status).toBe('error');
       expect(update.data.lastError).toContain('provider unavailable');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('shares one OAuth refresh across concurrent work for a connection', async () => {
+    const expired = {
+      ...connection,
+      tokenExpiresAt: new Date(Date.now() - 60_000),
+    };
+    prisma.appointmentCalendarConnection.findUnique.mockResolvedValue(expired);
+    prisma.appointmentCalendarConnection.update.mockResolvedValue(connection);
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          access_token: 'new-access-token',
+          refresh_token: 'rotated-refresh-token',
+          expires_in: 3600,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    const tokenService = service as unknown as {
+      getAccessToken(value: typeof connection): Promise<string>;
+    };
+
+    try {
+      await expect(
+        Promise.all([
+          tokenService.getAccessToken(expired),
+          tokenService.getAccessToken(expired),
+        ]),
+      ).resolves.toEqual(['new-access-token', 'new-access-token']);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(prisma.appointmentCalendarConnection.update).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
     } finally {
       global.fetch = originalFetch;
     }
