@@ -269,3 +269,9 @@ enum VoiceCallEventType {
   call_ended
   system
 }
+
+enum VoiceAgentAvailability {
+  offline
+  available
+  busy
+}

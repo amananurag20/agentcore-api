@@ -57,6 +57,11 @@ export enum VoiceRouteActionDto {
   close = 'close',
 }
 
+export enum VoiceAgentAvailabilityDto {
+  offline = 'offline',
+  available = 'available',
+}
+
 export class CreateVoiceConfigDto {
   @ApiPropertyOptional({ example: 'org_demo' })
   @IsString()
@@ -354,6 +359,21 @@ export class RouteVoiceCallDto {
   reason?: string;
 }
 
+export class UpdateVoiceAgentPresenceDto {
+  @ApiProperty({ enum: VoiceAgentAvailabilityDto })
+  @IsEnum(VoiceAgentAvailabilityDto)
+  availability: VoiceAgentAvailabilityDto;
+}
+
+export class BrowserHandoffDto {
+  @ApiPropertyOptional({
+    example: 'ecfdf154-2b72-477e-b286-43120fe69ead',
+  })
+  @IsUUID()
+  @IsOptional()
+  assignedAgentId?: string;
+}
+
 export class TwilioIncomingCallDto {
   @ApiProperty({ example: 'CA123456789' })
   @IsString()
@@ -423,6 +443,27 @@ export class TwilioDialCallbackDto {
   @IsString()
   @IsOptional()
   DialCallDuration?: string;
+}
+
+export class TwilioClientStatusCallbackDto {
+  @ApiProperty({ example: 'CA123456789' })
+  @IsString()
+  @MinLength(1)
+  CallSid: string;
+
+  @ApiPropertyOptional({ example: 'CA987654321' })
+  @IsString()
+  @IsOptional()
+  ParentCallSid?: string;
+
+  @ApiProperty({ example: 'answered' })
+  @IsString()
+  CallStatus: string;
+
+  @ApiPropertyOptional({ example: 'client:agent_123' })
+  @IsString()
+  @IsOptional()
+  To?: string;
 }
 
 export class TwilioConversationRelayCallbackDto {

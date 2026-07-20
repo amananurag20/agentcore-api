@@ -71,11 +71,26 @@ describe('VoiceOutboundService TwiML', () => {
     const voicemail = service.buildVoicemailTwiml(config);
 
     expect(transfer).toContain('answerOnBridge="true"');
+    expect(transfer).toContain('callerId="+15551234567"');
     expect(transfer).toContain('/config-1/twilio/dial');
     expect(voicemail).toContain('<Record maxLength="90"');
     expect(voicemail).toContain('recordingStatusCallback=');
     expect(voicemail).toContain('transcribe="true"');
     expect(voicemail).toContain('/config-1/twilio/recording');
+  });
+
+  it('routes a live handoff to a browser agent identity with status callbacks', () => {
+    const twiml = service.buildClientTransferTwiml(
+      config,
+      'agent_123',
+      'call-1',
+    );
+
+    expect(twiml).toContain('<Client statusCallback=');
+    expect(twiml).toContain('/config-1/twilio/agent-status');
+    expect(twiml).toContain('<Identity>agent_123</Identity>');
+    expect(twiml).toContain('name="callId" value="call-1"');
+    expect(twiml).toContain('callerId="+15551234567"');
   });
 
   it('hangs up explicitly after the closing prompt', () => {

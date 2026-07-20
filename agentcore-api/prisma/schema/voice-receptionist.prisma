@@ -81,3 +81,21 @@ model VoiceCallEvent {
   @@index([type])
   @@map("voice_call_events")
 }
+
+model VoiceAgentPresence {
+  id             String                 @id @default(uuid())
+  organizationId String                 @map("organization_id")
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String                 @unique @map("user_id")
+  user           User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clientIdentity String                 @unique @map("client_identity")
+  availability   VoiceAgentAvailability @default(offline)
+  lastSeenAt     DateTime               @default(now()) @map("last_seen_at")
+  activeCallId   String?                @map("active_call_id")
+  createdAt      DateTime               @default(now()) @map("created_at")
+  updatedAt      DateTime               @updatedAt @map("updated_at")
+
+  @@index([organizationId, availability, lastSeenAt])
+  @@index([activeCallId])
+  @@map("voice_agent_presences")
+}

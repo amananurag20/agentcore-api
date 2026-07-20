@@ -28,10 +28,12 @@ import { Roles } from '../common/auth/roles.decorator';
 import { RequireProductAccess } from '../common/auth/product-access.decorator';
 import {
   AssignVoiceCallDto,
+  BrowserHandoffDto,
   CreateVoiceConfigDto,
   ListVoiceCallsDto,
   RouteVoiceCallDto,
   SendVoiceAgentMessageDto,
+  TwilioClientStatusCallbackDto,
   TwilioDialCallbackDto,
   TwilioConversationRelayCallbackDto,
   TwilioGatherCallbackDto,
@@ -40,6 +42,7 @@ import {
   TwilioStatusCallbackDto,
   UpdateVoiceCallStatusDto,
   UpdateVoiceConfigDto,
+  UpdateVoiceAgentPresenceDto,
   VoiceWebhookEventDto,
 } from './dto/voice-receptionist.dto';
 import {
@@ -154,6 +157,34 @@ export class VoiceReceptionistController {
     return this.voiceReceptionistService.streamEvents(user, organizationId);
   }
 
+  @Get('agent/softphone')
+  @Roles('super_admin', 'org_admin', 'product_admin', 'agent')
+  @ApiOperation({ summary: 'Get browser softphone token and agent state' })
+  getSoftphoneState(@CurrentUser() user: AuthenticatedUser) {
+    return this.voiceReceptionistService.getSoftphoneState(user);
+  }
+
+  @Patch('agent/presence')
+  @Roles('super_admin', 'org_admin', 'product_admin', 'agent')
+  @ApiOperation({ summary: 'Set browser voice agent availability' })
+  updateAgentPresence(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: UpdateVoiceAgentPresenceDto,
+  ) {
+    return this.voiceReceptionistService.updateAgentPresence(
+      user,
+      body.availability,
+    );
+  }
+
+  @Post('agent/heartbeat')
+  @Roles('super_admin', 'org_admin', 'product_admin', 'agent')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Refresh browser voice agent presence' })
+  heartbeatAgent(@CurrentUser() user: AuthenticatedUser) {
+    return this.voiceReceptionistService.heartbeatAgent(user);
+  }
+
   @Get('calls')
   @ApiOperation({ summary: 'List voice calls' })
   @ApiOkResponse({ type: VoiceCallListResponseDto })
@@ -229,6 +260,16 @@ export class VoiceReceptionistController {
     @Param('id') id: string,
   ) {
     return this.voiceReceptionistService.requestHandoff(user, id);
+  }
+
+  @Post('calls/:id/browser-handoff')
+  @ApiOperation({ summary: 'Handoff a call to an available browser agent' })
+  browserHandoff(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: BrowserHandoffDto,
+  ) {
+    return this.voiceReceptionistService.requestHandoff(user, id, body);
   }
 
   @Post('calls/:id/route')
@@ -372,6 +413,24 @@ export class VoiceReceptionistWebhookController {
     @Req() request: RawBodyRequest,
   ) {
     return this.voiceReceptionistService.handleTwilioDial(
+      configId,
+      body,
+      request.rawBody,
+      request.headers,
+      this.requestUrl(request),
+    );
+  }
+
+  @Public()
+  @Post(':configId/twilio/agent-status')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Process a Twilio browser-agent call status' })
+  handleTwilioClientStatus(
+    @Param('configId') configId: string,
+    @Body() body: TwilioClientStatusCallbackDto,
+    @Req() request: RawBodyRequest,
+  ) {
+    return this.voiceReceptionistService.handleTwilioClientStatus(
       configId,
       body,
       request.rawBody,

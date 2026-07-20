@@ -19,6 +19,7 @@ import { KnowledgeService } from '../knowledge/knowledge.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   AssignVoiceCallDto,
+  BrowserHandoffDto,
   CreateVoiceConfigDto,
   ListVoiceCallsDto,
   RouteVoiceCallDto,
@@ -27,11 +28,13 @@ import {
   UpdateVoiceConfigDto,
   TwilioDialCallbackDto,
   TwilioConversationRelayCallbackDto,
+  TwilioClientStatusCallbackDto,
   TwilioGatherCallbackDto,
   TwilioIncomingCallDto,
   TwilioRecordingCallbackDto,
   TwilioStatusCallbackDto,
   VoiceCallEventTypeDto,
+  VoiceAgentAvailabilityDto,
   VoiceRouteActionDto,
   VoiceWebhookEventDto,
 } from './dto/voice-receptionist.dto';
@@ -41,6 +44,7 @@ import {
 } from './voice-outbound.service';
 import { VoiceNotificationService } from './voice-notification.service';
 import { VoiceRuntimeService } from './voice-runtime.service';
+import { VoiceSoftphoneService } from './voice-softphone.service';
 
 type VoiceCallWithEvents = Prisma.VoiceCallGetPayload<{
   include: {
@@ -75,6 +79,7 @@ export class VoiceReceptionistService {
     private readonly outboundService: VoiceOutboundService,
     private readonly prisma: PrismaService,
     @Optional() private readonly runtimeService?: VoiceRuntimeService,
+    @Optional() private readonly softphoneService?: VoiceSoftphoneService,
   ) {}
 
   async listConfigs(
@@ -422,6 +427,33 @@ export class VoiceReceptionistService {
     return this.runtimeService.streamOrganization(organizationId);
   }
 
+  async getSoftphoneState(currentUser: AuthenticatedUser) {
+    if (!this.softphoneService) {
+      throw new ConflictException('Voice softphone service is unavailable');
+    }
+    await this.assertVoiceEnabled(currentUser.orgId);
+    return this.softphoneService.getState(currentUser);
+  }
+
+  async updateAgentPresence(
+    currentUser: AuthenticatedUser,
+    availability: VoiceAgentAvailabilityDto,
+  ) {
+    if (!this.softphoneService) {
+      throw new ConflictException('Voice softphone service is unavailable');
+    }
+    await this.assertVoiceEnabled(currentUser.orgId);
+    return this.softphoneService.setPresence(currentUser, availability);
+  }
+
+  async heartbeatAgent(currentUser: AuthenticatedUser) {
+    if (!this.softphoneService) {
+      throw new ConflictException('Voice softphone service is unavailable');
+    }
+    await this.assertVoiceEnabled(currentUser.orgId);
+    return this.softphoneService.heartbeat(currentUser);
+  }
+
   async sendAgentMessage(
     currentUser: AuthenticatedUser,
     id: string,
@@ -551,20 +583,47 @@ export class VoiceReceptionistService {
     return this.toCallResponse(updated);
   }
 
-  async requestHandoff(currentUser: AuthenticatedUser, id: string) {
+  async requestHandoff(
+    currentUser: AuthenticatedUser,
+    id: string,
+    input: BrowserHandoffDto = {},
+  ) {
     const call = await this.findCallForActor(currentUser, id);
     const config = await this.prisma.voiceReceptionistConfig.findUniqueOrThrow({
       where: { id: call.configId },
     });
-    const action = config.transferPhoneNumber
+    const browserAgent = this.softphoneService
+      ? await this.softphoneService.findAvailableAgent(
+          call.organizationId,
+          input.assignedAgentId ?? call.assignedAgentId,
+        )
+      : null;
+    const summary = browserAgent
+      ? await this.createHandoffSummary(config, call)
+      : call.summary;
+    let action = browserAgent
       ? await this.safeProviderAction(config.provider, () =>
-          this.outboundService.transferCall({
+          this.outboundService.transferCallToClient({
             config,
             providerCallId: call.providerCallId,
-            transferTo: config.transferPhoneNumber,
+            clientIdentity: browserAgent.clientIdentity,
+            callId: call.id,
           }),
         )
       : undefined;
+    let transport: 'browser' | 'phone' | 'notification' = browserAgent
+      ? 'browser'
+      : 'notification';
+    if (action?.status !== 'sent' && config.transferPhoneNumber) {
+      action = await this.safeProviderAction(config.provider, () =>
+        this.outboundService.transferCall({
+          config,
+          providerCallId: call.providerCallId,
+          transferTo: config.transferPhoneNumber,
+        }),
+      );
+      transport = 'phone';
+    }
     const connected = action?.status === 'sent';
     const fallbackAgent = connected
       ? null
@@ -585,7 +644,13 @@ export class VoiceReceptionistService {
       where: { id: call.id },
       data: {
         status: connected ? 'transferred' : 'waiting_for_agent',
-        assignedAgentId: call.assignedAgentId ?? fallbackAgent?.id,
+        assignedAgentId:
+          (connected && transport === 'browser'
+            ? browserAgent?.userId
+            : undefined) ??
+          call.assignedAgentId ??
+          fallbackAgent?.id,
+        summary,
         lastEventAt: new Date(),
       },
       include: this.callInclude(),
@@ -598,9 +663,15 @@ export class VoiceReceptionistService {
         type: 'route_decision',
         role: 'system',
         content: connected
-          ? 'Human handoff requested and transfer initiated.'
+          ? `Human handoff initiated through ${transport}.`
           : 'Human handoff requested; agents notified.',
-        metadata: this.toJsonObject({ action, notifications }),
+        metadata: this.toJsonObject({
+          action,
+          notifications,
+          transport,
+          browserAgentId: browserAgent?.userId,
+          summary,
+        }),
       },
     });
 
@@ -1137,6 +1208,35 @@ export class VoiceReceptionistService {
       };
     }
 
+    if (!digits && this.isHumanHandoffRequest(normalizedContent)) {
+      const browserHandoff = await this.prepareBrowserHandoff(config, call.id);
+      if (browserHandoff) {
+        return {
+          type: 'end',
+          handoffData: JSON.stringify({
+            action: 'client',
+            clientIdentity: browserHandoff.clientIdentity,
+            callId: call.id,
+          }),
+        };
+      }
+      if (config.transferPhoneNumber) {
+        return {
+          type: 'end',
+          handoffData: JSON.stringify({
+            action: 'transfer',
+            transferTo: config.transferPhoneNumber,
+          }),
+        };
+      }
+      if (config.voicemailEnabled) {
+        return {
+          type: 'end',
+          handoffData: JSON.stringify({ action: 'voicemail' }),
+        };
+      }
+    }
+
     const reply = await this.createAssistantReply(
       config,
       call,
@@ -1212,6 +1312,17 @@ export class VoiceReceptionistService {
       return this.outboundService.buildTransferTwiml(
         config,
         handoff.transferTo,
+      );
+    }
+    if (
+      handoff?.action === 'client' &&
+      handoff.clientIdentity &&
+      handoff.callId === call.id
+    ) {
+      return this.outboundService.buildClientTransferTwiml(
+        config,
+        handoff.clientIdentity,
+        call.id,
       );
     }
     if (handoff?.action === 'voicemail' && config.voicemailEnabled) {
@@ -1299,6 +1410,44 @@ export class VoiceReceptionistService {
         config,
         route.transferTo,
       );
+      await this.storeTwilioResponse(inboundEvent, twiml);
+      return twiml;
+    }
+
+    if (!input.Digits && this.isHumanHandoffRequest(content)) {
+      const browserHandoff = await this.prepareBrowserHandoff(config, call.id);
+      const twiml = browserHandoff
+        ? this.outboundService.buildClientTransferTwiml(
+            config,
+            browserHandoff.clientIdentity,
+            call.id,
+          )
+        : config.transferPhoneNumber
+          ? this.outboundService.buildTransferTwiml(
+              config,
+              config.transferPhoneNumber,
+            )
+          : config.voicemailEnabled
+            ? this.outboundService.buildVoicemailTwiml(config)
+            : this.outboundService.buildGatherTwiml(
+                config,
+                'No human agent is available right now. How else can I help?',
+              );
+      if (!browserHandoff && config.transferPhoneNumber) {
+        await this.prisma.voiceCall.update({
+          where: { id: call.id },
+          data: { status: 'transferred', lastEventAt: new Date() },
+        });
+      } else if (
+        !browserHandoff &&
+        !config.transferPhoneNumber &&
+        config.voicemailEnabled
+      ) {
+        await this.prisma.voiceCall.update({
+          where: { id: call.id },
+          data: { status: 'voicemail', lastEventAt: new Date() },
+        });
+      }
       await this.storeTwilioResponse(inboundEvent, twiml);
       return twiml;
     }
@@ -1419,6 +1568,53 @@ export class VoiceReceptionistService {
       config,
       'No one is available right now. Would you like help with something else?',
     );
+  }
+
+  async handleTwilioClientStatus(
+    configId: string,
+    input: TwilioClientStatusCallbackDto,
+    rawBody?: Buffer,
+    headers?: Record<string, string | string[] | undefined>,
+    requestUrl?: { protocol?: string; host?: string; originalUrl?: string },
+  ) {
+    const config = await this.loadSignedTwilioConfig(
+      configId,
+      rawBody,
+      headers,
+      requestUrl,
+    );
+    const parentCallSid = input.ParentCallSid ?? input.CallSid;
+    const call = await this.findCallByProvider(config.id, parentCallSid);
+    const clientIdentity = input.To?.replace(/^client:/, '');
+    const answered = input.CallStatus === 'answered';
+    if (clientIdentity && this.softphoneService) {
+      await this.softphoneService.markCallStatus(
+        clientIdentity,
+        answered ? call.id : null,
+        answered ? 'busy' : 'available',
+      );
+    }
+    if (answered) {
+      await this.prisma.voiceCall.update({
+        where: { id: call.id },
+        data: { status: 'in_progress', lastEventAt: new Date() },
+      });
+    }
+    await this.prisma.voiceCallEvent.create({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: 'system',
+        role: 'system',
+        content: `Browser agent call status: ${input.CallStatus}`,
+        metadata: this.toJsonObject({
+          clientIdentity,
+          childCallSid: input.CallSid,
+        }),
+      },
+    });
+    this.publishCallUpdate(call);
+    return { received: true };
   }
 
   async handleTwilioRecording(
@@ -1705,6 +1901,100 @@ export class VoiceReceptionistService {
       : currentMessage;
   }
 
+  private async createHandoffSummary(
+    config: VoiceReceptionistConfig,
+    call: VoiceCallWithEvents,
+  ): Promise<string> {
+    const transcript = call.events
+      .filter(
+        (event) =>
+          event.content &&
+          ['caller', 'assistant', 'agent'].includes(event.role),
+      )
+      .slice(-12)
+      .map((event) => `${event.role}: ${event.content}`)
+      .join('\n');
+    const fallback = transcript
+      ? transcript.slice(0, 700)
+      : 'The caller requested a human before providing additional details.';
+    try {
+      const result = await this.withTimeout(
+        this.chatService.answerWithContext({
+          organizationId: config.organizationId,
+          question:
+            'Summarize this caller handoff for a human agent in at most 80 words. Include intent, important details, actions already attempted, and what remains unresolved. Do not invent facts.',
+          safeFallback: true,
+          context: transcript ? [{ content: transcript, score: 1 }] : [],
+        }),
+        Math.min(
+          this.configService.get<number>('VOICE_AI_TIMEOUT_MS', 8000),
+          5000,
+        ),
+      );
+      return result.usedFallback ? fallback : result.answer.slice(0, 1000);
+    } catch {
+      return fallback;
+    }
+  }
+
+  private isHumanHandoffRequest(content: string): boolean {
+    const normalized = content.toLowerCase();
+    return (
+      /\b(speak|talk|connect|transfer|route|need|want)\b.{0,40}\b(human|person|agent|representative|operator|staff)\b/.test(
+        normalized,
+      ) ||
+      /\b(human|live agent|representative|operator)\b.{0,25}\b(please|now|instead)\b/.test(
+        normalized,
+      )
+    );
+  }
+
+  private async prepareBrowserHandoff(
+    config: VoiceReceptionistConfig,
+    callId: string,
+  ): Promise<{ clientIdentity: string; userId: string } | null> {
+    if (!this.softphoneService) return null;
+    const call = await this.prisma.voiceCall.findUnique({
+      where: { id: callId },
+      include: this.callInclude(),
+    });
+    if (!call) return null;
+    const agent = await this.softphoneService.findAvailableAgent(
+      config.organizationId,
+      call.assignedAgentId,
+    );
+    if (!agent) return null;
+    const summary = await this.createHandoffSummary(config, call);
+    await this.prisma.voiceCall.update({
+      where: { id: call.id },
+      data: {
+        status: 'transferred',
+        assignedAgentId: agent.userId,
+        summary,
+        lastEventAt: new Date(),
+      },
+    });
+    await this.prisma.voiceCallEvent.create({
+      data: {
+        organizationId: config.organizationId,
+        callId: call.id,
+        type: 'transfer_requested',
+        role: 'system',
+        content: `Caller requested a human; routing to ${agent.user.name}.`,
+        metadata: this.toJsonObject({
+          transport: 'browser',
+          assignedAgentId: agent.userId,
+          summary,
+        }),
+      },
+    });
+    this.publishCallUpdate(call);
+    return {
+      clientIdentity: agent.clientIdentity,
+      userId: agent.userId,
+    };
+  }
+
   private async loadSignedTwilioConfig(
     configId: string,
     rawBody?: Buffer,
@@ -1798,24 +2088,35 @@ export class VoiceReceptionistService {
 
   private parseConversationRelayHandoff(value?: string):
     | {
-        action?: 'transfer' | 'voicemail' | 'close';
+        action?: 'transfer' | 'voicemail' | 'close' | 'client';
         transferTo?: string;
+        clientIdentity?: string;
+        callId?: string;
       }
     | undefined {
     if (!value || value.length > 2_000) return undefined;
     try {
       const parsed = JSON.parse(value) as Record<string, unknown>;
-      const action = ['transfer', 'voicemail', 'close'].includes(
+      const action = ['transfer', 'voicemail', 'close', 'client'].includes(
         String(parsed.action),
       )
-        ? (parsed.action as 'transfer' | 'voicemail' | 'close')
+        ? (parsed.action as 'transfer' | 'voicemail' | 'close' | 'client')
         : undefined;
       const transferTo =
         typeof parsed.transferTo === 'string' &&
         /^\+[1-9]\d{7,14}$/.test(parsed.transferTo)
           ? parsed.transferTo
           : undefined;
-      return { action, transferTo };
+      const clientIdentity =
+        typeof parsed.clientIdentity === 'string' &&
+        /^[a-zA-Z0-9_]{1,121}$/.test(parsed.clientIdentity)
+          ? parsed.clientIdentity
+          : undefined;
+      const callId =
+        typeof parsed.callId === 'string' && parsed.callId.length <= 100
+          ? parsed.callId
+          : undefined;
+      return { action, transferTo, clientIdentity, callId };
     } catch {
       return undefined;
     }
@@ -2271,6 +2572,7 @@ export class VoiceReceptionistService {
       'twilioDialCallbackUrl',
       'twilioRecordingCallbackUrl',
       'twilioConversationRelayCallbackUrl',
+      'twilioClientStatusCallbackUrl',
     ]) {
       const value = settings[key];
       if (

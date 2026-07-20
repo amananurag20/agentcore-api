@@ -51,6 +51,7 @@ model Organization {
   voiceReceptionistConfigs        VoiceReceptionistConfig[]
   voiceCalls                      VoiceCall[]
   voiceCallEvents                 VoiceCallEvent[]
+  voiceAgentPresences             VoiceAgentPresence[]
   authSessions                    AuthSession[]
   authOneTimeTokens               AuthOneTimeToken[]
   createdAt                       DateTime                         @default(now()) @map("created_at")

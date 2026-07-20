@@ -14,6 +14,7 @@ import { VoiceOutboundService } from './voice-outbound.service';
 import { VoiceNotificationService } from './voice-notification.service';
 import { VoiceConversationRelayGateway } from './voice-conversation-relay.gateway';
 import { VoiceRuntimeService } from './voice-runtime.service';
+import { VoiceSoftphoneService } from './voice-softphone.service';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { VoiceRuntimeService } from './voice-runtime.service';
     VoiceNotificationService,
     VoiceConversationRelayGateway,
     VoiceRuntimeService,
+    VoiceSoftphoneService,
   ],
 })
 export class VoiceReceptionistModule {}

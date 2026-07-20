@@ -289,6 +289,18 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
+  TWILIO_API_KEY_SID?: string;
+
+  @IsString()
+  @IsOptional()
+  TWILIO_API_KEY_SECRET?: string;
+
+  @IsString()
+  @IsOptional()
+  TWILIO_TWIML_APP_SID?: string;
+
+  @IsString()
+  @IsOptional()
   APPOINTMENT_WHATSAPP_TEMPLATE_NAME?: string;
 
   @Transform(({ value }) => Number(value ?? 60))
@@ -753,6 +765,20 @@ class EnvironmentVariables {
   @Max(5000)
   @IsOptional()
   VOICE_SSE_MAX_CONNECTIONS = 250;
+
+  @Transform(({ value }) => Number(value ?? 3600))
+  @IsInt()
+  @Min(300)
+  @Max(86400)
+  @IsOptional()
+  VOICE_AGENT_TOKEN_TTL_SECONDS = 3600;
+
+  @Transform(({ value }) => Number(value ?? 90))
+  @IsInt()
+  @Min(30)
+  @Max(600)
+  @IsOptional()
+  VOICE_AGENT_PRESENCE_TTL_SECONDS = 90;
 
   @IsString()
   @IsOptional()

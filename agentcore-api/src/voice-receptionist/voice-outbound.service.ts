@@ -110,6 +110,32 @@ export class VoiceOutboundService {
     return this.mockTransferCall(input);
   }
 
+  async transferCallToClient(input: {
+    config: VoiceReceptionistConfig;
+    providerCallId?: string | null;
+    clientIdentity: string;
+    callId: string;
+  }): Promise<VoiceProviderActionResult> {
+    if (!this.shouldUseLiveTwilio(input.config)) {
+      return {
+        provider: input.config.provider,
+        status: 'failed',
+        providerActionId: `softphone-unavailable-${Date.now()}`,
+        error: 'Browser handoff requires live Twilio mode',
+      };
+    }
+    return this.updateTwilioCall({
+      config: input.config,
+      providerCallId: input.providerCallId,
+      twiml: this.buildClientTransferTwiml(
+        input.config,
+        input.clientIdentity,
+        input.callId,
+      ),
+      actionPrefix: 'twilio-client-transfer',
+    });
+  }
+
   async sendToVoicemail(input: {
     config: VoiceReceptionistConfig;
     providerCallId?: string | null;
@@ -432,7 +458,36 @@ export class VoiceOutboundService {
       );
     }
     const action = ` action="${this.escapeTwiml(callbackUrl)}" method="POST"`;
-    return `<Response><Dial timeout="20" answerOnBridge="true"${action}>${this.escapeTwiml(transferTo)}</Dial></Response>`;
+    const callerId = config.phoneNumber
+      ? ` callerId="${this.escapeTwiml(config.phoneNumber)}"`
+      : '';
+    return `<Response><Dial timeout="20" answerOnBridge="true"${callerId}${action}>${this.escapeTwiml(transferTo)}</Dial></Response>`;
+  }
+
+  buildClientTransferTwiml(
+    config: VoiceReceptionistConfig,
+    clientIdentity: string,
+    callId: string,
+  ): string {
+    const dialCallbackUrl = this.getTwilioCallbackUrl(
+      config,
+      'twilioDialCallbackUrl',
+      'dial',
+    );
+    const clientStatusUrl = this.getTwilioCallbackUrl(
+      config,
+      'twilioClientStatusCallbackUrl',
+      'agent-status',
+    );
+    if (!dialCallbackUrl || !clientStatusUrl) {
+      throw new ServiceUnavailableException(
+        'VOICE_WEBHOOK_PUBLIC_BASE_URL is required for browser handoff',
+      );
+    }
+    const callerId = config.phoneNumber
+      ? ` callerId="${this.escapeTwiml(config.phoneNumber)}"`
+      : '';
+    return `<Response><Dial timeout="20" answerOnBridge="true"${callerId} action="${this.escapeTwiml(dialCallbackUrl)}" method="POST"><Client statusCallback="${this.escapeTwiml(clientStatusUrl)}" statusCallbackMethod="POST" statusCallbackEvent="initiated ringing answered completed"><Identity>${this.escapeTwiml(clientIdentity)}</Identity><Parameter name="callId" value="${this.escapeTwiml(callId)}"/></Client></Dial></Response>`;
   }
 
   buildVoicemailTwiml(config: VoiceReceptionistConfig): string {
@@ -585,7 +640,7 @@ export class VoiceOutboundService {
   private getTwilioCallbackUrl(
     config: VoiceReceptionistConfig,
     key: string,
-    callback: 'gather' | 'dial' | 'recording' | 'relay',
+    callback: 'gather' | 'dial' | 'recording' | 'relay' | 'agent-status',
   ): string | undefined {
     const value = this.toRecord(config.settings)[key];
     if (typeof value === 'string' && /^https:\/\//.test(value)) return value;
