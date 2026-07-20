@@ -281,3 +281,28 @@ export class ListWaitlistDto {
   @IsOptional()
   limit = 20;
 }
+
+export class ListAppointmentScheduleDto {
+  @ApiPropertyOptional()
+  @IsString()
+  @IsOptional()
+  organizationId?: string;
+
+  @ApiProperty()
+  @IsISO8601()
+  from: string;
+
+  @ApiProperty()
+  @IsISO8601()
+  to: string;
+
+  @ApiPropertyOptional()
+  @IsUUID()
+  @IsOptional()
+  serviceId?: string;
+
+  @ApiPropertyOptional()
+  @IsUUID()
+  @IsOptional()
+  staffId?: string;
+}

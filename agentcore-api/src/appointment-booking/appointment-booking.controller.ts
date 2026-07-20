@@ -72,6 +72,7 @@ import {
   ClaimAppointmentWaitlistDto,
   CreateAppointmentBlackoutDto,
   JoinAppointmentWaitlistDto,
+  ListAppointmentScheduleDto,
   ListWaitlistDto,
   PublicCancelAppointmentSeriesDto,
   UpdateAppointmentPolicyDto,
@@ -421,6 +422,15 @@ export class AppointmentBookingController {
     @Query() query: ListAppointmentBookingsDto,
   ) {
     return this.appointmentBookingService.listBookings(user, query);
+  }
+
+  @Get('schedule')
+  @ApiOperation({ summary: 'List the unified appointment schedule' })
+  listSchedule(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListAppointmentScheduleDto,
+  ) {
+    return this.appointmentBookingService.listSchedule(user, query);
   }
 
   @Post('bookings')

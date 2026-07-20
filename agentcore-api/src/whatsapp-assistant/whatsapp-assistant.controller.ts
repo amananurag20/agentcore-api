@@ -10,9 +10,15 @@ import {
   Query,
   Req,
   StreamableFile,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import {
   ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
   ApiCreatedResponse,
   ApiOkResponse,
   ApiOperation,
@@ -26,12 +32,14 @@ import { RequireProductAccess } from '../common/auth/product-access.decorator';
 import {
   AssignWhatsAppConversationDto,
   CreateWhatsAppConfigDto,
+  CreateWhatsAppTemplateDto,
   ListWhatsAppConversationsDto,
   SendWhatsAppAgentMessageDto,
   SendWhatsAppMediaMessageDto,
   SendWhatsAppTemplateMessageDto,
   UpdateWhatsAppConfigDto,
   UpdateWhatsAppConversationStatusDto,
+  UpdateWhatsAppTemplateDto,
 } from './dto/whatsapp-assistant.dto';
 import {
   WhatsAppConfigResponseDto,
@@ -130,6 +138,89 @@ export class WhatsAppAssistantController {
     @Param('id') id: string,
   ) {
     return this.whatsAppAssistantService.syncTemplates(user, id);
+  }
+
+  @Post('configs/:id/templates')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('whatsapp_assistant', 'configure')
+  @ApiOperation({ summary: 'Create a local WhatsApp template draft' })
+  @ApiCreatedResponse({ type: WhatsAppTemplateResponseDto })
+  createTemplate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: CreateWhatsAppTemplateDto,
+  ) {
+    return this.whatsAppAssistantService.createTemplate(user, id, body);
+  }
+
+  @Post('configs/:id/templates/media')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('whatsapp_assistant', 'configure')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 16 * 1024 * 1024, files: 1 },
+    }),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['file'],
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
+  })
+  @ApiOperation({ summary: 'Upload sample media for a Meta template header' })
+  uploadTemplateMedia(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @UploadedFile() file?: Express.Multer.File,
+  ) {
+    return this.whatsAppAssistantService.uploadTemplateMedia(user, id, file);
+  }
+
+  @Patch('configs/:id/templates/:templateId')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('whatsapp_assistant', 'configure')
+  @ApiOperation({ summary: 'Update a local WhatsApp template draft' })
+  @ApiOkResponse({ type: WhatsAppTemplateResponseDto })
+  updateTemplate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Param('templateId') templateId: string,
+    @Body() body: UpdateWhatsAppTemplateDto,
+  ) {
+    return this.whatsAppAssistantService.updateTemplate(
+      user,
+      id,
+      templateId,
+      body,
+    );
+  }
+
+  @Post('configs/:id/templates/:templateId/submit')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('whatsapp_assistant', 'configure')
+  @ApiOperation({ summary: 'Submit a WhatsApp template draft to Meta' })
+  @ApiOkResponse({ type: WhatsAppTemplateResponseDto })
+  submitTemplate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Param('templateId') templateId: string,
+  ) {
+    return this.whatsAppAssistantService.submitTemplate(user, id, templateId);
+  }
+
+  @Delete('configs/:id/templates/:templateId')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('whatsapp_assistant', 'configure')
+  @ApiOperation({ summary: 'Delete a local WhatsApp template draft' })
+  deleteTemplate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Param('templateId') templateId: string,
+  ) {
+    return this.whatsAppAssistantService.deleteTemplate(user, id, templateId);
   }
 
   @Get('conversations')

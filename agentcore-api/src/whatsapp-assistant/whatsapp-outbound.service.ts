@@ -21,6 +21,20 @@ export interface MetaWhatsAppTemplate {
   status: string;
   category?: string;
   components?: unknown[];
+  rejected_reason?: string;
+}
+
+export interface MetaWhatsAppTemplateSubmission {
+  id?: string;
+  status?: string;
+  category?: string;
+}
+
+export interface MetaTemplateMediaUpload {
+  handle: string;
+  filename: string;
+  mimeType: string;
+  size: number;
 }
 
 @Injectable()
@@ -112,7 +126,7 @@ export class WhatsAppOutboundService {
     );
     url.searchParams.set(
       'fields',
-      'id,name,language,status,category,components',
+      'id,name,language,status,category,components,rejected_reason',
     );
     url.searchParams.set('limit', '100');
     const templates: MetaWhatsAppTemplate[] = [];
@@ -138,6 +152,130 @@ export class WhatsAppOutboundService {
     }
 
     return templates;
+  }
+
+  async createMetaTemplate(
+    config: WhatsAppAssistantConfig,
+    input: {
+      name: string;
+      language: string;
+      category: string;
+      components: Record<string, unknown>[];
+    },
+  ): Promise<MetaWhatsAppTemplateSubmission> {
+    if (config.provider !== 'meta') {
+      throw new BadRequestException(
+        'Template submission is only available for Meta configurations',
+      );
+    }
+    const { accessToken, businessAccountId } =
+      this.metaManagementCredentials(config);
+    const url = new URL(
+      `${this.graphBaseUrl()}/${encodeURIComponent(businessAccountId)}/message_templates`,
+    );
+    const response = await this.fetchWithRetry(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(input),
+    });
+    const body = (await response.json().catch(() => ({}))) as
+      | MetaWhatsAppTemplateSubmission
+      | { error?: { message?: string; error_user_msg?: string } };
+    if (!response.ok) {
+      const error = 'error' in body ? body.error : undefined;
+      throw new ServiceUnavailableException(
+        error?.error_user_msg ??
+          error?.message ??
+          `Meta template submission failed with ${response.status}`,
+      );
+    }
+    return body as MetaWhatsAppTemplateSubmission;
+  }
+
+  async uploadTemplateMedia(
+    config: WhatsAppAssistantConfig,
+    file: {
+      buffer: Buffer;
+      originalname: string;
+      mimetype: string;
+      size: number;
+    },
+  ): Promise<MetaTemplateMediaUpload> {
+    if (config.provider !== 'meta') {
+      throw new BadRequestException(
+        'Template media uploads are only available for Meta configurations',
+      );
+    }
+    const settings =
+      config.settings &&
+      !Array.isArray(config.settings) &&
+      typeof config.settings === 'object'
+        ? (config.settings as Record<string, unknown>)
+        : {};
+    const appId =
+      typeof settings.metaAppId === 'string' ? settings.metaAppId.trim() : '';
+    if (!/^\d+$/.test(appId)) {
+      throw new BadRequestException(
+        'A numeric Meta App ID is required in the WhatsApp configuration before uploading template media',
+      );
+    }
+    if (!config.accessTokenEncrypted) {
+      throw new ServiceUnavailableException(
+        `Meta access token is missing for config ${config.id}`,
+      );
+    }
+    const accessToken = this.cryptoService.decrypt(config.accessTokenEncrypted);
+    const sessionUrl = new URL(
+      `${this.graphBaseUrl()}/${encodeURIComponent(appId)}/uploads`,
+    );
+    sessionUrl.searchParams.set('file_name', file.originalname);
+    sessionUrl.searchParams.set('file_length', String(file.size));
+    sessionUrl.searchParams.set('file_type', file.mimetype);
+    const sessionResponse = await this.fetchWithRetry(sessionUrl, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const session = (await sessionResponse.json().catch(() => ({}))) as {
+      id?: string;
+      error?: { message?: string };
+    };
+    if (!sessionResponse.ok || !session.id) {
+      throw new ServiceUnavailableException(
+        session.error?.message ??
+          `Meta upload session failed with ${sessionResponse.status}`,
+      );
+    }
+
+    const uploadUrl = new URL(`${this.graphBaseUrl()}/${session.id}`);
+    this.assertGraphUrl(uploadUrl);
+    const uploadResponse = await this.fetchWithRetry(uploadUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `OAuth ${accessToken}`,
+        'Content-Type': file.mimetype,
+        file_offset: '0',
+      },
+      body: Uint8Array.from(file.buffer).buffer,
+    });
+    const uploaded = (await uploadResponse.json().catch(() => ({}))) as {
+      h?: string;
+      error?: { message?: string };
+    };
+    if (!uploadResponse.ok || !uploaded.h) {
+      throw new ServiceUnavailableException(
+        uploaded.error?.message ??
+          `Meta template media upload failed with ${uploadResponse.status}`,
+      );
+    }
+    return {
+      handle: uploaded.h,
+      filename: file.originalname,
+      mimeType: file.mimetype,
+      size: file.size,
+    };
   }
 
   private async send(

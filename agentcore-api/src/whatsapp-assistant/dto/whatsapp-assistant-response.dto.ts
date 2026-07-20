@@ -67,6 +67,18 @@ export class WhatsAppTemplateResponseDto {
   components: unknown[];
 
   @ApiProperty()
+  source: string;
+
+  @ApiPropertyOptional()
+  providerTemplateId?: string | null;
+
+  @ApiPropertyOptional()
+  rejectionReason?: string | null;
+
+  @ApiPropertyOptional()
+  submittedAt?: Date | null;
+
+  @ApiProperty()
   syncedAt: Date;
 }
 

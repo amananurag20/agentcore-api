@@ -8,6 +8,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  Matches,
   IsUUID,
   Max,
   Min,
@@ -209,6 +210,72 @@ export class SendWhatsAppTemplateMessageDto {
   })
   @IsArray()
   @ArrayMaxSize(20)
+  @IsObject({ each: true })
+  @IsOptional()
+  components?: Record<string, unknown>[];
+}
+
+export enum WhatsAppTemplateCategoryDto {
+  marketing = 'MARKETING',
+  utility = 'UTILITY',
+  authentication = 'AUTHENTICATION',
+}
+
+export class CreateWhatsAppTemplateDto {
+  @ApiProperty({ example: 'appointment_reminder' })
+  @IsString()
+  @Matches(/^[a-z][a-z0-9_]{0,511}$/, {
+    message:
+      'Template name must start with a letter and contain only lowercase letters, numbers, and underscores',
+  })
+  name: string;
+
+  @ApiProperty({ example: 'en_US' })
+  @IsString()
+  @Matches(/^[a-z]{2,3}(?:_[A-Z]{2})?$/, {
+    message: 'Template language must look like en or en_US',
+  })
+  language: string;
+
+  @ApiProperty({ enum: WhatsAppTemplateCategoryDto })
+  @IsEnum(WhatsAppTemplateCategoryDto)
+  category: WhatsAppTemplateCategoryDto;
+
+  @ApiProperty({
+    example: [{ type: 'BODY', text: 'Hello {{1}}' }],
+  })
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsObject({ each: true })
+  components: Record<string, unknown>[];
+}
+
+export class UpdateWhatsAppTemplateDto {
+  @ApiPropertyOptional({ example: 'appointment_reminder' })
+  @IsString()
+  @Matches(/^[a-z][a-z0-9_]{0,511}$/, {
+    message:
+      'Template name must start with a letter and contain only lowercase letters, numbers, and underscores',
+  })
+  @IsOptional()
+  name?: string;
+
+  @ApiPropertyOptional({ example: 'en_US' })
+  @IsString()
+  @Matches(/^[a-z]{2,3}(?:_[A-Z]{2})?$/, {
+    message: 'Template language must look like en or en_US',
+  })
+  @IsOptional()
+  language?: string;
+
+  @ApiPropertyOptional({ enum: WhatsAppTemplateCategoryDto })
+  @IsEnum(WhatsAppTemplateCategoryDto)
+  @IsOptional()
+  category?: WhatsAppTemplateCategoryDto;
+
+  @ApiPropertyOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
   @IsObject({ each: true })
   @IsOptional()
   components?: Record<string, unknown>[];

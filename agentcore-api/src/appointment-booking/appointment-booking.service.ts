@@ -57,6 +57,7 @@ import {
   ClaimAppointmentWaitlistDto,
   CreateAppointmentBlackoutDto,
   JoinAppointmentWaitlistDto,
+  ListAppointmentScheduleDto,
   ListWaitlistDto,
   PublicCancelAppointmentSeriesDto,
   UpdateAppointmentPolicyDto,
@@ -1532,6 +1533,170 @@ export class AppointmentBookingService {
       total,
       page,
       limit,
+    };
+  }
+
+  async listSchedule(
+    currentUser: AuthenticatedUser,
+    input: ListAppointmentScheduleDto,
+  ) {
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    await this.assertAppointmentBookingEnabled(organizationId);
+    const from = new Date(input.from);
+    const to = new Date(input.to);
+    if (from >= to) throw new BadRequestException('from must be before to');
+    if (to.getTime() - from.getTime() > 63 * 24 * 60 * 60_000) {
+      throw new BadRequestException('Schedule range cannot exceed 63 days');
+    }
+
+    const overlap = { startAt: { lt: to }, endAt: { gt: from } };
+    const staffWhere: Prisma.AppointmentStaffWhereInput = {
+      organizationId,
+      status: 'active',
+      id: input.staffId,
+      ...(input.serviceId
+        ? { services: { some: { serviceId: input.serviceId } } }
+        : {}),
+    };
+    const resourceWhere: Prisma.AppointmentResourceWhereInput = {
+      organizationId,
+      ...(input.serviceId
+        ? { services: { some: { serviceId: input.serviceId } } }
+        : {}),
+    };
+
+    const [
+      bookings,
+      availability,
+      staffTimeOff,
+      resourceTimeOff,
+      blackouts,
+      waitlist,
+      calendarFailures,
+      scheduleStaff,
+    ] = await Promise.all([
+      this.prisma.appointmentBooking.findMany({
+        where: {
+          organizationId,
+          serviceId: input.serviceId,
+          staffId: input.staffId,
+          ...overlap,
+        },
+        orderBy: { startAt: 'asc' },
+      }),
+      this.prisma.appointmentStaffAvailability.findMany({
+        where: {
+          organizationId,
+          isActive: true,
+          staffId: input.staffId,
+          staff: staffWhere,
+        },
+        include: { staff: { select: { name: true, timezone: true } } },
+        orderBy: [{ dayOfWeek: 'asc' }, { startTime: 'asc' }],
+      }),
+      this.prisma.appointmentStaffTimeOff.findMany({
+        where: {
+          organizationId,
+          staffId: input.staffId,
+          staff: staffWhere,
+          ...overlap,
+        },
+        include: { staff: { select: { name: true, timezone: true } } },
+        orderBy: { startAt: 'asc' },
+      }),
+      this.prisma.appointmentResourceTimeOff.findMany({
+        where: { organizationId, resource: resourceWhere, ...overlap },
+        include: { resource: { select: { name: true, type: true } } },
+        orderBy: { startAt: 'asc' },
+      }),
+      this.prisma.appointmentBlackout.findMany({
+        where: {
+          organizationId,
+          OR: [{ annual: true }, overlap],
+        },
+        orderBy: { startAt: 'asc' },
+      }),
+      this.prisma.appointmentWaitlistEntry.findMany({
+        where: {
+          organizationId,
+          serviceId: input.serviceId,
+          staffId: input.staffId,
+          status: { in: ['waiting', 'offered'] },
+          ...overlap,
+        },
+        include: {
+          service: { select: { name: true } },
+          staff: { select: { name: true } },
+        },
+        orderBy: [{ startAt: 'asc' }, { position: 'asc' }],
+      }),
+      this.prisma.appointmentCalendarEvent.findMany({
+        where: {
+          organizationId,
+          status: { in: ['failed', 'dead_letter'] },
+          booking: {
+            serviceId: input.serviceId,
+            staffId: input.staffId,
+            ...overlap,
+          },
+        },
+        include: {
+          booking: {
+            select: { startAt: true, endAt: true, customerName: true },
+          },
+          connection: { select: { provider: true, staffId: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+      }),
+      this.prisma.appointmentStaff.findMany({
+        where: staffWhere,
+        select: { id: true, name: true, timezone: true },
+      }),
+    ]);
+
+    const externalBusy = (
+      await Promise.all(
+        scheduleStaff.map(async (member) =>
+          (
+            await this.calendarService.listExternalBusyIntervals(
+              member.id,
+              from,
+              to,
+            )
+          ).map((interval) => ({
+            id: `${member.id}:${interval.startAt.toISOString()}:${interval.endAt.toISOString()}`,
+            staffId: member.id,
+            staffName: member.name,
+            timezone: member.timezone,
+            startAt: interval.startAt,
+            endAt: interval.endAt,
+          })),
+        ),
+      )
+    )
+      .flat()
+      .filter(
+        (busy) =>
+          !bookings.some(
+            (booking) =>
+              booking.staffId === busy.staffId &&
+              booking.startAt < busy.endAt &&
+              booking.endAt > busy.startAt,
+          ),
+      );
+
+    return {
+      bookings: bookings.map((booking) => this.toBookingResponse(booking)),
+      availability,
+      staffTimeOff,
+      resourceTimeOff,
+      blackouts,
+      waitlist,
+      externalBusy,
+      calendarFailures,
     };
   }
 

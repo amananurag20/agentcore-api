@@ -89,4 +89,85 @@ describe('WhatsAppOutboundService', () => {
       template: { name: 'order_update', language: { code: 'hi' } },
     });
   });
+
+  it('submits a template draft to the configured Meta business account', async () => {
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ id: 'meta-template-1', status: 'PENDING' }),
+          { status: 200 },
+        ),
+      );
+    const service = new WhatsAppOutboundService(
+      { get: (_key: string, fallback?: unknown) => fallback } as never,
+      { decrypt: () => 'management-token' } as never,
+    );
+    const liveConfig = {
+      ...config,
+      provider: 'meta',
+      accessTokenEncrypted: 'encrypted',
+      businessAccountId: 'waba-1',
+    } as WhatsAppAssistantConfig;
+
+    await expect(
+      service.createMetaTemplate(liveConfig, {
+        name: 'appointment_reminder',
+        language: 'en_US',
+        category: 'UTILITY',
+        components: [{ type: 'BODY', text: 'Hello {{1}}' }],
+      }),
+    ).resolves.toMatchObject({ id: 'meta-template-1', status: 'PENDING' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const requestUrl: unknown = fetchMock.mock.calls[0][0];
+    expect(requestUrl).toBeInstanceOf(URL);
+    if (!(requestUrl instanceof URL)) throw new Error('Expected URL request');
+    expect(requestUrl.pathname).toContain('/waba-1/message_templates');
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST' });
+  });
+
+  it('uploads template sample media through Meta resumable upload', async () => {
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 'upload:session?sig=abc' }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ h: '4::meta-handle' }), { status: 200 }),
+      );
+    const service = new WhatsAppOutboundService(
+      { get: (_key: string, fallback?: unknown) => fallback } as never,
+      { decrypt: () => 'management-token' } as never,
+    );
+    const liveConfig = {
+      ...config,
+      provider: 'meta',
+      accessTokenEncrypted: 'encrypted',
+      settings: { metaAppId: '123456789' },
+    } as WhatsAppAssistantConfig;
+
+    await expect(
+      service.uploadTemplateMedia(liveConfig, {
+        buffer: Buffer.from('sample'),
+        originalname: 'header.png',
+        mimetype: 'image/png',
+        size: 6,
+      }),
+    ).resolves.toMatchObject({ handle: '4::meta-handle' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const sessionUrl: unknown = fetchMock.mock.calls[0][0];
+    expect(sessionUrl).toBeInstanceOf(URL);
+    if (!(sessionUrl instanceof URL)) throw new Error('Expected URL request');
+    expect(sessionUrl.pathname).toContain('/123456789/uploads');
+    const uploadInit = fetchMock.mock.calls[1][1];
+    expect(uploadInit?.method).toBe('POST');
+    expect(uploadInit?.headers).toMatchObject({
+      Authorization: 'OAuth management-token',
+      file_offset: '0',
+    });
+  });
 });

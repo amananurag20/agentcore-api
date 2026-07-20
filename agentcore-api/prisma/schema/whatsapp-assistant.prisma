@@ -34,6 +34,9 @@ model WhatsAppTemplate {
   status             String
   category           String?
   components         Json                    @default("[]")
+  source             String                  @default("meta")
+  rejectionReason    String?                 @map("rejection_reason")
+  submittedAt        DateTime?               @map("submitted_at")
   syncedAt           DateTime                @default(now()) @map("synced_at")
   createdAt          DateTime                @default(now()) @map("created_at")
   updatedAt          DateTime                @updatedAt @map("updated_at")

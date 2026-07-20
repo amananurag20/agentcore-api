@@ -130,6 +130,347 @@ describe('WhatsAppAssistantService hardening', () => {
     expect(count).not.toHaveBeenCalled();
   });
 
+  it('creates a validated local WhatsApp template draft', async () => {
+    const create = jest
+      .fn<(input: unknown) => Promise<Record<string, unknown>>>()
+      .mockResolvedValue({
+        id: 'template-1',
+        configId: 'config-1',
+        name: 'appointment_reminder',
+        language: 'en_US',
+        status: 'DRAFT',
+        source: 'local',
+      });
+    const service = createService({
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+      },
+      whatsAppAssistantConfig: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'config-1',
+          organizationId: 'org-1',
+          provider: 'meta',
+        }),
+      },
+      whatsAppTemplate: { create },
+    });
+
+    await expect(
+      service.createTemplate(adminUser, 'config-1', {
+        name: 'appointment_reminder',
+        language: 'en_US',
+        category: 'UTILITY' as never,
+        components: [
+          {
+            type: 'BODY',
+            text: 'Hi {{1}}, your appointment is on {{2}}.',
+            example: { body_text: [['Ada', 'Monday']] },
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ status: 'DRAFT', source: 'local' });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects draft variables without matching Meta examples', async () => {
+    const create = jest.fn();
+    const service = createService({
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+      },
+      whatsAppAssistantConfig: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'config-1',
+          organizationId: 'org-1',
+          provider: 'meta',
+        }),
+      },
+      whatsAppTemplate: { create },
+    });
+
+    await expect(
+      service.createTemplate(adminUser, 'config-1', {
+        name: 'appointment_reminder',
+        language: 'en_US',
+        category: 'UTILITY' as never,
+        components: [{ type: 'BODY', text: 'Hello {{1}}' }],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('accepts Meta authentication components and rejects generic auth copy', async () => {
+    const create = jest.fn().mockResolvedValue({
+      id: 'auth-1',
+      status: 'DRAFT',
+      source: 'local',
+    });
+    const service = createService({
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+      },
+      whatsAppAssistantConfig: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'config-1',
+          organizationId: 'org-1',
+          provider: 'meta',
+        }),
+      },
+      whatsAppTemplate: { create },
+    });
+    const valid = {
+      name: 'login_code',
+      language: 'en_US',
+      category: 'AUTHENTICATION' as never,
+      components: [
+        { type: 'BODY', add_security_recommendation: true },
+        { type: 'FOOTER', code_expiration_minutes: 10 },
+        {
+          type: 'BUTTONS',
+          buttons: [{ type: 'OTP', otp_type: 'COPY_CODE', text: 'Copy code' }],
+        },
+      ],
+    };
+
+    await expect(
+      service.createTemplate(adminUser, 'config-1', valid),
+    ).resolves.toMatchObject({ status: 'DRAFT' });
+    await expect(
+      service.createTemplate(adminUser, 'config-1', {
+        ...valid,
+        components: [
+          { type: 'BODY', text: 'Your code is {{1}}' },
+          {
+            type: 'BUTTONS',
+            buttons: [
+              { type: 'OTP', otp_type: 'COPY_CODE', text: 'Copy code' },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('requires review examples for dynamic URLs and sample handles for media headers', async () => {
+    const create = jest.fn().mockResolvedValue({ id: 'template-1' });
+    const service = createService({
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+      },
+      whatsAppAssistantConfig: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'config-1',
+          organizationId: 'org-1',
+          provider: 'meta',
+        }),
+      },
+      whatsAppTemplate: { create },
+    });
+    const base = {
+      name: 'offer_image',
+      language: 'en_US',
+      category: 'MARKETING' as never,
+      components: [
+        {
+          type: 'HEADER',
+          format: 'IMAGE',
+          example: { header_handle: ['4::sample-handle'] },
+        },
+        { type: 'BODY', text: 'See your offer' },
+        {
+          type: 'BUTTONS',
+          buttons: [
+            {
+              type: 'URL',
+              text: 'View offer',
+              url: 'https://example.com/offers/{{1}}',
+              example: ['summer2026'],
+            },
+          ],
+        },
+      ],
+    };
+
+    await expect(
+      service.createTemplate(adminUser, 'config-1', base),
+    ).resolves.toBeDefined();
+    await expect(
+      service.createTemplate(adminUser, 'config-1', {
+        ...base,
+        components: [
+          { type: 'BODY', text: 'See your offer' },
+          {
+            type: 'BUTTONS',
+            buttons: [
+              {
+                type: 'URL',
+                text: 'View offer',
+                url: 'https://example.com/offers/{{1}}',
+              },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('validates runtime send values against the approved template definition', () => {
+    const service = createService() as unknown as {
+      normalizeTemplateSendComponents(
+        category: string,
+        definitions: Record<string, unknown>[],
+        components: Record<string, unknown>[],
+      ): Record<string, unknown>[];
+    };
+    const definitions = [
+      { type: 'HEADER', format: 'IMAGE' },
+      { type: 'BODY', text: 'Hello {{1}}, order {{2}} is ready.' },
+      {
+        type: 'BUTTONS',
+        buttons: [
+          {
+            type: 'URL',
+            text: 'View order',
+            url: 'https://example.com/orders/{{1}}',
+          },
+        ],
+      },
+    ];
+    const components = [
+      {
+        type: 'header',
+        parameters: [
+          { type: 'image', image: { link: 'https://cdn.example.com/a.jpg' } },
+        ],
+      },
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: 'Ada' },
+          { type: 'text', text: 'ORD-1' },
+        ],
+      },
+      {
+        type: 'button',
+        sub_type: 'url',
+        index: '0',
+        parameters: [{ type: 'text', text: 'ORD-1' }],
+      },
+    ];
+
+    expect(
+      service.normalizeTemplateSendComponents(
+        'UTILITY',
+        definitions,
+        components,
+      ),
+    ).toHaveLength(3);
+    expect(() =>
+      service.normalizeTemplateSendComponents(
+        'UTILITY',
+        definitions,
+        components.filter((component) => component.type !== 'body'),
+      ),
+    ).toThrow(BadRequestException);
+    expect(() =>
+      service.normalizeTemplateSendComponents('UTILITY', definitions, [
+        ...components.slice(0, 2),
+        { ...components[2], index: '9' },
+      ]),
+    ).toThrow(BadRequestException);
+  });
+
+  it('requires both authentication code bindings at send time', () => {
+    const service = createService() as unknown as {
+      normalizeTemplateSendComponents(
+        category: string,
+        definitions: Record<string, unknown>[],
+        components: Record<string, unknown>[],
+      ): Record<string, unknown>[];
+    };
+    const definitions = [
+      { type: 'BODY', add_security_recommendation: true },
+      {
+        type: 'BUTTONS',
+        buttons: [{ type: 'OTP', otp_type: 'COPY_CODE', text: 'Copy code' }],
+      },
+    ];
+    const body = {
+      type: 'body',
+      parameters: [{ type: 'text', text: '483920' }],
+    };
+    const button = {
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: '483920' }],
+    };
+
+    expect(
+      service.normalizeTemplateSendComponents('AUTHENTICATION', definitions, [
+        body,
+        button,
+      ]),
+    ).toHaveLength(2);
+    expect(() =>
+      service.normalizeTemplateSendComponents('AUTHENTICATION', definitions, [
+        body,
+      ]),
+    ).toThrow(BadRequestException);
+  });
+
+  it('submits an immutable draft to Meta and persists its provider lifecycle', async () => {
+    const update = jest
+      .fn<(input: unknown) => Promise<Record<string, unknown>>>()
+      .mockResolvedValue({
+        id: 'template-1',
+        status: 'PENDING',
+        providerTemplateId: 'meta-template-1',
+      });
+    const createMetaTemplate = jest.fn().mockResolvedValue({
+      id: 'meta-template-1',
+      status: 'PENDING',
+    });
+    const service = createService(
+      {
+        organizationProduct: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+        },
+        whatsAppAssistantConfig: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'config-1',
+            organizationId: 'org-1',
+            provider: 'meta',
+          }),
+        },
+        whatsAppTemplate: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'template-1',
+            configId: 'config-1',
+            name: 'appointment_reminder',
+            language: 'en_US',
+            category: 'UTILITY',
+            status: 'DRAFT',
+            providerTemplateId: null,
+            components: [{ type: 'BODY', text: 'Appointment confirmed' }],
+          }),
+          update,
+        },
+      },
+      { consume: jest.fn() },
+      { createMetaTemplate },
+    );
+
+    await expect(
+      service.submitTemplate(adminUser, 'config-1', 'template-1'),
+    ).resolves.toMatchObject({ status: 'PENDING' });
+    expect(createMetaTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'config-1' }),
+      expect.objectContaining({ name: 'appointment_reminder' }),
+    );
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
   it('selects an approved template using the detected conversation locale', async () => {
     const service = createService({
       whatsAppTemplate: {

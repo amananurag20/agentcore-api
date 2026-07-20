@@ -25,12 +25,14 @@ import { RateLimitService } from '../rate-limit/rate-limit.service';
 import {
   AssignWhatsAppConversationDto,
   CreateWhatsAppConfigDto,
+  CreateWhatsAppTemplateDto,
   ListWhatsAppConversationsDto,
   SendWhatsAppAgentMessageDto,
   SendWhatsAppMediaMessageDto,
   SendWhatsAppTemplateMessageDto,
   UpdateWhatsAppConfigDto,
   UpdateWhatsAppConversationStatusDto,
+  UpdateWhatsAppTemplateDto,
   WhatsAppInboundWebhookDto,
 } from './dto/whatsapp-assistant.dto';
 import {
@@ -309,6 +311,258 @@ export class WhatsAppAssistantService {
     });
   }
 
+  async createTemplate(
+    currentUser: AuthenticatedUser,
+    configId: string,
+    input: CreateWhatsAppTemplateDto,
+  ) {
+    const config = await this.findConfigForActor(currentUser, configId);
+    if (config.provider !== 'meta') {
+      throw new BadRequestException(
+        'Template drafts are only available for Meta configurations',
+      );
+    }
+    const components = this.normalizeTemplateComponents(
+      input.category,
+      input.components,
+    );
+    try {
+      const template = await this.prisma.whatsAppTemplate.create({
+        data: {
+          organizationId: config.organizationId,
+          configId: config.id,
+          name: input.name,
+          language: input.language,
+          category: input.category,
+          components: this.toJsonArray(components),
+          status: 'DRAFT',
+          source: 'local',
+        },
+      });
+      await this.auditService.record({
+        actor: currentUser,
+        organizationId: config.organizationId,
+        action: 'whatsapp.template_created',
+        entityType: 'whatsapp_template',
+        entityId: template.id,
+        metadata: {
+          configId,
+          name: template.name,
+          language: template.language,
+        },
+      });
+      return template;
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          `A ${input.language} template named ${input.name} already exists`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async updateTemplate(
+    currentUser: AuthenticatedUser,
+    configId: string,
+    templateId: string,
+    input: UpdateWhatsAppTemplateDto,
+  ) {
+    const { config, template } = await this.findTemplateForActor(
+      currentUser,
+      configId,
+      templateId,
+    );
+    if (
+      template.status.toUpperCase() !== 'DRAFT' ||
+      template.providerTemplateId
+    ) {
+      throw new ConflictException(
+        'Only local draft templates can be edited; duplicate this template to create a new version',
+      );
+    }
+    const category = input.category ?? template.category ?? 'UTILITY';
+    const components = this.normalizeTemplateComponents(
+      category,
+      input.components ??
+        (this.toJsonArray(template.components) as unknown as Record<
+          string,
+          unknown
+        >[]),
+    );
+    try {
+      const updated = await this.prisma.whatsAppTemplate.update({
+        where: { id: template.id },
+        data: {
+          ...(input.name ? { name: input.name } : {}),
+          ...(input.language ? { language: input.language } : {}),
+          ...(input.category ? { category: input.category } : {}),
+          category,
+          components: this.toJsonArray(components),
+          rejectionReason: null,
+        },
+      });
+      await this.auditService.record({
+        actor: currentUser,
+        organizationId: config.organizationId,
+        action: 'whatsapp.template_updated',
+        entityType: 'whatsapp_template',
+        entityId: template.id,
+        metadata: { configId },
+      });
+      return updated;
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'A template with this name and language already exists',
+        );
+      }
+      throw error;
+    }
+  }
+
+  async submitTemplate(
+    currentUser: AuthenticatedUser,
+    configId: string,
+    templateId: string,
+  ) {
+    const { config, template } = await this.findTemplateForActor(
+      currentUser,
+      configId,
+      templateId,
+    );
+    if (config.provider !== 'meta') {
+      throw new BadRequestException(
+        'Template submission is only available for Meta configurations',
+      );
+    }
+    if (
+      template.status.toUpperCase() !== 'DRAFT' ||
+      template.providerTemplateId
+    ) {
+      throw new ConflictException('Only an unsubmitted draft can be submitted');
+    }
+    const components = this.normalizeTemplateComponents(
+      template.category ?? 'UTILITY',
+      this.toJsonArray(template.components) as unknown as Record<
+        string,
+        unknown
+      >[],
+    );
+    const submitted = await this.outboundService.createMetaTemplate(config, {
+      name: template.name,
+      language: template.language,
+      category: template.category ?? 'UTILITY',
+      components,
+    });
+    const now = new Date();
+    const updated = await this.prisma.whatsAppTemplate.update({
+      where: { id: template.id },
+      data: {
+        providerTemplateId: submitted.id,
+        status: submitted.status ?? 'PENDING',
+        category: submitted.category ?? template.category,
+        submittedAt: now,
+        syncedAt: now,
+        rejectionReason: null,
+      },
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'whatsapp.template_submitted',
+      entityType: 'whatsapp_template',
+      entityId: template.id,
+      metadata: {
+        configId,
+        providerTemplateId: submitted.id,
+        status: updated.status,
+      },
+    });
+    return updated;
+  }
+
+  async uploadTemplateMedia(
+    currentUser: AuthenticatedUser,
+    configId: string,
+    file?: Express.Multer.File,
+  ) {
+    const config = await this.findConfigForActor(currentUser, configId);
+    if (!file) throw new BadRequestException('A media file is required');
+    const allowedMimeTypes = new Set([
+      'image/jpeg',
+      'image/png',
+      'video/mp4',
+      'application/pdf',
+    ]);
+    if (!allowedMimeTypes.has(file.mimetype)) {
+      throw new BadRequestException(
+        'Template media must be a JPEG, PNG, MP4 video, or PDF document',
+      );
+    }
+    if (!file.size || file.size > 16 * 1024 * 1024) {
+      throw new BadRequestException(
+        'Template sample media must be between 1 byte and 16 MB',
+      );
+    }
+    this.assertTemplateMediaSignature(file.mimetype, file.buffer);
+    const uploaded = await this.outboundService.uploadTemplateMedia(config, {
+      buffer: file.buffer,
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size,
+    });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'whatsapp.template_media_uploaded',
+      entityType: 'whatsapp_config',
+      entityId: config.id,
+      metadata: {
+        filename: uploaded.filename,
+        mimeType: uploaded.mimeType,
+        size: uploaded.size,
+      },
+    });
+    return uploaded;
+  }
+
+  async deleteTemplate(
+    currentUser: AuthenticatedUser,
+    configId: string,
+    templateId: string,
+  ) {
+    const { config, template } = await this.findTemplateForActor(
+      currentUser,
+      configId,
+      templateId,
+    );
+    if (
+      template.providerTemplateId ||
+      template.status.toUpperCase() !== 'DRAFT'
+    ) {
+      throw new ConflictException(
+        'Only local drafts can be deleted here; manage submitted templates in Meta and synchronize',
+      );
+    }
+    await this.prisma.whatsAppTemplate.delete({ where: { id: template.id } });
+    await this.auditService.record({
+      actor: currentUser,
+      organizationId: config.organizationId,
+      action: 'whatsapp.template_deleted',
+      entityType: 'whatsapp_template',
+      entityId: template.id,
+      metadata: { configId, name: template.name, language: template.language },
+    });
+    return { deleted: true, id: template.id };
+  }
+
   async syncTemplates(currentUser: AuthenticatedUser, configId: string) {
     const config = await this.findConfigForActor(currentUser, configId);
     if (config.provider !== 'meta') {
@@ -335,6 +589,8 @@ export class WhatsAppAssistantService {
             status: template.status,
             category: template.category,
             components: this.toJsonArray(template.components),
+            source: 'meta',
+            rejectionReason: template.rejected_reason,
             syncedAt,
           },
           update: {
@@ -342,12 +598,17 @@ export class WhatsAppAssistantService {
             status: template.status,
             category: template.category,
             components: this.toJsonArray(template.components),
+            rejectionReason: template.rejected_reason,
             syncedAt,
           },
         }),
       ),
       this.prisma.whatsAppTemplate.updateMany({
-        where: { configId: config.id, syncedAt: { lt: syncedAt } },
+        where: {
+          configId: config.id,
+          providerTemplateId: { not: null },
+          syncedAt: { lt: syncedAt },
+        },
         data: { status: 'STALE' },
       }),
     ]);
@@ -416,6 +677,14 @@ export class WhatsAppAssistantService {
       input.language,
       conversation.locale,
     );
+    const components = this.normalizeTemplateSendComponents(
+      template.category ?? 'UTILITY',
+      this.toJsonArray(template.components) as unknown as Record<
+        string,
+        unknown
+      >[],
+      input.components ?? [],
+    );
     const result = await this.deliverAgentOutbound({
       currentUser,
       conversation,
@@ -425,7 +694,7 @@ export class WhatsAppAssistantService {
         templateId: template.id,
         templateName: template.name,
         language: template.language,
-        components: input.components ?? [],
+        components,
         agentId: currentUser.sub,
       },
       successAction: 'whatsapp.template_sent',
@@ -439,7 +708,7 @@ export class WhatsAppAssistantService {
           to: conversation.contactWaId,
           name: template.name,
           language: template.language,
-          components: input.components,
+          components: components.length ? components : undefined,
         }),
     });
     return {
@@ -1455,6 +1724,21 @@ export class WhatsAppAssistantService {
     return config;
   }
 
+  private async findTemplateForActor(
+    currentUser: AuthenticatedUser,
+    configId: string,
+    templateId: string,
+  ) {
+    const config = await this.findConfigForActor(currentUser, configId);
+    const template = await this.prisma.whatsAppTemplate.findFirst({
+      where: { id: templateId, configId: config.id },
+    });
+    if (!template) {
+      throw new NotFoundException('WhatsApp template not found');
+    }
+    return { config, template };
+  }
+
   private async findActiveConfig(id: string) {
     const config = await this.prisma.whatsAppAssistantConfig.findFirst({
       where: { id, status: 'active' },
@@ -2082,8 +2366,777 @@ export class WhatsAppAssistantService {
     return (value ?? {}) as Prisma.InputJsonObject;
   }
 
-  private toJsonArray(value: unknown[] | undefined): Prisma.InputJsonArray {
-    return (value ?? []) as Prisma.InputJsonArray;
+  private toJsonArray(value: unknown): Prisma.InputJsonArray {
+    return (Array.isArray(value) ? value : []) as Prisma.InputJsonArray;
+  }
+
+  private normalizeTemplateSendComponents(
+    rawCategory: string,
+    templateComponents: Record<string, unknown>[],
+    input: Record<string, unknown>[],
+  ): Record<string, unknown>[] {
+    const serialized = JSON.stringify(input);
+    if (Buffer.byteLength(serialized, 'utf8') > 32 * 1024) {
+      throw new BadRequestException('Template send components are too large');
+    }
+    const components = JSON.parse(serialized) as Record<string, unknown>[];
+    const seen = new Set<string>();
+    for (const component of components) {
+      const type =
+        typeof component.type === 'string'
+          ? component.type.trim().toLowerCase()
+          : '';
+      if (!['header', 'body', 'button'].includes(type)) {
+        throw new BadRequestException(
+          `Unsupported template send component ${type}`,
+        );
+      }
+      component.type = type;
+      const parameters = Array.isArray(component.parameters)
+        ? component.parameters
+        : [];
+      if (!parameters.length || parameters.length > 20) {
+        throw new BadRequestException(
+          `${type} must contain between one and twenty parameters`,
+        );
+      }
+      parameters.forEach((parameter) =>
+        this.validateTemplateSendParameter(parameter),
+      );
+      if (type === 'button') {
+        const rawIndex = component.index;
+        const index =
+          typeof rawIndex === 'string' || typeof rawIndex === 'number'
+            ? String(rawIndex)
+            : '';
+        const subType =
+          typeof component.sub_type === 'string'
+            ? component.sub_type.trim().toLowerCase()
+            : '';
+        if (!/^\d+$/.test(index)) {
+          throw new BadRequestException(
+            'Template button component requires a numeric index',
+          );
+        }
+        if (!['url', 'quick_reply', 'flow', 'catalog'].includes(subType)) {
+          throw new BadRequestException(
+            `Unsupported template button parameter type ${subType}`,
+          );
+        }
+        component.index = index;
+        component.sub_type = subType;
+        const key = `button:${index}:${subType}`;
+        if (seen.has(key)) {
+          throw new BadRequestException(
+            'Template button parameters cannot be duplicated',
+          );
+        }
+        seen.add(key);
+      } else {
+        if (seen.has(type)) {
+          throw new BadRequestException(
+            `Template send can contain only one ${type} component`,
+          );
+        }
+        seen.add(type);
+      }
+    }
+
+    const definitions: Record<string, unknown>[] = templateComponents.map(
+      (component) => ({
+        ...component,
+        type:
+          typeof component.type === 'string'
+            ? component.type.trim().toUpperCase()
+            : '',
+      }),
+    );
+    const bodyDefinition = definitions.find(
+      (component) => component.type === 'BODY',
+    );
+    const bodyCount =
+      rawCategory.toUpperCase() === 'AUTHENTICATION'
+        ? 1
+        : this.templateVariableCount(
+            typeof bodyDefinition?.text === 'string' ? bodyDefinition.text : '',
+          );
+    this.assertRuntimeParameterCount(components, 'body', bodyCount);
+
+    const headerDefinition = definitions.find(
+      (component) => component.type === 'HEADER',
+    );
+    const headerFormat =
+      typeof headerDefinition?.format === 'string'
+        ? headerDefinition.format.toUpperCase()
+        : 'NONE';
+    const headerCount =
+      headerFormat === 'TEXT'
+        ? this.templateVariableCount(
+            typeof headerDefinition?.text === 'string'
+              ? headerDefinition.text
+              : '',
+          )
+        : ['IMAGE', 'VIDEO', 'DOCUMENT', 'LOCATION'].includes(headerFormat)
+          ? 1
+          : 0;
+    const headerComponent = this.assertRuntimeParameterCount(
+      components,
+      'header',
+      headerCount,
+    );
+    if (headerComponent && headerCount) {
+      const parameters = headerComponent.parameters as Record<
+        string,
+        unknown
+      >[];
+      const expected = headerFormat === 'TEXT' ? 'TEXT' : headerFormat;
+      if (
+        parameters.some(
+          (parameter) => String(parameter.type).toUpperCase() !== expected,
+        )
+      ) {
+        throw new BadRequestException(
+          `Template header requires a ${expected.toLowerCase()} parameter`,
+        );
+      }
+    }
+
+    const buttonsDefinition = definitions.find(
+      (component) => component.type === 'BUTTONS',
+    );
+    const rawButtons = Array.isArray(buttonsDefinition?.buttons)
+      ? buttonsDefinition.buttons
+      : [];
+    const expectedButtons = new Map<string, boolean>();
+    rawButtons.forEach((rawButton, index) => {
+      const button = this.asRecord(rawButton);
+      const type =
+        typeof button.type === 'string' ? button.type.toUpperCase() : '';
+      let subType: string | null = null;
+      let required = false;
+      if (type === 'OTP') {
+        subType = 'url';
+        required = true;
+      } else if (
+        type === 'URL' &&
+        typeof button.url === 'string' &&
+        /\{\{1\}\}/.test(button.url)
+      ) {
+        subType = 'url';
+        required = true;
+      } else if (type === 'FLOW') {
+        subType = 'flow';
+        required = true;
+      } else if (type === 'MPM') {
+        subType = 'catalog';
+        required = true;
+      } else if (type === 'QUICK_REPLY') {
+        subType = 'quick_reply';
+      }
+      if (subType) expectedButtons.set(`${index}:${subType}`, required);
+    });
+    const suppliedButtons = components.filter(
+      (component) => component.type === 'button',
+    );
+    for (const component of suppliedButtons) {
+      const key = `${String(component.index)}:${String(component.sub_type)}`;
+      if (!expectedButtons.has(key)) {
+        throw new BadRequestException(
+          `Template does not define runtime button parameters for index ${String(component.index)}`,
+        );
+      }
+      const parameters = component.parameters as Record<string, unknown>[];
+      const subType = String(component.sub_type);
+      const expectedParameterType =
+        subType === 'quick_reply'
+          ? 'payload'
+          : subType === 'flow' || subType === 'catalog'
+            ? 'action'
+            : 'text';
+      if (
+        parameters.length !== 1 ||
+        parameters[0].type !== expectedParameterType
+      ) {
+        throw new BadRequestException(
+          `Template ${subType} button requires one ${expectedParameterType} parameter`,
+        );
+      }
+      if (subType === 'flow') {
+        const action = this.asRecord(parameters[0].action);
+        if (
+          typeof action.flow_token !== 'string' ||
+          !action.flow_token.trim()
+        ) {
+          throw new BadRequestException(
+            'Template Flow button requires a non-empty flow token',
+          );
+        }
+      }
+      if (subType === 'catalog') {
+        const action = this.asRecord(parameters[0].action);
+        if (
+          typeof action.thumbnail_product_retailer_id !== 'string' ||
+          !action.thumbnail_product_retailer_id.trim()
+        ) {
+          throw new BadRequestException(
+            'Template catalog button requires a thumbnail product retailer ID',
+          );
+        }
+      }
+    }
+    for (const [key, required] of expectedButtons) {
+      if (
+        required &&
+        !suppliedButtons.some(
+          (component) =>
+            `${String(component.index)}:${String(component.sub_type)}` === key,
+        )
+      ) {
+        throw new BadRequestException(
+          `Template requires runtime parameters for button ${key.split(':')[0]}`,
+        );
+      }
+    }
+    components.forEach((component) => {
+      if (component.type === 'button' && component.sub_type === 'catalog') {
+        component.sub_type = 'CATALOG';
+      }
+    });
+    return components;
+  }
+
+  private assertRuntimeParameterCount(
+    components: Record<string, unknown>[],
+    type: 'header' | 'body',
+    expected: number,
+  ) {
+    const component = components.find((item) => item.type === type);
+    const actual = component
+      ? (component.parameters as Record<string, unknown>[]).length
+      : 0;
+    if (actual !== expected) {
+      throw new BadRequestException(
+        `Template ${type} requires exactly ${expected} runtime parameter${expected === 1 ? '' : 's'}`,
+      );
+    }
+    return component;
+  }
+
+  private validateTemplateSendParameter(rawParameter: unknown) {
+    const parameter = this.asRecord(rawParameter);
+    const type =
+      typeof parameter.type === 'string'
+        ? parameter.type.trim().toLowerCase()
+        : '';
+    parameter.type = type;
+    if (type === 'text') {
+      if (
+        typeof parameter.text !== 'string' ||
+        !parameter.text.trim() ||
+        parameter.text.length > 4096
+      ) {
+        throw new BadRequestException(
+          'Template text parameters must be between 1 and 4096 characters',
+        );
+      }
+      parameter.text = parameter.text.trim();
+      return;
+    }
+    if (type === 'payload') {
+      if (
+        typeof parameter.payload !== 'string' ||
+        !parameter.payload.trim() ||
+        parameter.payload.length > 256
+      ) {
+        throw new BadRequestException(
+          'Quick-reply payload must be between 1 and 256 characters',
+        );
+      }
+      return;
+    }
+    if (['image', 'video', 'document'].includes(type)) {
+      const media = this.asRecord(parameter[type]);
+      const id = typeof media.id === 'string' ? media.id.trim() : '';
+      const link = typeof media.link === 'string' ? media.link.trim() : '';
+      if ((!id && !link) || (id && link)) {
+        throw new BadRequestException(
+          `Template ${type} parameter requires either a media ID or HTTPS link`,
+        );
+      }
+      if (link) this.assertPublicHttpsUrl(link, `Template ${type} link`);
+      return;
+    }
+    if (type === 'location') {
+      const location = this.asRecord(parameter.location);
+      const rawLatitude = location.latitude;
+      const rawLongitude = location.longitude;
+      const latitude = Number(location.latitude);
+      const longitude = Number(location.longitude);
+      if (
+        (typeof rawLatitude !== 'number' &&
+          (typeof rawLatitude !== 'string' || !rawLatitude.trim())) ||
+        (typeof rawLongitude !== 'number' &&
+          (typeof rawLongitude !== 'string' || !rawLongitude.trim())) ||
+        !Number.isFinite(latitude) ||
+        latitude < -90 ||
+        latitude > 90 ||
+        !Number.isFinite(longitude) ||
+        longitude < -180 ||
+        longitude > 180 ||
+        typeof location.name !== 'string' ||
+        !location.name.trim() ||
+        typeof location.address !== 'string' ||
+        !location.address.trim()
+      ) {
+        throw new BadRequestException(
+          'Template location requires valid coordinates, name, and address',
+        );
+      }
+      return;
+    }
+    if (type === 'action') {
+      const action = this.asRecord(parameter.action);
+      if (!Object.keys(action).length) {
+        throw new BadRequestException('Template action cannot be empty');
+      }
+      if (Buffer.byteLength(JSON.stringify(action), 'utf8') > 8 * 1024) {
+        throw new BadRequestException('Template action is too large');
+      }
+      return;
+    }
+    if (type === 'currency' || type === 'date_time') {
+      if (!Object.keys(this.asRecord(parameter[type])).length) {
+        throw new BadRequestException(`Template ${type} parameter is invalid`);
+      }
+      return;
+    }
+    throw new BadRequestException(`Unsupported template parameter ${type}`);
+  }
+
+  private templateVariableCount(text: string) {
+    return new Set(
+      [...text.matchAll(/\{\{(\d+)\}\}/g)].map((match) => Number(match[1])),
+    ).size;
+  }
+
+  private assertPublicHttpsUrl(value: string, label: string) {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new BadRequestException(`${label} is invalid`);
+    }
+    if (url.protocol !== 'https:' || !url.hostname) {
+      throw new BadRequestException(`${label} must use HTTPS`);
+    }
+  }
+
+  private normalizeTemplateComponents(
+    rawCategory: string,
+    input: Record<string, unknown>[],
+  ): Record<string, unknown>[] {
+    if (!input.length) {
+      throw new BadRequestException('A template body is required');
+    }
+    const serialized = JSON.stringify(input);
+    if (Buffer.byteLength(serialized, 'utf8') > 64 * 1024) {
+      throw new BadRequestException('Template components are too large');
+    }
+    const category = rawCategory.trim().toUpperCase();
+    if (!['MARKETING', 'UTILITY', 'AUTHENTICATION'].includes(category)) {
+      throw new BadRequestException(
+        `Unsupported template category ${category}`,
+      );
+    }
+    const components = JSON.parse(serialized) as Record<string, unknown>[];
+    const seen = new Set<string>();
+    for (const component of components) {
+      const type =
+        typeof component.type === 'string'
+          ? component.type.trim().toUpperCase()
+          : '';
+      if (!['HEADER', 'BODY', 'FOOTER', 'BUTTONS'].includes(type)) {
+        throw new BadRequestException(`Unsupported template component ${type}`);
+      }
+      if (seen.has(type)) {
+        throw new BadRequestException(`Template can contain only one ${type}`);
+      }
+      seen.add(type);
+      component.type = type;
+
+      if (type === 'BUTTONS') {
+        this.validateTemplateButtons(category, component.buttons);
+        continue;
+      }
+
+      if (category === 'AUTHENTICATION') {
+        this.normalizeAuthenticationComponent(type, component);
+        continue;
+      }
+
+      if (type === 'HEADER') {
+        this.normalizeStandardHeader(component);
+        continue;
+      }
+
+      const text =
+        typeof component.text === 'string' ? component.text.trim() : '';
+      if (!text) {
+        throw new BadRequestException(`${type} text cannot be empty`);
+      }
+      const maxLength = type === 'BODY' ? 1024 : 60;
+      if (text.length > maxLength) {
+        throw new BadRequestException(
+          `${type} text cannot exceed ${maxLength} characters`,
+        );
+      }
+      component.text = text;
+      this.validateTemplateVariables(type, text, component.example);
+    }
+    if (!seen.has('BODY')) {
+      throw new BadRequestException('A template body is required');
+    }
+    if (category === 'AUTHENTICATION' && !seen.has('BUTTONS')) {
+      throw new BadRequestException(
+        'Authentication templates require one OTP button',
+      );
+    }
+    return components;
+  }
+
+  private assertTemplateMediaSignature(mimeType: string, buffer: Buffer) {
+    const matches =
+      (mimeType === 'image/jpeg' &&
+        buffer.length >= 3 &&
+        buffer[0] === 0xff &&
+        buffer[1] === 0xd8 &&
+        buffer[2] === 0xff) ||
+      (mimeType === 'image/png' &&
+        buffer.length >= 8 &&
+        buffer
+          .subarray(0, 8)
+          .equals(
+            Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+          )) ||
+      (mimeType === 'application/pdf' &&
+        buffer.length >= 5 &&
+        buffer.subarray(0, 5).toString('ascii') === '%PDF-') ||
+      (mimeType === 'video/mp4' &&
+        buffer.length >= 12 &&
+        buffer.subarray(4, 8).toString('ascii') === 'ftyp');
+    if (!matches) {
+      throw new BadRequestException(
+        'Template media content does not match its declared file type',
+      );
+    }
+  }
+
+  private normalizeStandardHeader(component: Record<string, unknown>) {
+    const format =
+      typeof component.format === 'string'
+        ? component.format.trim().toUpperCase()
+        : 'TEXT';
+    if (!['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'LOCATION'].includes(format)) {
+      throw new BadRequestException(`Unsupported template header ${format}`);
+    }
+    component.format = format;
+    if (format === 'LOCATION') {
+      delete component.text;
+      delete component.example;
+      return;
+    }
+    if (format !== 'TEXT') {
+      const example = this.asRecord(component.example);
+      const handles = Array.isArray(example.header_handle)
+        ? example.header_handle
+        : [];
+      if (
+        handles.length !== 1 ||
+        typeof handles[0] !== 'string' ||
+        !handles[0].trim()
+      ) {
+        throw new BadRequestException(
+          `${format} headers require one Meta sample media handle`,
+        );
+      }
+      component.example = { header_handle: [handles[0].trim()] };
+      delete component.text;
+      return;
+    }
+    const text =
+      typeof component.text === 'string' ? component.text.trim() : '';
+    if (!text || text.length > 60) {
+      throw new BadRequestException(
+        'TEXT header text is required and cannot exceed 60 characters',
+      );
+    }
+    component.text = text;
+    this.validateTemplateVariables('HEADER', text, component.example, 1);
+  }
+
+  private normalizeAuthenticationComponent(
+    type: string,
+    component: Record<string, unknown>,
+  ) {
+    if (type === 'HEADER') {
+      throw new BadRequestException(
+        'Authentication templates cannot contain a header',
+      );
+    }
+    if (type === 'BODY') {
+      if (typeof component.add_security_recommendation !== 'boolean') {
+        throw new BadRequestException(
+          'Authentication template body requires add_security_recommendation',
+        );
+      }
+      delete component.text;
+      delete component.example;
+      return;
+    }
+    if (type === 'FOOTER') {
+      const minutes = component.code_expiration_minutes;
+      if (
+        typeof minutes !== 'number' ||
+        !Number.isInteger(minutes) ||
+        minutes < 1 ||
+        minutes > 90
+      ) {
+        throw new BadRequestException(
+          'Authentication code expiration must be an integer from 1 to 90 minutes',
+        );
+      }
+      delete component.text;
+    }
+  }
+
+  private validateTemplateVariables(
+    type: string,
+    text: string,
+    rawExample: unknown,
+    maximum?: number,
+  ) {
+    const matches = [...text.matchAll(/\{\{(\d+)\}\}/g)];
+    const stripped = text.replace(/\{\{\d+\}\}/g, '');
+    if (stripped.includes('{{') || stripped.includes('}}')) {
+      throw new BadRequestException(
+        `${type} contains an invalid variable; use {{1}}, {{2}}, and so on`,
+      );
+    }
+    const indexes = [...new Set(matches.map((match) => Number(match[1])))];
+    if (!indexes.length) return;
+    if (maximum !== undefined && indexes.length > maximum) {
+      throw new BadRequestException(
+        `${type} can contain at most ${maximum} variable`,
+      );
+    }
+    if (indexes.some((value, index) => value !== index + 1)) {
+      throw new BadRequestException(
+        `${type} variables must be sequential, beginning with {{1}}`,
+      );
+    }
+    const example =
+      rawExample && !Array.isArray(rawExample) && typeof rawExample === 'object'
+        ? (rawExample as Record<string, unknown>)
+        : {};
+    const values =
+      type === 'BODY'
+        ? Array.isArray(example.body_text) &&
+          Array.isArray(example.body_text[0])
+          ? example.body_text[0]
+          : []
+        : Array.isArray(example.header_text)
+          ? example.header_text
+          : [];
+    if (
+      values.length !== indexes.length ||
+      values.some((value) => typeof value !== 'string' || !value.trim())
+    ) {
+      throw new BadRequestException(
+        `${type} requires one non-empty example value for every variable`,
+      );
+    }
+  }
+
+  private validateTemplateButtons(category: string, rawButtons: unknown) {
+    if (
+      !Array.isArray(rawButtons) ||
+      !rawButtons.length ||
+      rawButtons.length > 3
+    ) {
+      throw new BadRequestException(
+        'Templates can contain between one and three buttons',
+      );
+    }
+    if (category === 'AUTHENTICATION' && rawButtons.length !== 1) {
+      throw new BadRequestException(
+        'Authentication templates require exactly one OTP button',
+      );
+    }
+    let phoneButtons = 0;
+    let flowButtons = 0;
+    for (const rawButton of rawButtons) {
+      if (
+        !rawButton ||
+        Array.isArray(rawButton) ||
+        typeof rawButton !== 'object'
+      ) {
+        throw new BadRequestException('Template button is invalid');
+      }
+      const button = rawButton as Record<string, unknown>;
+      const type =
+        typeof button.type === 'string' ? button.type.toUpperCase() : '';
+      if (
+        !['QUICK_REPLY', 'URL', 'PHONE_NUMBER', 'OTP', 'FLOW', 'MPM'].includes(
+          type,
+        )
+      ) {
+        throw new BadRequestException(`Unsupported template button ${type}`);
+      }
+      if (
+        typeof button.text !== 'string' ||
+        !button.text.trim() ||
+        button.text.trim().length > 25
+      ) {
+        throw new BadRequestException(
+          'Each template button needs text of at most 25 characters',
+        );
+      }
+      button.type = type;
+      button.text = button.text.trim();
+      if (category === 'AUTHENTICATION') {
+        if (type !== 'OTP') {
+          throw new BadRequestException(
+            'Authentication templates support only an OTP button',
+          );
+        }
+        this.normalizeOtpButton(button);
+        continue;
+      }
+      if (type === 'OTP') {
+        throw new BadRequestException(
+          'OTP buttons are available only for authentication templates',
+        );
+      }
+      if (type === 'MPM' && category !== 'MARKETING') {
+        throw new BadRequestException(
+          'Product catalog buttons are available only for marketing templates',
+        );
+      }
+      if (type === 'URL') {
+        if (
+          typeof button.url !== 'string' ||
+          !button.url.startsWith('https://')
+        ) {
+          throw new BadRequestException('Template button URLs must use HTTPS');
+        }
+        const variables = [...button.url.matchAll(/\{\{(\d+)\}\}/g)];
+        const stripped = button.url.replace(/\{\{\d+\}\}/g, '');
+        if (
+          stripped.includes('{{') ||
+          stripped.includes('}}') ||
+          variables.length > 1 ||
+          (variables.length === 1 && variables[0][1] !== '1')
+        ) {
+          throw new BadRequestException(
+            'Dynamic button URLs can contain only one {{1}} variable',
+          );
+        }
+        if (variables.length) {
+          const examples = Array.isArray(button.example) ? button.example : [];
+          if (
+            examples.length !== 1 ||
+            typeof examples[0] !== 'string' ||
+            !examples[0].trim()
+          ) {
+            throw new BadRequestException(
+              'Dynamic button URLs require one non-empty example value',
+            );
+          }
+          button.example = [examples[0].trim()];
+        } else {
+          delete button.example;
+        }
+      }
+      if (
+        type === 'PHONE_NUMBER' &&
+        (typeof button.phone_number !== 'string' ||
+          !/^\+[1-9]\d{7,14}$/.test(button.phone_number))
+      ) {
+        throw new BadRequestException(
+          'Template phone buttons require an E.164 phone number',
+        );
+      }
+      if (type === 'PHONE_NUMBER') phoneButtons += 1;
+      if (type === 'FLOW') {
+        flowButtons += 1;
+        if (
+          typeof button.flow_id !== 'string' ||
+          !/^\d+$/.test(button.flow_id.trim())
+        ) {
+          throw new BadRequestException(
+            'Flow buttons require a numeric Meta Flow ID',
+          );
+        }
+        button.flow_id = button.flow_id.trim();
+        button.flow_action =
+          button.flow_action === 'data_exchange' ? 'data_exchange' : 'navigate';
+        if (
+          button.navigate_screen !== undefined &&
+          (typeof button.navigate_screen !== 'string' ||
+            !button.navigate_screen.trim())
+        ) {
+          throw new BadRequestException(
+            'Flow navigate screen cannot be empty when provided',
+          );
+        }
+      }
+    }
+    if (phoneButtons > 1) {
+      throw new BadRequestException(
+        'A template can contain at most one phone number button',
+      );
+    }
+    if (flowButtons > 1) {
+      throw new BadRequestException(
+        'A template can contain at most one Flow button',
+      );
+    }
+  }
+
+  private normalizeOtpButton(button: Record<string, unknown>) {
+    const otpType =
+      typeof button.otp_type === 'string'
+        ? button.otp_type.trim().toUpperCase()
+        : '';
+    if (!['COPY_CODE', 'ONE_TAP'].includes(otpType)) {
+      throw new BadRequestException(
+        'Authentication OTP type must be COPY_CODE or ONE_TAP',
+      );
+    }
+    button.otp_type = otpType;
+    if (otpType === 'ONE_TAP') {
+      for (const field of ['autofill_text', 'package_name', 'signature_hash']) {
+        if (typeof button[field] !== 'string' || !button[field].trim()) {
+          throw new BadRequestException(
+            `ONE_TAP authentication requires ${field}`,
+          );
+        }
+        button[field] = button[field].trim();
+      }
+      if (!/^[A-Za-z][A-Za-z0-9_.]*$/.test(String(button.package_name))) {
+        throw new BadRequestException('Android package name is invalid');
+      }
+    } else {
+      delete button.autofill_text;
+      delete button.package_name;
+      delete button.signature_hash;
+    }
+  }
+
+  private asRecord(value: unknown): Record<string, unknown> {
+    return value && !Array.isArray(value) && typeof value === 'object'
+      ? (value as Record<string, unknown>)
+      : {};
   }
 
   private toRecord(value: Prisma.JsonValue): Record<string, unknown> {

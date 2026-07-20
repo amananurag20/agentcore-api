@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AppointmentBookingService } from './appointment-booking.service';
 
@@ -43,6 +43,42 @@ describe('AppointmentBookingService concurrency errors', () => {
     await expect(
       runSerializable.runSerializable(() => Promise.resolve('unreachable')),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+});
+
+describe('AppointmentBookingService schedule range', () => {
+  const prisma = {
+    organizationProduct: {
+      findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+    },
+  };
+  const service = new AppointmentBookingService(
+    {} as never,
+    {} as never,
+    { get: jest.fn() } as never,
+    {} as never,
+    {} as never,
+    prisma as never,
+    {} as never,
+  );
+  const user = { orgId: 'org-1', roles: ['org_admin'] } as never;
+
+  it('rejects an inverted schedule range', async () => {
+    await expect(
+      service.listSchedule(user, {
+        from: '2026-08-02T00:00:00.000Z',
+        to: '2026-08-01T00:00:00.000Z',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('caps schedule queries at 63 days', async () => {
+    await expect(
+      service.listSchedule(user, {
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-04-01T00:00:00.000Z',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 });
 
