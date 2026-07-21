@@ -713,41 +713,68 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       input.leadCapture,
       { name: input.visitorName, email: input.visitorEmail },
     );
-    const conversation = await this.prisma.$transaction(async (transaction) => {
-      const lead = capture
-        ? await this.leadsService.captureLead(transaction, capture, {
+    const createConversation = () =>
+      this.prisma.$transaction(async (transaction) => {
+        const leadResult = capture
+          ? await this.leadsService.captureLead(transaction, capture, {
+              organizationId: config.organizationId,
+              widgetConfigId: config.id,
+              visitorId: input.visitorId,
+              metadata: input.metadata,
+            })
+          : null;
+        const conversation = await transaction.customerChatConversation.create({
+          data: {
             organizationId: config.organizationId,
             widgetConfigId: config.id,
+            leadId: leadResult?.lead.id,
             visitorId: input.visitorId,
-            metadata: input.metadata,
-          })
-        : null;
-      return transaction.customerChatConversation.create({
-        data: {
-          organizationId: config.organizationId,
-          widgetConfigId: config.id,
-          leadId: lead?.id,
-          visitorId: input.visitorId,
-          visitorName: capture?.name ?? input.visitorName,
-          visitorEmail: capture?.email ?? input.visitorEmail,
-          visitorTokenHash: this.hashVisitorToken(visitorToken),
-          visitorTokenExpiresAt: this.addHours(
-            now,
-            this.configService.get<number>(
-              'CUSTOMER_CHAT_VISITOR_SESSION_HOURS',
-              24,
+            visitorName: capture?.name ?? input.visitorName,
+            visitorEmail: capture?.email ?? input.visitorEmail,
+            visitorTokenHash: this.hashVisitorToken(visitorToken),
+            visitorTokenExpiresAt: this.addHours(
+              now,
+              this.configService.get<number>(
+                'CUSTOMER_CHAT_VISITOR_SESSION_HOURS',
+                24,
+              ),
             ),
-          ),
-          lastMessageAt: now,
-          expiresAt: this.addDays(
-            now,
-            this.configService.get<number>('CUSTOMER_CHAT_RETENTION_DAYS', 90),
-          ),
-          metadata: this.toJsonObject(input.metadata),
-        },
-        include: this.conversationInclude(),
+            lastMessageAt: now,
+            expiresAt: this.addDays(
+              now,
+              this.configService.get<number>(
+                'CUSTOMER_CHAT_RETENTION_DAYS',
+                90,
+              ),
+            ),
+            metadata: this.toJsonObject(input.metadata),
+          },
+          include: this.conversationInclude(),
+        });
+        return { conversation, leadResult };
       });
-    });
+    let result: Awaited<ReturnType<typeof createConversation>>;
+    try {
+      result = await createConversation();
+    } catch (error) {
+      if (!this.isUniqueConstraintError(error)) throw error;
+      result = await createConversation();
+    }
+    const { conversation, leadResult } = result;
+
+    if (leadResult) {
+      await this.auditService.record({
+        organizationId: config.organizationId,
+        action: `lead.${leadResult.action}`,
+        entityType: 'lead',
+        entityId: leadResult.lead.id,
+        metadata: {
+          widgetConfigId: config.id,
+          conversationId: conversation.id,
+          mergedLeadIds: leadResult.mergedLeadIds,
+        },
+      });
+    }
 
     await this.publishConversationEvent(conversation, 'conversation.created');
     return {
@@ -2043,6 +2070,11 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
   ): Prisma.CustomerChatLeadFieldCreateWithoutWidgetConfigInput[] {
     const keys = new Set<string>();
     const mappings = new Set<string>();
+    const configuredMappings = new Set(
+      fields
+        .map((field) => String(field.mapping ?? 'custom'))
+        .filter((mapping) => mapping !== 'custom'),
+    );
     return fields.map((field, position) => {
       const key = field.key.trim().toLowerCase();
       const label = field.label.trim();
@@ -2068,6 +2100,18 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       if (mapping === 'phone' && fieldType !== 'phone') {
         throw new BadRequestException(
           'The phone mapping requires a phone field',
+        );
+      }
+      if (mapping === 'name' && fieldType !== 'text') {
+        throw new BadRequestException('The name mapping requires a text field');
+      }
+      if (
+        mapping === 'custom' &&
+        ['name', 'email', 'phone'].includes(key) &&
+        configuredMappings.has(key)
+      ) {
+        throw new BadRequestException(
+          `Custom lead field key conflicts with the ${key} mapping`,
         );
       }
       if (
@@ -2553,6 +2597,13 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
 
   private toErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private isUniqueConstraintError(error: unknown): boolean {
+    return (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    );
   }
 
   private publishConversationEvent(

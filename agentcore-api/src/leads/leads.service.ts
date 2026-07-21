@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -7,8 +8,10 @@ import {
 import {
   LeadCaptureFieldMapping,
   LeadCaptureFieldType,
+  LeadStatus,
   Prisma,
 } from '@prisma/client';
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { PrismaService } from '../prisma/prisma.service';
@@ -32,6 +35,21 @@ export type PreparedLeadCapture = {
   phone?: string;
   normalizedPhone?: string;
   fieldValues: Prisma.InputJsonObject;
+};
+
+export type CapturedLeadResult = {
+  lead: Prisma.LeadGetPayload<object>;
+  action: 'created' | 'updated' | 'merged';
+  mergedLeadIds: string[];
+};
+
+const ALLOWED_STATUS_TRANSITIONS: Record<LeadStatus, Set<LeadStatus>> = {
+  new: new Set(['new', 'contacted', 'qualified', 'disqualified', 'archived']),
+  contacted: new Set(['contacted', 'qualified', 'disqualified', 'archived']),
+  qualified: new Set(['qualified', 'converted', 'disqualified', 'archived']),
+  converted: new Set(['converted', 'archived']),
+  disqualified: new Set(['disqualified', 'new', 'archived']),
+  archived: new Set(['archived', 'new']),
 };
 
 @Injectable()
@@ -70,11 +88,12 @@ export class LeadsService {
         field,
         values[field.key] ?? legacyValue,
       );
-      const missing = value === undefined || value === '' || value === false;
+      const missing =
+        value === undefined || value === '' || value === false || value === 0;
       if (field.required && missing) {
         throw new BadRequestException(`${field.label} is required`);
       }
-      if (value === undefined || value === '') continue;
+      if (missing) continue;
 
       normalizedValues[field.key] = value;
       if (field.mapping === 'name' && typeof value === 'string') {
@@ -105,25 +124,49 @@ export class LeadsService {
       visitorId?: string;
       metadata?: Record<string, unknown>;
     },
-  ) {
-    const identityFilters: Prisma.LeadWhereInput[] = [];
-    if (input.normalizedEmail) {
-      identityFilters.push({ normalizedEmail: input.normalizedEmail });
-    }
-    if (input.normalizedPhone) {
-      identityFilters.push({ normalizedPhone: input.normalizedPhone });
-    }
+  ): Promise<CapturedLeadResult> {
+    await this.lockIdentities(
+      transaction,
+      context.organizationId,
+      input.normalizedEmail,
+      input.normalizedPhone,
+    );
 
-    const existing = identityFilters.length
-      ? await transaction.lead.findFirst({
-          where: {
-            organizationId: context.organizationId,
-            OR: identityFilters,
-          },
-        })
-      : null;
+    const [emailLead, phoneLead] = await Promise.all([
+      input.normalizedEmail
+        ? transaction.lead.findUnique({
+            where: {
+              organizationId_normalizedEmail: {
+                organizationId: context.organizationId,
+                normalizedEmail: input.normalizedEmail,
+              },
+            },
+          })
+        : null,
+      input.normalizedPhone
+        ? transaction.lead.findUnique({
+            where: {
+              organizationId_normalizedPhone: {
+                organizationId: context.organizationId,
+                normalizedPhone: input.normalizedPhone,
+              },
+            },
+          })
+        : null,
+    ]);
+    const matches = [emailLead, phoneLead]
+      .filter((lead): lead is NonNullable<typeof lead> => Boolean(lead))
+      .filter(
+        (lead, index, leads) =>
+          leads.findIndex((candidate) => candidate.id === lead.id) === index,
+      )
+      .sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() ||
+          left.id.localeCompare(right.id),
+      );
     const now = new Date();
-    const data = {
+    const captureData = {
       widgetConfigId: context.widgetConfigId,
       name: input.name,
       email: input.email,
@@ -136,34 +179,77 @@ export class LeadsService {
       lastActivityAt: now,
     };
 
-    if (existing) {
-      return transaction.lead.update({
-        where: { id: existing.id },
+    if (matches.length) {
+      const survivor = matches[0];
+      const mergedLeadIds = matches.slice(1).map((lead) => lead.id);
+      const combinedFieldValues = matches.reduce<Record<string, unknown>>(
+        (values, lead) => ({
+          ...values,
+          ...this.toRecord(lead.fieldValues),
+        }),
+        {},
+      );
+      const combinedMetadata = matches.reduce<Record<string, unknown>>(
+        (metadata, lead) => ({
+          ...metadata,
+          ...this.toRecord(lead.metadata),
+        }),
+        {},
+      );
+      const combinedTags = [...new Set(matches.flatMap((lead) => lead.tags))];
+
+      if (mergedLeadIds.length) {
+        await transaction.customerChatConversation.updateMany({
+          where: { leadId: { in: mergedLeadIds } },
+          data: { leadId: survivor.id },
+        });
+        await transaction.lead.deleteMany({
+          where: { id: { in: mergedLeadIds } },
+        });
+      }
+
+      const lead = await transaction.lead.update({
+        where: { id: survivor.id },
         data: {
-          ...data,
-          name: input.name ?? existing.name,
-          email: input.email ?? existing.email,
-          normalizedEmail: input.normalizedEmail ?? existing.normalizedEmail,
-          phone: input.phone ?? existing.phone,
-          normalizedPhone: input.normalizedPhone ?? existing.normalizedPhone,
+          ...captureData,
+          name: input.name ?? matches.find((lead) => lead.name)?.name,
+          email: input.email ?? matches.find((lead) => lead.email)?.email,
+          normalizedEmail:
+            input.normalizedEmail ??
+            matches.find((lead) => lead.normalizedEmail)?.normalizedEmail,
+          phone: input.phone ?? matches.find((lead) => lead.phone)?.phone,
+          normalizedPhone:
+            input.normalizedPhone ??
+            matches.find((lead) => lead.normalizedPhone)?.normalizedPhone,
+          visitorId:
+            context.visitorId ??
+            matches.find((lead) => lead.visitorId)?.visitorId,
           fieldValues: {
-            ...this.toRecord(existing.fieldValues),
+            ...combinedFieldValues,
             ...input.fieldValues,
           } as Prisma.InputJsonObject,
           metadata: {
-            ...this.toRecord(existing.metadata),
+            ...combinedMetadata,
             ...(context.metadata ?? {}),
           } as Prisma.InputJsonObject,
+          tags: combinedTags,
+          notes: matches.find((lead) => lead.notes)?.notes,
         },
       });
+      return {
+        lead,
+        action: mergedLeadIds.length ? 'merged' : 'updated',
+        mergedLeadIds,
+      };
     }
 
-    return transaction.lead.create({
+    const lead = await transaction.lead.create({
       data: {
         organizationId: context.organizationId,
-        ...data,
+        ...captureData,
       },
     });
+    return { lead, action: 'created', mergedLeadIds: [] };
   }
 
   async list(currentUser: AuthenticatedUser, input: ListLeadsDto) {
@@ -245,38 +331,118 @@ export class LeadsService {
     if (!existing || !this.canAccess(currentUser, existing.organizationId)) {
       throw new NotFoundException('Lead not found');
     }
-    const email = input.email?.trim();
-    const phone = input.phone?.trim();
-    const lead = await this.prisma.lead.update({
-      where: { id },
-      data: {
-        status: input.status,
-        name: input.name?.trim(),
-        email,
-        normalizedEmail: email?.toLowerCase(),
-        phone,
-        normalizedPhone: phone ? this.normalizePhone(phone) : undefined,
-        notes: input.notes?.trim(),
-        tags: input.tags
-          ? [...new Set(input.tags.map((tag) => tag.trim()).filter(Boolean))]
-          : undefined,
-        lastActivityAt: new Date(),
-      },
-      include: {
-        widgetConfig: { select: { id: true, name: true } },
-        conversations: {
-          select: {
-            id: true,
-            status: true,
-            lastMessageAt: true,
-            createdAt: true,
+    if (
+      input.status &&
+      !ALLOWED_STATUS_TRANSITIONS[existing.status].has(input.status)
+    ) {
+      throw new BadRequestException(
+        `Lead status cannot change from ${existing.status} to ${input.status}`,
+      );
+    }
+    const emailProvided = input.email !== undefined;
+    const phoneProvided = input.phone !== undefined;
+    const email = emailProvided ? input.email?.trim() || null : undefined;
+    const phone = phoneProvided ? input.phone?.trim() || null : undefined;
+    const normalizedEmail =
+      email === undefined ? undefined : (email?.toLowerCase() ?? null);
+    const normalizedPhone =
+      phone === undefined
+        ? undefined
+        : phone
+          ? this.normalizePhone(phone)
+          : null;
+
+    const updateLead = () =>
+      this.prisma.$transaction(async (transaction) => {
+        await this.lockIdentities(
+          transaction,
+          existing.organizationId,
+          normalizedEmail ?? undefined,
+          normalizedPhone ?? undefined,
+        );
+        const [emailConflict, phoneConflict] = await Promise.all([
+          normalizedEmail
+            ? transaction.lead.findUnique({
+                where: {
+                  organizationId_normalizedEmail: {
+                    organizationId: existing.organizationId,
+                    normalizedEmail,
+                  },
+                },
+                select: { id: true },
+              })
+            : null,
+          normalizedPhone
+            ? transaction.lead.findUnique({
+                where: {
+                  organizationId_normalizedPhone: {
+                    organizationId: existing.organizationId,
+                    normalizedPhone,
+                  },
+                },
+                select: { id: true },
+              })
+            : null,
+        ]);
+        if (emailConflict && emailConflict.id !== id) {
+          throw new ConflictException('Another lead already uses this email');
+        }
+        if (phoneConflict && phoneConflict.id !== id) {
+          throw new ConflictException('Another lead already uses this phone');
+        }
+        return transaction.lead.update({
+          where: { id },
+          data: {
+            status: input.status,
+            name:
+              input.name === undefined ? undefined : input.name?.trim() || null,
+            email,
+            normalizedEmail,
+            phone,
+            normalizedPhone,
+            notes:
+              input.notes === undefined
+                ? undefined
+                : input.notes?.trim() || null,
+            tags: input.tags
+              ? [
+                  ...new Set(
+                    input.tags.map((tag) => tag.trim()).filter(Boolean),
+                  ),
+                ]
+              : undefined,
+            lastActivityAt: new Date(),
           },
-          orderBy: { lastMessageAt: 'desc' },
-          take: 25,
-        },
-        _count: { select: { conversations: true } },
-      },
-    });
+          include: {
+            widgetConfig: { select: { id: true, name: true } },
+            conversations: {
+              select: {
+                id: true,
+                status: true,
+                lastMessageAt: true,
+                createdAt: true,
+              },
+              orderBy: { lastMessageAt: 'desc' },
+              take: 25,
+            },
+            _count: { select: { conversations: true } },
+          },
+        });
+      });
+    let lead: Awaited<ReturnType<typeof updateLead>>;
+    try {
+      lead = await updateLead();
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'Another lead already uses this email or phone',
+        );
+      }
+      throw error;
+    }
     await this.auditService.record({
       actor: currentUser,
       organizationId: existing.organizationId,
@@ -340,10 +506,36 @@ export class LeadsService {
   }
 
   private normalizePhone(value: string) {
-    const normalized = value.replace(/[^0-9+]/g, '');
-    return normalized.startsWith('+')
-      ? `+${normalized.slice(1).replace(/\+/g, '')}`
-      : normalized.replace(/\+/g, '');
+    const phone = parsePhoneNumberFromString(value);
+    if (!phone?.isValid()) {
+      throw new BadRequestException(
+        'Phone must be a valid international number including country code',
+      );
+    }
+    return phone.number;
+  }
+
+  private async lockIdentities(
+    transaction: Prisma.TransactionClient,
+    organizationId: string,
+    normalizedEmail?: string,
+    normalizedPhone?: string,
+  ) {
+    const identities = [
+      normalizedEmail
+        ? `lead:${organizationId}:email:${normalizedEmail}`
+        : null,
+      normalizedPhone
+        ? `lead:${organizationId}:phone:${normalizedPhone}`
+        : null,
+    ]
+      .filter((identity): identity is string => Boolean(identity))
+      .sort();
+    for (const identity of identities) {
+      await transaction.$queryRaw`
+        SELECT pg_advisory_xact_lock(hashtextextended(${identity}, 0))
+      `;
+    }
   }
 
   private resolveOrganizationId(
