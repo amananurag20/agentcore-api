@@ -706,6 +706,15 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     this.assertOriginAllowed(config.allowedDomains, origin);
     await this.assertCustomerChatEnabled(config.organizationId);
 
+    const hasEnabledLeadFields = config.leadFields.some(
+      (field) => field.enabled,
+    );
+    if (hasEnabledLeadFields && input.leadCaptureSubmitted !== true) {
+      throw new BadRequestException(
+        'Complete the pre-chat form before starting a conversation',
+      );
+    }
+
     const visitorToken = this.createVisitorToken();
     const now = new Date();
     const capture = this.leadsService.prepareCapture(

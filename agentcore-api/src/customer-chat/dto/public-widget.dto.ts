@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsBoolean,
   IsEmail,
   IsObject,
   IsOptional,
@@ -44,6 +45,15 @@ export class CreatePublicCustomerChatConversationDto {
   @IsBoundedJson()
   @IsOptional()
   leadCapture?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    description:
+      'Confirms that the configured pre-chat form was submitted or explicitly skipped.',
+    default: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  leadCaptureSubmitted?: boolean;
 }
 
 export class SendPublicCustomerChatMessageDto {
