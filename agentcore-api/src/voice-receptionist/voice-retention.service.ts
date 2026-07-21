@@ -29,14 +29,23 @@ export class VoiceRetentionService
       'VOICE_RETENTION_SWEEP_INTERVAL_MS',
       3_600_000,
     );
-    this.timer = setInterval(() => void this.sweep(), intervalMs);
+    this.timer = setInterval(() => this.runScheduledSweep(), intervalMs);
     this.timer.unref();
-    const initial = setTimeout(() => void this.sweep(), 60_000);
+    const initial = setTimeout(() => this.runScheduledSweep(), 60_000);
     initial.unref();
   }
 
   onApplicationShutdown(): void {
     if (this.timer) clearInterval(this.timer);
+  }
+
+  private runScheduledSweep(): void {
+    void this.sweep().catch((error) => {
+      this.logger.error(
+        `Voice retention sweep failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+    });
   }
 
   async sweep(): Promise<number> {
