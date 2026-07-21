@@ -532,7 +532,9 @@ export class LeadsService {
       .filter((identity): identity is string => Boolean(identity))
       .sort();
     for (const identity of identities) {
-      await transaction.$queryRaw`
+      // Advisory locks return PostgreSQL `void`, which Prisma cannot deserialize
+      // through $queryRaw. Execute the statement without reading its result.
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(hashtextextended(${identity}, 0))
       `;
     }

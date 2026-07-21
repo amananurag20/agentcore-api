@@ -158,7 +158,7 @@ describe('LeadsService', () => {
 
   it('updates an existing tenant lead matched by normalized email', async () => {
     const transaction = {
-      $queryRaw: jest.fn().mockResolvedValue([]),
+      $executeRaw: jest.fn().mockResolvedValue(1),
       customerChatConversation: { updateMany: jest.fn() },
       lead: {
         findUnique: jest
@@ -199,7 +199,7 @@ describe('LeadsService', () => {
       },
     );
 
-    expect(transaction.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(transaction.$executeRaw).toHaveBeenCalledTimes(1);
     expect(transaction.lead.findUnique).toHaveBeenCalledTimes(1);
     expect(transaction.lead.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -241,7 +241,7 @@ describe('LeadsService', () => {
       createdAt: new Date('2026-02-01'),
     };
     const transaction = {
-      $queryRaw: jest.fn().mockResolvedValue([]),
+      $executeRaw: jest.fn().mockResolvedValue(1),
       customerChatConversation: {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
@@ -305,7 +305,7 @@ describe('LeadsService', () => {
       status: 'new',
     });
     const transaction = {
-      $queryRaw: jest.fn().mockResolvedValue([]),
+      $executeRaw: jest.fn().mockResolvedValue(1),
       lead: {
         findUnique: jest.fn().mockResolvedValue({ id: 'lead-b' }),
         update: jest.fn(),
