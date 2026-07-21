@@ -5,6 +5,7 @@ import { AuditModule } from '../audit/audit.module';
 import { KnowledgeModule } from '../knowledge/knowledge.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { RateLimitModule } from '../rate-limit/rate-limit.module';
+import { LeadsModule } from '../leads/leads.module';
 import {
   CustomerChatController,
   CustomerChatWidgetController,
@@ -19,6 +20,7 @@ import { CustomerChatGateway } from './customer-chat.gateway';
     AppointmentBookingModule,
     AuditModule,
     KnowledgeModule,
+    LeadsModule,
     PrismaModule,
     RateLimitModule,
   ],

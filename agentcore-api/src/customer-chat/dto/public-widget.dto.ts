@@ -36,6 +36,14 @@ export class CreatePublicCustomerChatConversationDto {
   @IsBoundedJson()
   @IsOptional()
   metadata?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    example: { name: 'Ada Visitor', email: 'ada@example.com', teamSize: 20 },
+  })
+  @IsObject()
+  @IsBoundedJson()
+  @IsOptional()
+  leadCapture?: Record<string, unknown>;
 }
 
 export class SendPublicCustomerChatMessageDto {

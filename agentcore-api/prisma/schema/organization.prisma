@@ -29,6 +29,7 @@ model Organization {
   customerChatConversations       CustomerChatConversation[]
   customerChatMessages            CustomerChatMessage[]
   customerChatWidgetConfigs       CustomerChatWidgetConfig[]
+  leads                           Lead[]
   appointmentServices             AppointmentService[]
   appointmentStaff                AppointmentStaff[]
   appointmentBookings             AppointmentBooking[]

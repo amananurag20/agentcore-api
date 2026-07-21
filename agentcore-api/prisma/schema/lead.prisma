@@ -1,0 +1,29 @@
+model Lead {
+  id              String                       @id @default(uuid())
+  organizationId  String                       @map("organization_id")
+  organization    Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  widgetConfigId  String?                      @map("widget_config_id")
+  widgetConfig    CustomerChatWidgetConfig?    @relation(fields: [widgetConfigId], references: [id], onDelete: SetNull)
+  status          LeadStatus                   @default(new)
+  name            String?
+  email           String?
+  normalizedEmail String?                      @map("normalized_email")
+  phone           String?
+  normalizedPhone String?                      @map("normalized_phone")
+  visitorId       String?                      @map("visitor_id")
+  fieldValues     Json                         @default("{}") @map("field_values")
+  metadata        Json                         @default("{}")
+  tags            String[]                     @default([])
+  notes           String?
+  lastActivityAt  DateTime                     @default(now()) @map("last_activity_at")
+  conversations   CustomerChatConversation[]
+  createdAt       DateTime                     @default(now()) @map("created_at")
+  updatedAt       DateTime                     @updatedAt @map("updated_at")
+
+  @@unique([organizationId, normalizedEmail])
+  @@unique([organizationId, normalizedPhone])
+  @@index([organizationId, status, lastActivityAt])
+  @@index([organizationId, name])
+  @@index([widgetConfigId])
+  @@map("leads")
+}

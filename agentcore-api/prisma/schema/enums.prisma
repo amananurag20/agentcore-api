@@ -114,6 +114,33 @@ enum CustomerChatMessageRole {
   system
 }
 
+enum LeadStatus {
+  new
+  contacted
+  qualified
+  converted
+  disqualified
+  archived
+}
+
+enum LeadCaptureFieldType {
+  text
+  email
+  phone
+  number
+  textarea
+  select
+  radio
+  checkbox
+}
+
+enum LeadCaptureFieldMapping {
+  name
+  email
+  phone
+  custom
+}
+
 enum AppointmentServiceStatus {
   active
   inactive

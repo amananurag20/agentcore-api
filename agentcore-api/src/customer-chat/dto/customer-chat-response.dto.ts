@@ -38,6 +38,11 @@ export class CustomerChatConversationDto {
   @ApiProperty({ example: 'org_demo' })
   organizationId: string;
 
+  @ApiPropertyOptional({
+    example: '4fd0a36e-3b30-4ff5-9c56-738b17cedf58',
+  })
+  leadId?: string | null;
+
   @ApiProperty({ enum: ['open', 'waiting_for_agent', 'closed'] })
   status: 'open' | 'waiting_for_agent' | 'closed';
 
@@ -134,6 +139,19 @@ export class CustomerChatWidgetConfigDto {
 
   @ApiProperty({ example: {} })
   settings: Record<string, unknown>;
+
+  @ApiProperty({ type: Object, isArray: true })
+  leadFields: Array<{
+    id?: string;
+    key: string;
+    label: string;
+    type: string;
+    mapping: string;
+    required: boolean;
+    enabled: boolean;
+    placeholder?: string | null;
+    options: string[];
+  }>;
 }
 
 export class CustomerChatWidgetConfigListDto {

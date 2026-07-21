@@ -22,6 +22,7 @@ import {
 } from '../knowledge/knowledge.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
+import { LeadsService } from '../leads/leads.service';
 import {
   AssignCustomerChatConversationDto,
   CustomerChatConversationStatusDto,
@@ -44,7 +45,7 @@ import { ListCustomerChatMessagesDto } from './dto/list-messages.dto';
 import { CustomerChatRealtimeService } from './customer-chat-realtime.service';
 
 type WidgetConfigWithFolders = Prisma.CustomerChatWidgetConfigGetPayload<{
-  include: { folderScopes: true };
+  include: { folderScopes: true; leadFields: true };
 }>;
 
 type ConversationWithMessages = Prisma.CustomerChatConversationGetPayload<{
@@ -100,6 +101,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     private readonly chatService: ChatService,
     private readonly configService: ConfigService,
     private readonly knowledgeService: KnowledgeService,
+    private readonly leadsService: LeadsService,
     private readonly prisma: PrismaService,
     private readonly rateLimitService: RateLimitService,
     private readonly realtimeService: CustomerChatRealtimeService,
@@ -296,6 +298,15 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         });
         if (claimed.count === 0) {
           throw this.conversationConflict();
+        }
+        if (conversation.leadId) {
+          await transaction.lead.updateMany({
+            where: {
+              id: conversation.leadId,
+              organizationId: conversation.organizationId,
+            },
+            data: { lastActivityAt: now },
+          });
         }
         const message = await transaction.customerChatMessage.create({
           data: {
@@ -501,7 +512,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     const [configs, total] = await Promise.all([
       this.prisma.customerChatWidgetConfig.findMany({
         where: { organizationId },
-        include: { folderScopes: true },
+        include: { folderScopes: true, leadFields: true },
         orderBy: { updatedAt: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
@@ -532,6 +543,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       knowledgeScope === 'folders' ? (input.folderIds ?? []) : [];
     await this.assertWidgetFolders(organizationId, knowledgeScope, folderIds);
     this.assertAllowedDomainsForWidget(input.allowedDomains ?? []);
+    const leadFields = this.normalizeLeadFields(input.leadFields ?? []);
 
     const config = await this.prisma.customerChatWidgetConfig.create({
       data: {
@@ -547,8 +559,11 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         folderScopes: {
           create: folderIds.map((folderId) => ({ folderId })),
         },
+        leadFields: {
+          create: leadFields,
+        },
       },
-      include: { folderScopes: true },
+      include: { folderScopes: true, leadFields: true },
     });
 
     await this.auditService.record({
@@ -604,6 +619,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
 
     const replaceFolderScopes =
       input.knowledgeScope !== undefined || input.folderIds !== undefined;
+    const leadFields =
+      input.leadFields === undefined
+        ? undefined
+        : this.normalizeLeadFields(input.leadFields);
     const config = await this.prisma.customerChatWidgetConfig.update({
       where: { id },
       data: {
@@ -626,8 +645,14 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
               create: folderIds.map((folderId) => ({ folderId })),
             }
           : undefined,
+        leadFields: leadFields
+          ? {
+              deleteMany: {},
+              create: leadFields,
+            }
+          : undefined,
       },
-      include: { folderScopes: true },
+      include: { folderScopes: true, leadFields: true },
     });
 
     await this.auditService.record({
@@ -643,6 +668,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         folderIds,
         greetingText: input.greetingText,
         allowedDomains: input.allowedDomains,
+        leadFieldCount: leadFields?.length,
       }),
     });
 
@@ -682,29 +708,45 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
 
     const visitorToken = this.createVisitorToken();
     const now = new Date();
-    const conversation = await this.prisma.customerChatConversation.create({
-      data: {
-        organizationId: config.organizationId,
-        widgetConfigId: config.id,
-        visitorId: input.visitorId,
-        visitorName: input.visitorName,
-        visitorEmail: input.visitorEmail,
-        visitorTokenHash: this.hashVisitorToken(visitorToken),
-        visitorTokenExpiresAt: this.addHours(
-          now,
-          this.configService.get<number>(
-            'CUSTOMER_CHAT_VISITOR_SESSION_HOURS',
-            24,
+    const capture = this.leadsService.prepareCapture(
+      config.leadFields,
+      input.leadCapture,
+      { name: input.visitorName, email: input.visitorEmail },
+    );
+    const conversation = await this.prisma.$transaction(async (transaction) => {
+      const lead = capture
+        ? await this.leadsService.captureLead(transaction, capture, {
+            organizationId: config.organizationId,
+            widgetConfigId: config.id,
+            visitorId: input.visitorId,
+            metadata: input.metadata,
+          })
+        : null;
+      return transaction.customerChatConversation.create({
+        data: {
+          organizationId: config.organizationId,
+          widgetConfigId: config.id,
+          leadId: lead?.id,
+          visitorId: input.visitorId,
+          visitorName: capture?.name ?? input.visitorName,
+          visitorEmail: capture?.email ?? input.visitorEmail,
+          visitorTokenHash: this.hashVisitorToken(visitorToken),
+          visitorTokenExpiresAt: this.addHours(
+            now,
+            this.configService.get<number>(
+              'CUSTOMER_CHAT_VISITOR_SESSION_HOURS',
+              24,
+            ),
           ),
-        ),
-        lastMessageAt: now,
-        expiresAt: this.addDays(
-          now,
-          this.configService.get<number>('CUSTOMER_CHAT_RETENTION_DAYS', 90),
-        ),
-        metadata: this.toJsonObject(input.metadata),
-      },
-      include: this.conversationInclude(),
+          lastMessageAt: now,
+          expiresAt: this.addDays(
+            now,
+            this.configService.get<number>('CUSTOMER_CHAT_RETENTION_DAYS', 90),
+          ),
+          metadata: this.toJsonObject(input.metadata),
+        },
+        include: this.conversationInclude(),
+      });
     });
 
     await this.publishConversationEvent(conversation, 'conversation.created');
@@ -965,6 +1007,15 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
             ),
           },
         });
+        if (conversation.leadId) {
+          await transaction.lead.updateMany({
+            where: {
+              id: conversation.leadId,
+              organizationId: conversation.organizationId,
+            },
+            data: { lastActivityAt: now },
+          });
+        }
         return {
           visitorMessage: message,
           canAutoReply:
@@ -1802,20 +1853,20 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     await this.assertCustomerChatEnabled(organizationId);
     const existing = await this.prisma.customerChatWidgetConfig.findFirst({
       where: { organizationId },
-      include: { folderScopes: true },
+      include: { folderScopes: true, leadFields: true },
       orderBy: { createdAt: 'asc' },
     });
     if (existing) return existing;
     return this.prisma.customerChatWidgetConfig.create({
       data: { organizationId },
-      include: { folderScopes: true },
+      include: { folderScopes: true, leadFields: true },
     });
   }
 
   private async findEnabledWidgetConfig(widgetKey: string) {
     const config = await this.prisma.customerChatWidgetConfig.findUnique({
       where: { widgetKey },
-      include: { folderScopes: true },
+      include: { folderScopes: true, leadFields: true },
     });
 
     if (!config?.enabled) {
@@ -1831,7 +1882,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
   ): Promise<WidgetConfigWithFolders> {
     const config = await this.prisma.customerChatWidgetConfig.findUnique({
       where: { id },
-      include: { folderScopes: true },
+      include: { folderScopes: true, leadFields: true },
     });
     if (
       !config ||
@@ -1951,6 +2002,19 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       greetingText: config.greetingText,
       allowedDomains: config.allowedDomains,
       settings: this.toRecord(config.settings),
+      leadFields: config.leadFields
+        .sort((a, b) => a.position - b.position)
+        .map((field) => ({
+          id: field.id,
+          key: field.key,
+          label: field.label,
+          type: field.type,
+          mapping: field.mapping,
+          required: field.required,
+          enabled: field.enabled,
+          placeholder: field.placeholder,
+          options: field.options,
+        })),
     };
   }
 
@@ -1960,7 +2024,78 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       enabled: config.enabled,
       greetingText: config.greetingText,
       settings: this.toRecord(config.settings),
+      leadFields: config.leadFields
+        .filter((field) => field.enabled)
+        .sort((a, b) => a.position - b.position)
+        .map((field) => ({
+          key: field.key,
+          label: field.label,
+          type: field.type,
+          required: field.required,
+          placeholder: field.placeholder,
+          options: field.options,
+        })),
     };
+  }
+
+  private normalizeLeadFields(
+    fields: NonNullable<CreateCustomerChatWidgetConfigDto['leadFields']>,
+  ): Prisma.CustomerChatLeadFieldCreateWithoutWidgetConfigInput[] {
+    const keys = new Set<string>();
+    const mappings = new Set<string>();
+    return fields.map((field, position) => {
+      const key = field.key.trim().toLowerCase();
+      const label = field.label.trim();
+      const mapping = String(field.mapping ?? 'custom');
+      const fieldType = String(field.type);
+      if (keys.has(key)) {
+        throw new BadRequestException(`Duplicate lead field key: ${key}`);
+      }
+      keys.add(key);
+      if (mapping !== 'custom') {
+        if (mappings.has(mapping)) {
+          throw new BadRequestException(
+            `Only one lead field may map to ${mapping}`,
+          );
+        }
+        mappings.add(mapping);
+      }
+      if (mapping === 'email' && fieldType !== 'email') {
+        throw new BadRequestException(
+          'The email mapping requires an email field',
+        );
+      }
+      if (mapping === 'phone' && fieldType !== 'phone') {
+        throw new BadRequestException(
+          'The phone mapping requires a phone field',
+        );
+      }
+      if (
+        (fieldType === 'select' || fieldType === 'radio') &&
+        !(field.options ?? []).map((option) => option.trim()).filter(Boolean)
+          .length
+      ) {
+        throw new BadRequestException(`${label} requires at least one option`);
+      }
+      return {
+        key,
+        label,
+        type: field.type,
+        mapping:
+          mapping as Prisma.CustomerChatLeadFieldCreateWithoutWidgetConfigInput['mapping'],
+        required: field.required ?? false,
+        enabled: field.enabled ?? true,
+        position,
+        placeholder: field.placeholder?.trim() || null,
+        options: [
+          ...new Set(
+            (field.options ?? [])
+              .map((option) => option.trim())
+              .filter(Boolean),
+          ),
+        ],
+      };
+    });
   }
 
   private toConversationResponse(
@@ -1987,6 +2122,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     return {
       ...base,
       organizationId: conversation.organizationId,
+      leadId: conversation.leadId,
       visitorId: conversation.visitorId,
       visitorName: conversation.visitorName,
       visitorEmail: conversation.visitorEmail,

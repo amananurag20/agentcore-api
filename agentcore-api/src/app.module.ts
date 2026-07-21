@@ -24,6 +24,7 @@ import { UsersModule } from './users/users.module';
 import { VoiceReceptionistModule } from './voice-receptionist/voice-receptionist.module';
 import { WhatsAppAssistantModule } from './whatsapp-assistant/whatsapp-assistant.module';
 import { ServicePrincipalsModule } from './service-principals/service-principals.module';
+import { LeadsModule } from './leads/leads.module';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { ServicePrincipalsModule } from './service-principals/service-principals
     CustomerChatModule,
     HealthModule,
     KnowledgeModule,
+    LeadsModule,
     ObservabilityModule,
     OrganizationsModule,
     ProductsModule,

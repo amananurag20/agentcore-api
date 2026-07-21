@@ -10,6 +10,8 @@ model CustomerChatConversation {
   visitorTokenExpiresAt DateTime?                      @map("visitor_token_expires_at")
   widgetConfigId        String?                        @map("widget_config_id")
   widgetConfig          CustomerChatWidgetConfig?      @relation(fields: [widgetConfigId], references: [id], onDelete: SetNull)
+  leadId                String?                        @map("lead_id")
+  lead                  Lead?                          @relation(fields: [leadId], references: [id], onDelete: SetNull)
   assignedAgentId       String?                        @map("assigned_agent_id")
   assignedAgent         User?                          @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
   handoffRequestedAt    DateTime?                      @map("handoff_requested_at")
@@ -26,6 +28,7 @@ model CustomerChatConversation {
   @@index([visitorId])
   @@index([visitorTokenHash])
   @@index([widgetConfigId])
+  @@index([leadId])
   @@index([organizationId, lastMessageAt])
   @@index([expiresAt])
   @@map("customer_chat_conversations")
@@ -43,6 +46,8 @@ model CustomerChatWidgetConfig {
   allowedDomains String[]                            @default([]) @map("allowed_domains")
   settings       Json                                @default("{}")
   folderScopes   CustomerChatWidgetKnowledgeFolder[]
+  leadFields     CustomerChatLeadField[]
+  leads          Lead[]
   conversations  CustomerChatConversation[]
   createdAt      DateTime                            @default(now()) @map("created_at")
   updatedAt      DateTime                            @updatedAt @map("updated_at")
@@ -50,6 +55,27 @@ model CustomerChatWidgetConfig {
   @@index([organizationId, enabled])
   @@index([enabled])
   @@map("customer_chat_widget_configs")
+}
+
+model CustomerChatLeadField {
+  id             String                         @id @default(uuid())
+  widgetConfigId String                         @map("widget_config_id")
+  widgetConfig   CustomerChatWidgetConfig       @relation(fields: [widgetConfigId], references: [id], onDelete: Cascade)
+  key            String
+  label          String
+  type           LeadCaptureFieldType
+  mapping        LeadCaptureFieldMapping        @default(custom)
+  required       Boolean                        @default(false)
+  enabled        Boolean                        @default(true)
+  position       Int                            @default(0)
+  placeholder    String?
+  options        String[]                       @default([])
+  createdAt      DateTime                       @default(now()) @map("created_at")
+  updatedAt      DateTime                       @updatedAt @map("updated_at")
+
+  @@unique([widgetConfigId, key])
+  @@index([widgetConfigId, enabled, position])
+  @@map("customer_chat_lead_fields")
 }
 
 model CustomerChatWidgetKnowledgeFolder {
