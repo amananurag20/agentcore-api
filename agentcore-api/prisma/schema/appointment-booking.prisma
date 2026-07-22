@@ -10,6 +10,9 @@ model AppointmentService {
   priceCents                Int?                          @map("price_cents")
   currency                  String                        @default("USD")
   maxAttendees              Int                           @default(1) @map("max_attendees")
+  meetingType               AppointmentMeetingType        @default(online) @map("meeting_type")
+  location                  String?
+  defaultAttendeeStaffIds   String[]                       @default([]) @map("default_attendee_staff_ids")
   cancellationWindowMinutes Int?                          @map("cancellation_window_minutes")
   rescheduleWindowMinutes   Int?                          @map("reschedule_window_minutes")
   waitlistEnabled           Boolean                       @default(true) @map("waitlist_enabled")
@@ -171,6 +174,8 @@ model AppointmentBooking {
   id                   String                       @id @default(uuid())
   organizationId       String                       @map("organization_id")
   organization         Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  leadId               String?                      @map("lead_id")
+  lead                 Lead?                        @relation(fields: [leadId], references: [id], onDelete: SetNull)
   serviceId            String                       @map("service_id")
   service              AppointmentService           @relation(fields: [serviceId], references: [id], onDelete: Restrict)
   staffId              String                       @map("staff_id")
@@ -185,6 +190,12 @@ model AppointmentBooking {
   blockedEndAt         DateTime                     @map("blocked_end_at") @ignore
   timezone             String                       @default("UTC")
   notes                String?
+  meetingType          AppointmentMeetingType         @default(online) @map("meeting_type")
+  meetingProvider      AppointmentCalendarProvider?    @map("meeting_provider")
+  meetingUrl           String?                        @map("meeting_url")
+  location             String?
+  attendeeStaffIds     String[]                       @default([]) @map("attendee_staff_ids")
+  attendeeEmails       String[]                       @default([]) @map("attendee_emails")
   cancellationReason   String?                      @map("cancellation_reason")
   rescheduledFromId    String?                      @map("rescheduled_from_id")
   manageTokenHash      String?                      @map("manage_token_hash")
@@ -203,6 +214,7 @@ model AppointmentBooking {
   updatedAt            DateTime                     @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
+  @@index([leadId, startAt])
   @@index([serviceId])
   @@index([staffId, startAt, endAt])
   @@index([customerEmail])
@@ -214,8 +226,9 @@ model AppointmentCalendarConnection {
   id                    String                              @id @default(uuid())
   organizationId        String                              @map("organization_id")
   organization          Organization                        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  staffId               String                              @map("staff_id")
-  staff                 AppointmentStaff                    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  staffId               String?                             @map("staff_id")
+  staff                 AppointmentStaff?                   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  scope                 AppointmentCalendarConnectionScope  @default(staff)
   provider              AppointmentCalendarProvider
   status                AppointmentCalendarConnectionStatus @default(pending)
   accountEmail          String?                             @map("account_email")
@@ -233,8 +246,8 @@ model AppointmentCalendarConnection {
   createdAt             DateTime                            @default(now()) @map("created_at")
   updatedAt             DateTime                            @updatedAt @map("updated_at")
 
-  @@unique([staffId, provider, calendarId])
   @@index([organizationId, status])
+  @@index([staffId, status])
   @@index([oauthStateHash])
   @@map("appointment_calendar_connections")
 }
@@ -311,6 +324,7 @@ model AppointmentBookingPolicy {
   quietHoursStart           String       @default("21:00") @map("quiet_hours_start")
   quietHoursEnd             String       @default("08:00") @map("quiet_hours_end")
   quietHoursTimezone        String       @default("UTC") @map("quiet_hours_timezone")
+  reminderChannels          String[]     @default(["email", "sms", "whatsapp"]) @map("reminder_channels")
   reminderOffsetsMinutes    Int[]        @default([1440, 60]) @map("reminder_offsets_minutes")
   reminderTemplates         Json         @default("{}") @map("reminder_templates")
   createdAt                 DateTime     @default(now()) @map("created_at")

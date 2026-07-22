@@ -203,6 +203,10 @@ export class LeadsService {
           where: { leadId: { in: mergedLeadIds } },
           data: { leadId: survivor.id },
         });
+        await transaction.appointmentBooking.updateMany({
+          where: { leadId: { in: mergedLeadIds } },
+          data: { leadId: survivor.id },
+        });
         await transaction.lead.deleteMany({
           where: { id: { in: mergedLeadIds } },
         });
@@ -281,7 +285,7 @@ export class LeadsService {
         where,
         include: {
           widgetConfig: { select: { id: true, name: true } },
-          _count: { select: { conversations: true } },
+          _count: { select: { conversations: true, appointments: true } },
         },
         orderBy: [{ lastActivityAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * limit,
@@ -313,7 +317,20 @@ export class LeadsService {
           orderBy: { lastMessageAt: 'desc' },
           take: 25,
         },
-        _count: { select: { conversations: true } },
+        appointments: {
+          select: {
+            id: true,
+            status: true,
+            startAt: true,
+            endAt: true,
+            timezone: true,
+            service: { select: { id: true, name: true } },
+            staff: { select: { id: true, name: true } },
+          },
+          orderBy: { startAt: 'desc' },
+          take: 25,
+        },
+        _count: { select: { conversations: true, appointments: true } },
       },
     });
     if (!lead || !this.canAccess(currentUser, lead.organizationId)) {

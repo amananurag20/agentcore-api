@@ -102,6 +102,22 @@ export class UpdateAppointmentPolicyDto {
   @IsOptional()
   quietHoursTimezone?: string;
 
+  @ApiPropertyOptional({
+    enum: AppointmentReminderChannelDto,
+    isArray: true,
+    default: [
+      AppointmentReminderChannelDto.email,
+      AppointmentReminderChannelDto.sms,
+      AppointmentReminderChannelDto.whatsapp,
+    ],
+  })
+  @IsArray()
+  @ArrayMaxSize(3)
+  @ArrayUnique()
+  @IsEnum(AppointmentReminderChannelDto, { each: true })
+  @IsOptional()
+  reminderChannels?: AppointmentReminderChannelDto[];
+
   @ApiPropertyOptional({ type: [Number], example: [10080, 1440, 60] })
   @IsArray()
   @ArrayMaxSize(20)

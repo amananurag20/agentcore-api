@@ -245,6 +245,9 @@ describe('LeadsService', () => {
       customerChatConversation: {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
+      appointmentBooking: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       lead: {
         findUnique: jest
           .fn()
@@ -271,6 +274,10 @@ describe('LeadsService', () => {
     expect(
       transaction.customerChatConversation.updateMany,
     ).toHaveBeenCalledWith({
+      where: { leadId: { in: ['lead-phone'] } },
+      data: { leadId: 'lead-email' },
+    });
+    expect(transaction.appointmentBooking.updateMany).toHaveBeenCalledWith({
       where: { leadId: { in: ['lead-phone'] } },
       data: { leadId: 'lead-email' },
     });

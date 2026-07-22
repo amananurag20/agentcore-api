@@ -28,6 +28,12 @@ export enum AppointmentServiceStatusDto {
   inactive = 'inactive',
 }
 
+export enum AppointmentMeetingTypeDto {
+  online = 'online',
+  in_person = 'in_person',
+  phone = 'phone',
+}
+
 export enum AppointmentStaffStatusDto {
   active = 'active',
   inactive = 'inactive',
@@ -93,6 +99,7 @@ export class CreateAppointmentServiceDto {
 
   @ApiPropertyOptional({ example: 'USD' })
   @IsString()
+  @Matches(/^[A-Za-z]{3}$/)
   @IsOptional()
   currency?: string;
 
@@ -102,6 +109,25 @@ export class CreateAppointmentServiceDto {
   @Max(100)
   @IsOptional()
   maxAttendees?: number;
+
+  @ApiPropertyOptional({
+    enum: AppointmentMeetingTypeDto,
+    default: AppointmentMeetingTypeDto.online,
+  })
+  @IsEnum(AppointmentMeetingTypeDto)
+  @IsOptional()
+  meetingType?: AppointmentMeetingTypeDto;
+
+  @ApiPropertyOptional({ example: 'AgentCore office, New Delhi' })
+  @ValidateIf((_, value) => value !== null && value !== undefined)
+  @IsString()
+  location?: string | null;
+
+  @ApiPropertyOptional({ type: String, isArray: true })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  @IsOptional()
+  defaultAttendeeStaffIds?: string[];
 
   @ApiPropertyOptional({ minimum: 0, maximum: 43200, nullable: true })
   @ValidateIf((_, value) => value !== null && value !== undefined)
@@ -187,6 +213,7 @@ export class UpdateAppointmentServiceDto {
 
   @ApiPropertyOptional({ example: 'USD' })
   @IsString()
+  @Matches(/^[A-Za-z]{3}$/)
   @IsOptional()
   currency?: string;
 
@@ -196,6 +223,25 @@ export class UpdateAppointmentServiceDto {
   @Max(100)
   @IsOptional()
   maxAttendees?: number;
+
+  @ApiPropertyOptional({ enum: AppointmentMeetingTypeDto })
+  @IsEnum(AppointmentMeetingTypeDto)
+  @IsOptional()
+  meetingType?: AppointmentMeetingTypeDto;
+
+  @ApiPropertyOptional({
+    example: 'AgentCore office, New Delhi',
+    nullable: true,
+  })
+  @ValidateIf((_, value) => value !== null && value !== undefined)
+  @IsString()
+  location?: string | null;
+
+  @ApiPropertyOptional({ type: String, isArray: true })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  @IsOptional()
+  defaultAttendeeStaffIds?: string[];
 
   @ApiPropertyOptional({ minimum: 0, maximum: 43200, nullable: true })
   @ValidateIf((_, value) => value !== null && value !== undefined)
@@ -531,6 +577,14 @@ export class CreateAppointmentBookingDto {
   @IsOptional()
   organizationId?: string;
 
+  @ApiPropertyOptional({
+    example: 'ecfdf154-2b72-477e-b286-43120fe69ead',
+    description: 'Lead to associate with this internally-created booking.',
+  })
+  @IsUUID()
+  @IsOptional()
+  leadId?: string;
+
   @ApiProperty({ example: 'ecfdf154-2b72-477e-b286-43120fe69ead' })
   @IsUUID()
   serviceId: string;
@@ -539,6 +593,16 @@ export class CreateAppointmentBookingDto {
   @IsUUID()
   @IsOptional()
   staffId?: string;
+
+  @ApiPropertyOptional({
+    type: String,
+    isArray: true,
+    description: 'Additional internal team members to invite.',
+  })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  @IsOptional()
+  attendeeStaffIds?: string[];
 
   @ApiProperty({ example: 'Ada Customer' })
   @IsString()
@@ -655,6 +719,11 @@ export class ListAppointmentBookingsDto {
   @IsString()
   @IsOptional()
   organizationId?: string;
+
+  @ApiPropertyOptional({ example: 'ecfdf154-2b72-477e-b286-43120fe69ead' })
+  @IsUUID()
+  @IsOptional()
+  leadId?: string;
 
   @ApiPropertyOptional({ enum: AppointmentBookingStatusDto })
   @IsEnum(AppointmentBookingStatusDto)

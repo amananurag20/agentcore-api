@@ -4,6 +4,7 @@ import {
   AppointmentServiceStatusDto,
   AppointmentStaffStatusDto,
   AppointmentResourceStatusDto,
+  AppointmentMeetingTypeDto,
 } from './appointment-booking.dto';
 
 export class AppointmentServiceResponseDto {
@@ -36,6 +37,15 @@ export class AppointmentServiceResponseDto {
 
   @ApiProperty()
   maxAttendees: number;
+
+  @ApiProperty({ enum: AppointmentMeetingTypeDto })
+  meetingType: AppointmentMeetingTypeDto;
+
+  @ApiPropertyOptional()
+  location?: string | null;
+
+  @ApiProperty({ type: String, isArray: true })
+  defaultAttendeeStaffIds: string[];
 
   @ApiPropertyOptional()
   cancellationWindowMinutes?: number | null;
@@ -193,6 +203,9 @@ export class AppointmentBookingResponseDto {
   @ApiProperty()
   organizationId: string;
 
+  @ApiPropertyOptional()
+  leadId?: string | null;
+
   @ApiProperty()
   serviceId: string;
 
@@ -222,6 +235,24 @@ export class AppointmentBookingResponseDto {
 
   @ApiPropertyOptional()
   notes?: string | null;
+
+  @ApiProperty({ enum: AppointmentMeetingTypeDto })
+  meetingType: AppointmentMeetingTypeDto;
+
+  @ApiPropertyOptional({ enum: ['google', 'microsoft'] })
+  meetingProvider?: 'google' | 'microsoft' | null;
+
+  @ApiPropertyOptional()
+  meetingUrl?: string | null;
+
+  @ApiPropertyOptional()
+  location?: string | null;
+
+  @ApiProperty({ type: String, isArray: true })
+  attendeeStaffIds: string[];
+
+  @ApiProperty({ type: String, isArray: true })
+  attendeeEmails: string[];
 
   @ApiPropertyOptional()
   cancellationReason?: string | null;

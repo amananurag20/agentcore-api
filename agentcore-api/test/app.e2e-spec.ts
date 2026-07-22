@@ -9,6 +9,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { createOpenApiDocument } from './../src/docs/openapi';
 import { AppModule } from './../src/app.module';
+import { PrismaService } from './../src/prisma/prisma.service';
 
 interface AuthResponseBody {
   accessToken: string;
@@ -229,6 +230,7 @@ interface AppointmentStaffResponseBody {
   id: string;
   organizationId: string;
   name: string;
+  phone?: string | null;
   status: string;
   services: AppointmentServiceResponseBody[];
 }
@@ -244,6 +246,7 @@ interface AppointmentSlotResponseBody {
 interface AppointmentBookingResponseBody {
   id: string;
   organizationId: string;
+  leadId?: string | null;
   serviceId: string;
   staffId: string;
   status: string;
@@ -933,6 +936,7 @@ describe('AppController (e2e)', () => {
 
   it('/appointment-booking manages availability, conflicts, reschedule, cancel, and public booking', async () => {
     const loginBody = await loginAsAdmin();
+    const prisma = app.get(PrismaService);
     const suffix = Date.now();
     const date = new Date(Date.now() + 30 * 24 * 60 * 60_000)
       .toISOString()
@@ -958,9 +962,38 @@ describe('AppController (e2e)', () => {
       .expect(201);
     const serviceBody = service.body as AppointmentServiceResponseBody;
 
+    const linkedLead = await prisma.lead.create({
+      data: {
+        organizationId: 'org_demo',
+        name: 'E2E Appointment Lead',
+        email: `appointment-lead-${suffix}@agentcore.local`,
+        normalizedEmail: `appointment-lead-${suffix}@agentcore.local`,
+      },
+    });
+
     expect(serviceBody.organizationId).toBe('org_demo');
     expect(serviceBody.durationMinutes).toBe(30);
     expect(serviceBody.status).toBe('active');
+
+    const disposableService = await request(app.getHttpServer())
+      .post('/api/v1/appointment-booking/services')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        name: `E2E Disposable Service ${suffix}`,
+        durationMinutes: 15,
+      })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .delete(
+        `/api/v1/appointment-booking/services/${(disposableService.body as AppointmentServiceResponseBody).id}`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect({
+        deleted: true,
+        id: (disposableService.body as AppointmentServiceResponseBody).id,
+      });
 
     await request(app.getHttpServer())
       .post('/api/v1/appointment-booking/public/bookings')
@@ -1021,6 +1054,41 @@ describe('AppController (e2e)', () => {
       })
       .expect(201);
 
+    await request(app.getHttpServer())
+      .post(`/api/v1/appointment-booking/staff/${staffBody.id}/availability`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ dayOfWeek, startTime: '10:00', endTime: '11:00' })
+      .expect(409);
+
+    const timeOffStart = new Date(Date.now() + 45 * 24 * 60 * 60_000);
+    const timeOffEnd = new Date(timeOffStart.getTime() + 60 * 60_000);
+    const timeOff = await request(app.getHttpServer())
+      .post(`/api/v1/appointment-booking/staff/${staffBody.id}/time-off`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        startAt: timeOffStart.toISOString(),
+        endAt: timeOffEnd.toISOString(),
+        reason: 'E2E training',
+      })
+      .expect(201);
+    const timeOffId = (timeOff.body as { id: string }).id;
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/appointment-booking/staff/${staffBody.id}/time-off`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({
+        startAt: new Date(timeOffStart.getTime() + 15 * 60_000).toISOString(),
+        endAt: new Date(timeOffEnd.getTime() + 15 * 60_000).toISOString(),
+      })
+      .expect(409);
+
+    await request(app.getHttpServer())
+      .delete(
+        `/api/v1/appointment-booking/staff/${staffBody.id}/time-off/${timeOffId}`,
+      )
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200);
+
     const resource = await request(app.getHttpServer())
       .post('/api/v1/appointment-booking/resources')
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
@@ -1037,8 +1105,16 @@ describe('AppController (e2e)', () => {
     await request(app.getHttpServer())
       .patch(`/api/v1/appointment-booking/staff/${staffBody.id}`)
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
-      .send({ resourceIds: [resourceId] })
-      .expect(200);
+      .send({
+        phone: '+16502530000',
+        resourceIds: [resourceId],
+      })
+      .expect(200)
+      .expect((response) => {
+        expect((response.body as AppointmentStaffResponseBody).phone).toBe(
+          '+16502530000',
+        );
+      });
 
     const secondStaff = await request(app.getHttpServer())
       .post('/api/v1/appointment-booking/staff')
@@ -1116,6 +1192,7 @@ describe('AppController (e2e)', () => {
       .post('/api/v1/appointment-booking/bookings')
       .set('Authorization', `Bearer ${loginBody.accessToken}`)
       .send({
+        leadId: linkedLead.id,
         serviceId: serviceBody.id,
         staffId: staffBody.id,
         customerName: 'E2E Appointment Customer',
@@ -1127,6 +1204,29 @@ describe('AppController (e2e)', () => {
 
     expect(bookingBody.status).toBe('confirmed');
     expect(bookingBody.staffId).toBe(staffBody.id);
+    expect(bookingBody.leadId).toBe(linkedLead.id);
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/leads/${linkedLead.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as {
+          status: string;
+          appointments: Array<{ id: string; status: string }>;
+          _count: { appointments: number };
+        };
+        expect(body.status).toBe('contacted');
+        expect(body.appointments).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              id: bookingBody.id,
+              status: 'confirmed',
+            }),
+          ]),
+        );
+        expect(body._count.appointments).toBeGreaterThanOrEqual(1);
+      });
 
     await request(app.getHttpServer())
       .post('/api/v1/appointment-booking/bookings')
@@ -1277,6 +1377,27 @@ describe('AppController (e2e)', () => {
         const body = response.body as AppointmentBookingResponseBody;
         expect(body.status).toBe('cancelled');
       });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/appointment-booking/services/${serviceBody.id}`)
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ status: 'inactive' })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AppointmentServiceResponseBody;
+        expect(body.status).toBe('inactive');
+      });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/appointment-booking/public/services')
+      .query({ organizationId: 'org_demo' })
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as AppointmentServiceResponseBody[];
+        expect(body.some((item) => item.id === serviceBody.id)).toBe(false);
+      });
+
+    await prisma.lead.delete({ where: { id: linkedLead.id } });
   });
 
   it('/whatsapp-assistant handles inbound RAG, handoff, transcript, and agent replies', async () => {
@@ -2675,6 +2796,31 @@ describe('AppController (e2e)', () => {
   });
 
   afterAll(async () => {
-    await app.close();
+    try {
+      const loginBody = await loginAsAdmin();
+      const services = await request(app.getHttpServer())
+        .get('/api/v1/appointment-booking/services')
+        .set('Authorization', `Bearer ${loginBody.accessToken}`)
+        .expect(200);
+      const e2eServices = (
+        services.body as AppointmentServiceResponseBody[]
+      ).filter(
+        (service) =>
+          service.status === 'active' &&
+          (service.name.startsWith('E2E Consultation ') ||
+            service.name.startsWith('E2E Disposable Service ')),
+      );
+      await Promise.all(
+        e2eServices.map((service) =>
+          request(app.getHttpServer())
+            .patch(`/api/v1/appointment-booking/services/${service.id}`)
+            .set('Authorization', `Bearer ${loginBody.accessToken}`)
+            .send({ status: 'inactive' })
+            .expect(200),
+        ),
+      );
+    } finally {
+      await app.close();
+    }
   });
 });

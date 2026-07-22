@@ -24,6 +24,7 @@ import {
 } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
 import {
+  AppointmentCalendarConnectionScopeDto,
   ConnectAppointmentCalendarDto,
   ListAppointmentCalendarConnectionsDto,
 } from './dto/appointment-calendar.dto';
@@ -77,41 +78,60 @@ export class AppointmentCalendarService {
     input: ConnectAppointmentCalendarDto,
   ) {
     this.providerConfig(input.provider);
-    const staff = await this.prisma.appointmentStaff.findUnique({
-      where: { id: input.staffId },
-    });
-    if (
-      !staff ||
-      (!this.isSuperAdmin(currentUser) &&
-        staff.organizationId !== currentUser.orgId)
-    ) {
-      throw new NotFoundException('Appointment staff not found');
+    const scope =
+      input.scope ?? AppointmentCalendarConnectionScopeDto.organization;
+    const organizationId = this.resolveOrganizationId(
+      currentUser,
+      input.organizationId,
+    );
+    if (scope === AppointmentCalendarConnectionScopeDto.staff) {
+      const staff = input.staffId
+        ? await this.prisma.appointmentStaff.findFirst({
+            where: { id: input.staffId, organizationId },
+          })
+        : null;
+      if (!staff) throw new NotFoundException('Appointment staff not found');
     }
+
     const state = randomBytes(32).toString('base64url');
     const stateHash = this.hash(state);
-    const connection = await this.prisma.appointmentCalendarConnection.upsert({
-      where: {
-        staffId_provider_calendarId: {
-          staffId: staff.id,
-          provider: input.provider,
-          calendarId: input.calendarId ?? 'primary',
-        },
-      },
-      create: {
-        organizationId: staff.organizationId,
-        staffId: staff.id,
-        provider: input.provider,
-        calendarId: input.calendarId ?? 'primary',
-        oauthStateHash: stateHash,
-        oauthStateExpiresAt: new Date(Date.now() + 10 * 60_000),
-      },
-      update: {
-        status: 'pending',
-        oauthStateHash: stateHash,
-        oauthStateExpiresAt: new Date(Date.now() + 10 * 60_000),
-        lastError: null,
-      },
+    const calendarId = input.calendarId ?? 'primary';
+    const existing = await this.prisma.appointmentCalendarConnection.findFirst({
+      where:
+        scope === AppointmentCalendarConnectionScopeDto.organization
+          ? { organizationId, scope }
+          : {
+              organizationId,
+              scope,
+              provider: input.provider,
+              calendarId,
+              staffId: input.staffId,
+            },
     });
+    const connectionData = {
+      status: 'pending' as const,
+      scope,
+      staffId:
+        scope === AppointmentCalendarConnectionScopeDto.staff
+          ? input.staffId
+          : null,
+      oauthStateHash: stateHash,
+      oauthStateExpiresAt: new Date(Date.now() + 10 * 60_000),
+      lastError: null,
+    };
+    const connection = existing
+      ? await this.prisma.appointmentCalendarConnection.update({
+          where: { id: existing.id },
+          data: { ...connectionData, provider: input.provider, calendarId },
+        })
+      : await this.prisma.appointmentCalendarConnection.create({
+          data: {
+            organizationId,
+            provider: input.provider,
+            calendarId,
+            ...connectionData,
+          },
+        });
 
     return {
       connection: this.toConnectionResponse(connection),
@@ -164,15 +184,18 @@ export class AppointmentCalendarService {
         action: 'appointment.calendar_connected',
         entityType: 'appointment_calendar_connection',
         entityId: updated.id,
-        metadata: { provider, staffId: updated.staffId },
+        metadata: { provider, scope: updated.scope, staffId: updated.staffId },
       });
-      const upcomingBookings = await this.prisma.appointmentBooking.findMany({
-        where: {
-          staffId: updated.staffId,
-          status: { in: ['pending', 'confirmed'] },
-          endAt: { gt: new Date() },
-        },
-      });
+      const upcomingBookings =
+        updated.scope === 'organization'
+          ? await this.prisma.appointmentBooking.findMany({
+              where: {
+                organizationId: updated.organizationId,
+                status: { in: ['pending', 'confirmed'] },
+                endAt: { gt: new Date() },
+              },
+            })
+          : [];
       await Promise.allSettled(
         upcomingBookings.map((booking) =>
           this.scheduleBookingSync({ booking, operation: 'upsert' }),
@@ -207,6 +230,15 @@ export class AppointmentCalendarService {
         );
       }
     }
+    await this.prisma.appointmentCalendarEvent.updateMany({
+      where: { connectionId },
+      data: {
+        status: 'deleted',
+        externalEventId: null,
+        externalEtag: null,
+        lastSyncedAt: new Date(),
+      },
+    });
     await this.prisma.appointmentCalendarConnection.update({
       where: { id: connection.id },
       data: {
@@ -241,7 +273,11 @@ export class AppointmentCalendarService {
   ): Promise<ExternalBusyInterval[]> {
     const connections =
       await this.prisma.appointmentCalendarConnection.findMany({
-        where: { staffId, status: { in: ['active', 'error'] } },
+        where: {
+          staffId,
+          scope: 'staff',
+          status: { in: ['active', 'error'] },
+        },
       });
     const intervals: ExternalBusyInterval[] = [];
     for (const connection of connections) {
@@ -287,22 +323,19 @@ export class AppointmentCalendarService {
     previousStaffId?: string;
     operation?: 'upsert' | 'delete';
   }) {
-    const staffIds = [
-      ...new Set(
-        [input.booking.staffId, input.previousStaffId].filter(Boolean),
-      ),
-    ] as string[];
-    const connections =
-      await this.prisma.appointmentCalendarConnection.findMany({
-        where: { staffId: { in: staffIds }, status: 'active' },
+    const workspaceConnection =
+      await this.prisma.appointmentCalendarConnection.findFirst({
+        where: {
+          organizationId: input.booking.organizationId,
+          scope: 'organization',
+          status: 'active',
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       });
+    const connections = workspaceConnection ? [workspaceConnection] : [];
 
     for (const connection of connections) {
-      const operation =
-        input.operation === 'delete' ||
-        connection.staffId !== input.booking.staffId
-          ? 'delete'
-          : 'upsert';
+      const operation = input.operation ?? 'upsert';
       const existing = await this.prisma.appointmentCalendarEvent.findUnique({
         where: {
           bookingId_connectionId: {
@@ -401,7 +434,17 @@ export class AppointmentCalendarService {
         accessToken,
         event.booking,
         event.externalEventId,
+        await this.shouldCreateOnlineMeeting(event.booking, event.connection),
       );
+      if (external.meetingUrl) {
+        await this.prisma.appointmentBooking.update({
+          where: { id: event.bookingId },
+          data: {
+            meetingProvider: event.connection.provider,
+            meetingUrl: external.meetingUrl,
+          },
+        });
+      }
       await this.prisma.appointmentCalendarEvent.update({
         where: { id: event.id },
         data: {
@@ -551,19 +594,32 @@ export class AppointmentCalendarService {
     accessToken: string,
     booking: BookingForCalendar,
     externalEventId?: string | null,
-  ): Promise<{ id: string; etag?: string }> {
+    createOnlineMeeting = false,
+  ): Promise<{ id: string; etag?: string; meetingUrl?: string }> {
+    const attendeeEmails = [
+      ...new Set(
+        [...(booking.attendeeEmails ?? []), booking.customerEmail]
+          .filter((email): email is string => Boolean(email))
+          .map((email) => email.trim().toLowerCase()),
+      ),
+    ];
     if (connection.provider === 'google') {
       const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(connection.calendarId)}/events`;
+      const eventUrl = externalEventId
+        ? `${base}/${encodeURIComponent(externalEventId)}`
+        : base;
       const response = await fetch(
-        externalEventId
-          ? `${base}/${encodeURIComponent(externalEventId)}`
-          : base,
+        `${eventUrl}?conferenceDataVersion=1&sendUpdates=all`,
         {
           method: externalEventId ? 'PATCH' : 'POST',
           headers: this.bearerHeaders(accessToken),
           body: JSON.stringify({
             summary: booking.service.name,
             description: this.eventDescription(booking),
+            location:
+              booking.meetingType === 'in_person'
+                ? (booking.location ?? undefined)
+                : undefined,
             start: {
               dateTime: booking.startAt.toISOString(),
               timeZone: booking.timezone,
@@ -572,20 +628,43 @@ export class AppointmentCalendarService {
               dateTime: booking.endAt.toISOString(),
               timeZone: booking.timezone,
             },
-            attendees: booking.customerEmail
-              ? [
-                  {
-                    email: booking.customerEmail,
-                    displayName: booking.customerName,
+            attendees: attendeeEmails.map((email) => ({
+              email,
+              displayName:
+                email === booking.customerEmail?.trim().toLowerCase()
+                  ? booking.customerName
+                  : undefined,
+            })),
+            conferenceData: createOnlineMeeting
+              ? {
+                  createRequest: {
+                    requestId: `agentcore-${booking.id}`,
+                    conferenceSolutionKey: { type: 'hangoutsMeet' },
                   },
-                ]
+                }
               : undefined,
             extendedProperties: { private: { agentcoreBookingId: booking.id } },
           }),
           signal: this.providerTimeoutSignal(),
         },
       );
-      return this.readProviderJson(response);
+      const body = await this.readProviderJson<{
+        id: string;
+        etag?: string;
+        hangoutLink?: string;
+        conferenceData?: {
+          entryPoints?: Array<{ entryPointType?: string; uri?: string }>;
+        };
+      }>(response);
+      return {
+        id: body.id,
+        etag: body.etag,
+        meetingUrl:
+          body.hangoutLink ??
+          body.conferenceData?.entryPoints?.find(
+            (entry) => entry.entryPointType === 'video',
+          )?.uri,
+      };
     }
 
     const base =
@@ -603,6 +682,10 @@ export class AppointmentCalendarService {
             contentType: 'text',
             content: this.eventDescription(booking),
           },
+          location:
+            booking.meetingType === 'in_person' && booking.location
+              ? { displayName: booking.location }
+              : undefined,
           start: {
             dateTime: this.graphUtcDateTime(booking.startAt),
             timeZone: 'UTC',
@@ -611,23 +694,55 @@ export class AppointmentCalendarService {
             dateTime: this.graphUtcDateTime(booking.endAt),
             timeZone: 'UTC',
           },
-          attendees: booking.customerEmail
-            ? [
-                {
-                  emailAddress: {
-                    address: booking.customerEmail,
-                    name: booking.customerName,
-                  },
-                  type: 'required',
-                },
-              ]
-            : undefined,
+          attendees: attendeeEmails.map((email) => ({
+            emailAddress: {
+              address: email,
+              name:
+                email === booking.customerEmail?.trim().toLowerCase()
+                  ? booking.customerName
+                  : email,
+            },
+            type: 'required',
+          })),
+          ...(createOnlineMeeting
+            ? {
+                isOnlineMeeting: true,
+                onlineMeetingProvider: 'teamsForBusiness',
+              }
+            : {}),
           transactionId: booking.id,
         }),
         signal: this.providerTimeoutSignal(),
       },
     );
-    return this.readProviderJson(response);
+    const body = await this.readProviderJson<{
+      id: string;
+      '@odata.etag'?: string;
+      onlineMeeting?: { joinUrl?: string };
+    }>(response);
+    return {
+      id: body.id,
+      etag: body['@odata.etag'],
+      meetingUrl: body.onlineMeeting?.joinUrl,
+    };
+  }
+
+  private async shouldCreateOnlineMeeting(
+    booking: BookingForCalendar,
+    connection: AppointmentCalendarConnection,
+  ): Promise<boolean> {
+    if (booking.meetingType !== 'online' || booking.meetingUrl) return false;
+    const hostConnection =
+      await this.prisma.appointmentCalendarConnection.findFirst({
+        where: {
+          organizationId: booking.organizationId,
+          scope: 'organization',
+          status: 'active',
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: { id: true },
+      });
+    return hostConnection?.id === connection.id;
   }
 
   private async deleteExternalEvent(
@@ -933,6 +1048,13 @@ export class AppointmentCalendarService {
       booking.customerEmail ? `Email: ${booking.customerEmail}` : undefined,
       booking.customerPhone ? `Phone: ${booking.customerPhone}` : undefined,
       booking.notes ? `Notes: ${booking.notes}` : undefined,
+      booking.meetingUrl ? `Join meeting: ${booking.meetingUrl}` : undefined,
+      booking.meetingType === 'in_person' && booking.location
+        ? `Location: ${booking.location}`
+        : undefined,
+      booking.meetingType === 'phone' && booking.location
+        ? `Call details: ${booking.location}`
+        : undefined,
       `AgentCore booking: ${booking.id}`,
     ]
       .filter(Boolean)

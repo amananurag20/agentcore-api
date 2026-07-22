@@ -146,6 +146,12 @@ enum AppointmentServiceStatus {
   inactive
 }
 
+enum AppointmentMeetingType {
+  online
+  in_person
+  phone
+}
+
 enum AppointmentStaffStatus {
   active
   inactive
@@ -177,6 +183,11 @@ enum AppointmentReminderStatus {
 enum AppointmentCalendarProvider {
   google
   microsoft
+}
+
+enum AppointmentCalendarConnectionScope {
+  organization
+  staff
 }
 
 enum AppointmentCalendarConnectionStatus {

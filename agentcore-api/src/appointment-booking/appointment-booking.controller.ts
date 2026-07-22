@@ -187,6 +187,19 @@ export class AppointmentBookingController {
     return this.appointmentBookingService.updateService(user, id, body);
   }
 
+  @Delete('services/:id')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  @ApiOperation({
+    summary: 'Permanently delete an appointment service with no history',
+  })
+  deleteService(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.appointmentBookingService.deleteService(user, id);
+  }
+
   @Post('services/:id/resources')
   @Roles('super_admin', 'org_admin', 'product_admin')
   @RequireProductAccess('appointment_booking', 'configure')

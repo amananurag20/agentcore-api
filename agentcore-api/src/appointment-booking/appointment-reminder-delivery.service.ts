@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport, type Transporter } from 'nodemailer';
 import type SMTPTransport from 'nodemailer/lib/smtp-transport';
+import sanitizeHtml from 'sanitize-html';
 import {
   AppointmentBooking,
   AppointmentService,
@@ -35,15 +36,43 @@ export class AppointmentReminderDeliveryService {
     private readonly prisma: PrismaService,
   ) {}
 
+  async getNotificationReadiness(organizationId: string): Promise<{
+    email: boolean;
+    sms: boolean;
+    whatsapp: boolean;
+  }> {
+    const whatsapp = await this.prisma.whatsAppAssistantConfig.findFirst({
+      where: {
+        organizationId,
+        status: 'active',
+        accessTokenEncrypted: { not: null },
+        phoneNumberId: { not: null },
+      },
+      select: { id: true },
+    });
+    return {
+      email: Boolean(
+        this.configService.get<string>('APPOINTMENT_EMAIL_FROM') &&
+          this.configService.get<string>('SMTP_HOST'),
+      ),
+      sms: Boolean(
+        this.configService.get<string>('TWILIO_ACCOUNT_SID') &&
+          this.configService.get<string>('TWILIO_AUTH_TOKEN') &&
+          this.configService.get<string>('TWILIO_SMS_FROM'),
+      ),
+      whatsapp: Boolean(whatsapp),
+    };
+  }
+
   async deliver(
     booking: ReminderBooking,
     reminderType: string,
     alreadyDelivered: ReadonlySet<string> = new Set(),
     onDelivered?: (result: ReminderDeliveryResult) => Promise<void>,
   ): Promise<ReminderDeliveryResult[]> {
-    const channels = this.getChannels();
     const suppressed = await this.getSuppressedChannels(booking);
     const content = await this.buildContent(booking, reminderType);
+    const channels = this.getChannels(content.reminderChannels);
     const deliveries: Array<() => Promise<ReminderDeliveryResult | null>> = [];
 
     if (
@@ -53,7 +82,12 @@ export class AppointmentReminderDeliveryService {
       !suppressed.has('email')
     ) {
       deliveries.push(() =>
-        this.sendEmail(booking, content.message, content.emailSubject),
+        this.sendEmail(
+          booking,
+          content.channelMessages.email,
+          content.emailSubject,
+          content.emailHtml,
+        ),
       );
     }
     if (
@@ -63,7 +97,7 @@ export class AppointmentReminderDeliveryService {
       !suppressed.has('sms')
     ) {
       deliveries.push(() =>
-        this.sendSms(booking.customerPhone!, content.message),
+        this.sendSms(booking.customerPhone!, content.channelMessages.sms),
       );
     }
     if (
@@ -77,7 +111,7 @@ export class AppointmentReminderDeliveryService {
           booking.organizationId,
           booking.customerPhone!,
           booking,
-          content.message,
+          content.channelMessages.whatsapp,
           content.whatsAppTemplateName,
         ),
       );
@@ -101,6 +135,13 @@ export class AppointmentReminderDeliveryService {
     message: string;
   }): Promise<ReminderDeliveryResult[]> {
     const results: ReminderDeliveryResult[] = [];
+    const policy = input.organizationId
+      ? await this.prisma.appointmentBookingPolicy.findUnique({
+          where: { organizationId: input.organizationId },
+          select: { reminderChannels: true },
+        })
+      : null;
+    const enabledChannels = this.getChannels(policy?.reminderChannels);
     const contacts = [
       input.email?.trim().toLowerCase(),
       input.phone?.replace(/\s+/g, ''),
@@ -126,7 +167,11 @@ export class AppointmentReminderDeliveryService {
                 : contact.replace(/\s+/g, '')),
         ),
       );
-    if (input.email && !isSuppressed('email', input.email)) {
+    if (
+      enabledChannels.has('email') &&
+      input.email &&
+      !isSuppressed('email', input.email)
+    ) {
       const email = await this.sendEmailMessage(
         input.email,
         input.subject,
@@ -134,7 +179,11 @@ export class AppointmentReminderDeliveryService {
       );
       if (email) results.push(email);
     }
-    if (input.phone && !isSuppressed('sms', input.phone)) {
+    if (
+      enabledChannels.has('sms') &&
+      input.phone &&
+      !isSuppressed('sms', input.phone)
+    ) {
       const sms = await this.sendSms(input.phone, input.message);
       if (sms) results.push(sms);
     }
@@ -164,15 +213,17 @@ export class AppointmentReminderDeliveryService {
     booking: ReminderBooking,
     message: string,
     subject: string,
+    html?: string,
   ): Promise<ReminderDeliveryResult | null> {
     if (!booking.customerEmail) return null;
-    return this.sendEmailMessage(booking.customerEmail, subject, message);
+    return this.sendEmailMessage(booking.customerEmail, subject, message, html);
   }
 
   private async sendEmailMessage(
     to: string,
     subject: string,
     message: string,
+    html?: string,
   ): Promise<ReminderDeliveryResult | null> {
     const from = this.configService.get<string>('APPOINTMENT_EMAIL_FROM');
     const transporter = this.getEmailTransporter();
@@ -183,6 +234,7 @@ export class AppointmentReminderDeliveryService {
       to,
       subject,
       text: message,
+      ...(html ? { html } : {}),
     });
     return {
       channel: 'email',
@@ -387,17 +439,33 @@ export class AppointmentReminderDeliveryService {
     reminderType: string,
   ): Promise<{
     message: string;
+    channelMessages: Record<'email' | 'sms' | 'whatsapp', string>;
     emailSubject: string;
+    emailHtml: string;
+    reminderChannels?: string[];
     whatsAppTemplateName?: string;
   }> {
     const policy = await this.prisma.appointmentBookingPolicy.findUnique({
       where: { organizationId: booking.organizationId },
-      select: { reminderTemplates: true },
+      select: { reminderTemplates: true, reminderChannels: true },
     });
     const templates = {
       ...this.toStringRecord(policy?.reminderTemplates),
       ...this.toStringRecord(booking.service.reminderTemplates),
     };
+    const meetingType = booking.meetingType ?? booking.service.meetingType ?? 'online';
+    const meetingDetails =
+      meetingType === 'online'
+        ? booking.meetingUrl
+          ? `Join online: ${booking.meetingUrl}`
+          : 'A calendar invitation with the online meeting link will follow.'
+        : meetingType === 'in_person'
+          ? booking.location
+            ? `Location: ${booking.location}`
+            : 'This is an in-person appointment.'
+          : booking.location
+            ? `Call details: ${booking.location}`
+            : 'The team member will call you using the phone number on your booking.';
     const defaultTemplate =
       reminderType === 'confirmation'
         ? 'Your appointment is confirmed. {{serviceName}} with {{staffName}} is scheduled for {{startTime}}.'
@@ -407,41 +475,171 @@ export class AppointmentReminderDeliveryService {
         ? templates.confirmation || defaultTemplate
         : templates[reminderType] || templates.reminder || defaultTemplate;
     const publicUrl = this.configService.get<string>('APPOINTMENT_PUBLIC_URL');
-    let preferencesUrl = '';
-    if (publicUrl) {
+    const preferencesUrlFor = (channel: 'email' | 'sms' | 'whatsapp') => {
+      if (!publicUrl) return '';
       const url = new URL('/book', publicUrl);
       url.searchParams.set('organizationId', booking.organizationId);
       url.searchParams.set('bookingId', booking.id);
       url.searchParams.set('token', this.reminderOptOutToken(booking));
-      url.searchParams.set('channel', 'email');
-      preferencesUrl = url.toString();
-    }
-    const variables: Record<string, string> = {
+      url.searchParams.set('channel', channel);
+      return url.toString();
+    };
+    const baseVariables: Record<string, string> = {
       customerName: booking.customerName,
       serviceName: booking.service.name,
       staffName: booking.staff.name,
       startTime: this.formatStart(booking),
       partySize: String(booking.partySize),
       reminderType,
-      preferencesUrl,
+      meetingType,
+      meetingProvider: booking.meetingProvider ?? '',
+      meetingUrl: booking.meetingUrl ?? '',
+      location: booking.location ?? '',
+      meetingDetails,
     };
-    const render = (value: string) =>
-      value.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
+    const render = (
+      value: string,
+      channel: 'email' | 'sms' | 'whatsapp',
+    ) => {
+      const variables = {
+        ...baseVariables,
+        preferencesUrl: preferencesUrlFor(channel),
+      };
+      return value.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
         Object.prototype.hasOwnProperty.call(variables, key)
           ? variables[key]
           : match,
       );
-    const rendered = render(template);
+    };
+    const channelTemplate = (
+      channel: 'email' | 'sms' | 'whatsapp',
+    ) => {
+      const eventName =
+        reminderType === 'confirmation' ? 'Confirmation' : 'Reminder';
+      const specificEventName =
+        reminderType === 'confirmation'
+          ? ''
+          : `${reminderType.charAt(0).toUpperCase()}${reminderType.slice(1)}`;
+      return (
+        (specificEventName
+          ? templates[`${channel}${specificEventName}`]
+          : undefined) ||
+        templates[`${channel}${eventName}`] ||
+        template
+      );
+    };
+    const renderChannelMessage = (
+      channel: 'email' | 'sms' | 'whatsapp',
+    ) => {
+      const selectedTemplate = channelTemplate(channel);
+      const renderedMessage = render(selectedTemplate, channel);
+      const messageWithMeetingDetails = /\{\{(meetingUrl|meetingDetails|location)\}\}/.test(
+        selectedTemplate,
+      )
+        ? renderedMessage
+        : `${renderedMessage} ${meetingDetails}`;
+      const preferencesUrl = preferencesUrlFor(channel);
+      return preferencesUrl && !selectedTemplate.includes('{{preferencesUrl}}')
+        ? `${messageWithMeetingDetails} Manage reminder preferences: ${preferencesUrl}`
+        : messageWithMeetingDetails;
+    };
+    const channelMessages = {
+      email: renderChannelMessage('email'),
+      sms: renderChannelMessage('sms'),
+      whatsapp: renderChannelMessage('whatsapp'),
+    };
+    const emailTextTemplate = channelTemplate('email');
+    const renderedEmailText = render(emailTextTemplate, 'email');
+    const emailPreferencesUrl = preferencesUrlFor('email');
+    const legacyRender = (value: string) =>
+      value.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
+        Object.prototype.hasOwnProperty.call(baseVariables, key)
+          ? baseVariables[key]
+          : match,
+      );
+    const emailHtmlTemplate =
+      reminderType === 'confirmation'
+        ? templates.confirmationEmailHtml
+        : templates[`${reminderType}EmailHtml`] || templates.reminderEmailHtml;
+    const renderedEmailHtml = emailHtmlTemplate
+      ? this.sanitizeEmailHtml(render(emailHtmlTemplate, 'email'))
+      : this.plainTextEmailHtml(renderedEmailText);
+    const emailHtmlWithMeetingDetails = /\{\{(meetingUrl|meetingDetails|location)\}\}/.test(
+      emailHtmlTemplate ?? emailTextTemplate,
+    )
+      ? renderedEmailHtml
+      : `${renderedEmailHtml}${
+          booking.meetingUrl
+            ? `<p><a href="${this.escapeHtml(booking.meetingUrl)}">Join online meeting</a></p>`
+            : `<p>${this.escapeHtml(meetingDetails)}</p>`
+        }`;
+    const emailHtml =
+      emailPreferencesUrl &&
+      !(emailHtmlTemplate ?? '').includes('{{preferencesUrl}}')
+        ? `${emailHtmlWithMeetingDetails}<p><a href="${this.escapeHtml(emailPreferencesUrl)}">Manage reminder preferences</a></p>`
+        : emailHtmlWithMeetingDetails;
     return {
-      message:
-        preferencesUrl && !template.includes('{{preferencesUrl}}')
-          ? `${rendered} Manage reminder preferences: ${preferencesUrl}`
-          : rendered,
+      message: legacyRender(template),
+      channelMessages,
       emailSubject: render(
         templates.emailSubject || 'Appointment: {{serviceName}}',
+        'email',
       ),
+      emailHtml,
+      reminderChannels: policy?.reminderChannels,
       whatsAppTemplateName: templates.whatsappTemplateName,
     };
+  }
+
+  private sanitizeEmailHtml(value: string): string {
+    return sanitizeHtml(value, {
+      allowedTags: [
+        'p',
+        'br',
+        'strong',
+        'b',
+        'em',
+        'i',
+        'u',
+        'h1',
+        'h2',
+        'h3',
+        'ul',
+        'ol',
+        'li',
+        'blockquote',
+        'div',
+        'span',
+        'a',
+      ],
+      allowedAttributes: {
+        a: ['href', 'target', 'rel'],
+      },
+      allowedSchemes: ['http', 'https', 'mailto'],
+      transformTags: {
+        a: (_tagName, attributes) => ({
+          tagName: 'a',
+          attribs: {
+            ...attributes,
+            target: '_blank',
+            rel: 'noopener noreferrer',
+          },
+        }),
+      },
+    });
+  }
+
+  private plainTextEmailHtml(value: string): string {
+    return `<p>${this.escapeHtml(value).replace(/\r?\n/g, '<br>')}</p>`;
+  }
+
+  private escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
   }
 
   private toStringRecord(value: unknown): Record<string, string> {
@@ -480,11 +678,17 @@ export class AppointmentReminderDeliveryService {
     }).format(booking.startAt);
   }
 
-  private getChannels(): Set<string> {
+  private getChannels(organizationChannels?: string[]): Set<string> {
     const raw =
       this.configService.get<string>('APPOINTMENT_REMINDER_CHANNELS') ??
       'email,sms,whatsapp';
-    return new Set(raw.split(',').map((value) => value.trim().toLowerCase()));
+    const configuredChannels = new Set(
+      raw.split(',').map((value) => value.trim().toLowerCase()),
+    );
+    const enabledChannels = organizationChannels ?? [...configuredChannels];
+    return new Set(
+      enabledChannels.filter((channel) => configuredChannels.has(channel)),
+    );
   }
 
   private providerTimeoutSignal(): AbortSignal {
