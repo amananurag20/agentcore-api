@@ -19,6 +19,11 @@ export enum CustomerChatConversationStatusDto {
   closed = 'closed',
 }
 
+export enum CustomerChatConversationAssignmentDto {
+  assigned = 'assigned',
+  unassigned = 'unassigned',
+}
+
 export class ListCustomerChatConversationsDto {
   @ApiPropertyOptional({ enum: CustomerChatConversationStatusDto })
   @IsEnum(CustomerChatConversationStatusDto)
@@ -34,6 +39,11 @@ export class ListCustomerChatConversationsDto {
   @IsUUID()
   @IsOptional()
   assignedAgentId?: string;
+
+  @ApiPropertyOptional({ enum: CustomerChatConversationAssignmentDto })
+  @IsEnum(CustomerChatConversationAssignmentDto)
+  @IsOptional()
+  assignment?: CustomerChatConversationAssignmentDto;
 
   @ApiPropertyOptional({ example: 'ada@example.com' })
   @IsString()

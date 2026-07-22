@@ -63,6 +63,15 @@ export class CustomerChatConversationDto {
   })
   assignedAgentId?: string | null;
 
+  @ApiPropertyOptional({ example: '2026-07-07T06:00:00.000Z' })
+  handoffRequestedAt?: Date | null;
+
+  @ApiPropertyOptional({ example: '2026-07-07T06:05:00.000Z' })
+  lastMessageAt?: Date | null;
+
+  @ApiPropertyOptional({ example: 'Website support' })
+  widgetName?: string | null;
+
   @ApiProperty({ example: {} })
   metadata: Record<string, unknown>;
 

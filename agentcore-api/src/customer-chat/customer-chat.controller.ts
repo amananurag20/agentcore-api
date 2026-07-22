@@ -199,7 +199,6 @@ export class CustomerChatController {
   }
 
   @Patch('conversations/:id/assignment')
-  @Roles('super_admin', 'org_admin', 'product_admin')
   @ApiOperation({ summary: 'Assign or unassign a customer chat conversation' })
   @ApiOkResponse({ type: CustomerChatConversationDto })
   assignConversation(

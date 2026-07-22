@@ -25,6 +25,7 @@ import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { LeadsService } from '../leads/leads.service';
 import {
   AssignCustomerChatConversationDto,
+  CustomerChatConversationAssignmentDto,
   CustomerChatConversationStatusDto,
   ListCustomerChatConversationsDto,
   SendAgentCustomerChatMessageDto,
@@ -172,6 +173,14 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
       status: input.status,
       assignedAgentId: input.assignedAgentId,
     };
+
+    if (input.assignment === CustomerChatConversationAssignmentDto.assigned) {
+      where.assignedAgentId = { not: null };
+    } else if (
+      input.assignment === CustomerChatConversationAssignmentDto.unassigned
+    ) {
+      where.assignedAgentId = null;
+    }
 
     if (input.search) {
       where.OR = [
@@ -361,7 +370,28 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     );
     const assignedAgentId = input.assignedAgentId ?? null;
 
-    if (assignedAgentId) {
+    const canManageAssignments = currentUser.roles.some((role) =>
+      ['super_admin', 'org_admin', 'product_admin'].includes(role),
+    );
+    const isSelfClaim = assignedAgentId === currentUser.sub;
+
+    if (!canManageAssignments) {
+      if (!isSelfClaim) {
+        throw new ForbiddenException(
+          'Agents can only claim conversations for themselves',
+        );
+      }
+      if (
+        conversation.assignedAgentId &&
+        conversation.assignedAgentId !== currentUser.sub
+      ) {
+        throw new ForbiddenException(
+          'This conversation is assigned to another agent',
+        );
+      }
+    }
+
+    if (assignedAgentId && !isSelfClaim) {
       await this.assertAssignableAgent(
         conversation.organizationId,
         assignedAgentId,
@@ -376,6 +406,16 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
           where: { id: conversation.id, version: expectedVersion },
           data: {
             assignedAgentId,
+            status:
+              conversation.status === 'closed'
+                ? 'closed'
+                : assignedAgentId
+                  ? 'open'
+                  : 'waiting_for_agent',
+            handoffRequestedAt:
+              !assignedAgentId && conversation.status !== 'closed'
+                ? (conversation.handoffRequestedAt ?? now)
+                : conversation.handoffRequestedAt,
             expiresAt: this.addDays(
               now,
               this.configService.get<number>(

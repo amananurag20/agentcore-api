@@ -2,6 +2,138 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CustomerChatService } from './customer-chat.service';
 
 describe('CustomerChatService automatic reply recovery', () => {
+  it('allows an agent to claim an unassigned handoff for themselves', async () => {
+    const now = new Date();
+    const actor = {
+      sub: 'agent-a',
+      email: 'agent@example.com',
+      orgId: 'org-a',
+      roles: ['agent'],
+    } as AuthenticatedUser;
+    const conversation = {
+      id: 'conversation-a',
+      organizationId: 'org-a',
+      status: 'waiting_for_agent',
+      version: 3,
+      assignedAgentId: null,
+      handoffRequestedAt: now,
+    };
+    const updatedConversation = {
+      ...conversation,
+      status: 'open',
+      version: 4,
+      assignedAgentId: actor.sub,
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    let updateData: Record<string, unknown> | undefined;
+    const transaction = {
+      customerChatConversation: {
+        updateMany: jest.fn((input: { data: Record<string, unknown> }) => {
+          updateData = input.data;
+          return Promise.resolve({ count: 1 });
+        }),
+        findUnique: jest.fn().mockResolvedValue(updatedConversation),
+      },
+    };
+    const service = Object.create(
+      CustomerChatService.prototype,
+    ) as CustomerChatService;
+    Object.assign(service as object, {
+      prisma: {
+        $transaction: jest.fn(
+          (callback: (value: typeof transaction) => Promise<unknown>) =>
+            callback(transaction),
+        ),
+      },
+      auditService: { record: jest.fn().mockResolvedValue(undefined) },
+      configService: {
+        get: jest.fn((_key: string, fallback: unknown) => fallback),
+      },
+    });
+    jest
+      .spyOn(service as never, 'findConversationContextForActor' as never)
+      .mockResolvedValue(conversation as never);
+    jest
+      .spyOn(service as never, 'publishConversationEvent' as never)
+      .mockResolvedValue(undefined as never);
+    jest
+      .spyOn(service as never, 'toConversationResponse' as never)
+      .mockReturnValue(updatedConversation as never);
+
+    const result = await service.assignConversation(actor, conversation.id, {
+      assignedAgentId: actor.sub,
+      expectedVersion: conversation.version,
+    });
+
+    expect(updateData).toEqual(
+      expect.objectContaining({
+        assignedAgentId: actor.sub,
+        status: 'open',
+      }),
+    );
+    expect(result).toEqual(updatedConversation);
+  });
+
+  it('prevents an agent from assigning a conversation to someone else', async () => {
+    const actor = {
+      sub: 'agent-a',
+      email: 'agent@example.com',
+      orgId: 'org-a',
+      roles: ['agent'],
+    } as AuthenticatedUser;
+    const conversation = {
+      id: 'conversation-a',
+      organizationId: 'org-a',
+      status: 'waiting_for_agent',
+      version: 3,
+      assignedAgentId: null,
+    };
+    const service = Object.create(
+      CustomerChatService.prototype,
+    ) as CustomerChatService;
+    jest
+      .spyOn(service as never, 'findConversationContextForActor' as never)
+      .mockResolvedValue(conversation as never);
+
+    await expect(
+      service.assignConversation(actor, conversation.id, {
+        assignedAgentId: 'agent-b',
+        expectedVersion: conversation.version,
+      }),
+    ).rejects.toThrow('Agents can only claim conversations for themselves');
+  });
+
+  it("prevents an agent from stealing another agent's conversation", async () => {
+    const actor = {
+      sub: 'agent-b',
+      email: 'agent-b@example.com',
+      orgId: 'org-a',
+      roles: ['agent'],
+    } as AuthenticatedUser;
+    const conversation = {
+      id: 'conversation-a',
+      organizationId: 'org-a',
+      status: 'open',
+      version: 3,
+      assignedAgentId: 'agent-a',
+    };
+    const service = Object.create(
+      CustomerChatService.prototype,
+    ) as CustomerChatService;
+    jest
+      .spyOn(service as never, 'findConversationContextForActor' as never)
+      .mockResolvedValue(conversation as never);
+
+    await expect(
+      service.assignConversation(actor, conversation.id, {
+        assignedAgentId: actor.sub,
+        expectedVersion: conversation.version,
+      }),
+    ).rejects.toThrow('This conversation is assigned to another agent');
+  });
+
   it('closes a visitor conversation without deleting its history', async () => {
     const now = new Date();
     let closeExpiresAt: Date | undefined;
@@ -308,6 +440,7 @@ describe('CustomerChatService automatic reply recovery', () => {
           restrictedCandidateCount: 0,
         }),
       } as never,
+      {} as never,
       prisma as never,
       {} as never,
       realtime as never,
@@ -435,6 +568,7 @@ describe('CustomerChatService automatic reply recovery', () => {
         get: jest.fn((_key: string, fallback: unknown) => fallback),
       } as never,
       knowledge as never,
+      {} as never,
       prisma as never,
       {} as never,
       { publish: jest.fn().mockResolvedValue(undefined) } as never,
@@ -579,6 +713,7 @@ describe('CustomerChatService automatic reply recovery', () => {
         get: jest.fn((_key: string, fallback: unknown) => fallback),
       } as never,
       knowledge as never,
+      {} as never,
       prisma as never,
       {} as never,
       { publish: jest.fn().mockResolvedValue(undefined) } as never,
