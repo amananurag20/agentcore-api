@@ -25,7 +25,6 @@ describe('EmbeddingsService production controls', () => {
     const service = createService({
       NODE_ENV: 'production',
       ALLOW_LOCAL_EMBEDDINGS: false,
-      DEFAULT_EMBEDDING_DIMENSIONS: 8,
     });
 
     await expect(
@@ -36,7 +35,6 @@ describe('EmbeddingsService production controls', () => {
   it('allows deterministic embeddings only when explicitly enabled', async () => {
     const service = createService({
       ALLOW_LOCAL_EMBEDDINGS: true,
-      DEFAULT_EMBEDDING_DIMENSIONS: 8,
     });
     const result = await service.embedText({
       organizationId: 'org-a',
@@ -44,13 +42,12 @@ describe('EmbeddingsService production controls', () => {
     });
 
     expect(result.provider).toBe('local');
-    expect(result.vector).toHaveLength(8);
+    expect(result.vector).toHaveLength(1536);
   });
 
   it('never allows deterministic embeddings to be persisted in an index', async () => {
     const service = createService({
       ALLOW_LOCAL_EMBEDDINGS: true,
-      DEFAULT_EMBEDDING_DIMENSIONS: 8,
     });
 
     await expect(

@@ -76,6 +76,7 @@ describe('Appointment product feature workers', () => {
           quietHoursStart: '21:00',
           quietHoursEnd: '08:00',
           quietHoursTimezone: 'UTC',
+          reminderOffsetsMinutes: [840],
         }),
       },
     };
@@ -85,11 +86,7 @@ describe('Appointment product feature workers', () => {
       remove: jest.fn(),
     };
     const service = new AppointmentReminderQueueService(
-      {
-        get: jest.fn((key: string) =>
-          key === 'APPOINTMENT_REMINDER_OFFSETS_MINUTES' ? '840' : undefined,
-        ),
-      } as never,
+      { get: jest.fn() } as never,
       prisma as never,
       queue as never,
     );

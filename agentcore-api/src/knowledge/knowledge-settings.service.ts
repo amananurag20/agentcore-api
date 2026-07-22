@@ -15,6 +15,7 @@ import {
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
+import { APPLICATION_DEFAULTS } from '../config/application-defaults';
 import { CryptoService } from '../crypto/crypto.service';
 import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
 import { KnowledgeIngestionService } from '../knowledge-ingestion/knowledge-ingestion.service';
@@ -446,36 +447,22 @@ export class KnowledgeSettingsService {
       id: null,
       organizationId,
       configured: false,
-      ocrMode:
-        this.configService.get<'disabled' | 'fallback' | 'always'>(
-          'KNOWLEDGE_OCR_MODE',
-        ) ?? 'fallback',
+      ocrMode: APPLICATION_DEFAULTS.knowledge.ocrMode,
       primaryOcrProviderId: null,
       fallbackOcrProviderId: null,
       embeddingProviderId: null,
       nativeTextMinCharacters:
-        this.configService.get<number>(
-          'KNOWLEDGE_PDF_NATIVE_TEXT_MIN_CHARACTERS_PER_PAGE',
-        ) ?? 40,
+        APPLICATION_DEFAULTS.knowledge.nativeTextMinCharactersPerPage,
       nativeTextMinAlphanumericRatio:
-        this.configService.get<number>(
-          'KNOWLEDGE_PDF_NATIVE_TEXT_MIN_ALPHANUMERIC_RATIO',
-        ) ?? 0.5,
-      ocrMinConfidence:
-        this.configService.get<number>('KNOWLEDGE_OCR_MIN_CONFIDENCE') ?? 0.75,
-      ocrTimeoutMs:
-        this.configService.get<number>('KNOWLEDGE_OCR_TIMEOUT_MS') ?? 60_000,
-      ocrMaxRetries:
-        this.configService.get<number>('KNOWLEDGE_OCR_MAX_RETRIES') ?? 2,
-      ocrPageConcurrency:
-        this.configService.get<number>('KNOWLEDGE_OCR_PAGE_CONCURRENCY') ?? 4,
-      ocrRenderWidth:
-        this.configService.get<number>('KNOWLEDGE_OCR_RENDER_WIDTH') ?? 1_800,
-      maxPdfPages:
-        this.configService.get<number>('KNOWLEDGE_PDF_MAX_PAGES') ?? 5_000,
+        APPLICATION_DEFAULTS.knowledge.nativeTextMinAlphanumericRatio,
+      ocrMinConfidence: APPLICATION_DEFAULTS.knowledge.ocrMinConfidence,
+      ocrTimeoutMs: APPLICATION_DEFAULTS.knowledge.ocrTimeoutMs,
+      ocrMaxRetries: APPLICATION_DEFAULTS.knowledge.ocrMaxRetries,
+      ocrPageConcurrency: APPLICATION_DEFAULTS.knowledge.ocrPageConcurrency,
+      ocrRenderWidth: APPLICATION_DEFAULTS.knowledge.ocrRenderWidth,
+      maxPdfPages: APPLICATION_DEFAULTS.knowledge.maxPdfPages,
       maxExtractedCharacters:
-        this.configService.get<number>('KNOWLEDGE_MAX_EXTRACTED_CHARACTERS') ??
-        25_000_000,
+        APPLICATION_DEFAULTS.knowledge.maxExtractedCharacters,
       settings: {},
       createdAt: null,
       updatedAt: null,

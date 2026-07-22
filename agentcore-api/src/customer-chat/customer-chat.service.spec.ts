@@ -2,6 +2,42 @@ import type { AuthenticatedUser } from '../common/auth/authenticated-request';
 import { CustomerChatService } from './customer-chat.service';
 
 describe('CustomerChatService automatic reply recovery', () => {
+  it('allows public widget requests when no origins are configured', () => {
+    const service = Object.create(
+      CustomerChatService.prototype,
+    ) as CustomerChatService;
+    const originPolicy = service as unknown as {
+      assertOriginAllowed(allowedDomains: string[], origin?: string): void;
+    };
+
+    expect(() => originPolicy.assertOriginAllowed([], undefined)).not.toThrow();
+    expect(() =>
+      originPolicy.assertOriginAllowed([], 'https://any.example.com'),
+    ).not.toThrow();
+  });
+
+  it('enforces exact origins once the frontend configures them', () => {
+    const service = Object.create(
+      CustomerChatService.prototype,
+    ) as CustomerChatService;
+    const originPolicy = service as unknown as {
+      assertOriginAllowed(allowedDomains: string[], origin?: string): void;
+    };
+
+    expect(() =>
+      originPolicy.assertOriginAllowed(
+        ['https://allowed.example.com'],
+        'https://allowed.example.com',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      originPolicy.assertOriginAllowed(
+        ['https://allowed.example.com'],
+        'https://other.example.com',
+      ),
+    ).toThrow('Request origin is not allowed');
+  });
+
   it('allows an agent to claim an unassigned handoff for themselves', async () => {
     const now = new Date();
     const actor = {

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { APPLICATION_DEFAULTS } from '../config/application-defaults';
 import {
   APPOINTMENT_REMINDER_JOB,
   APPOINTMENT_REMINDER_QUEUE,
@@ -22,10 +23,12 @@ export function appointmentReminderJobId(
 @Injectable()
 export class AppointmentReminderQueueService {
   constructor(
-    private readonly configService: ConfigService,
+    _configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly queueService: QueueService,
-  ) {}
+  ) {
+    void _configService;
+  }
 
   async enqueueBookingReminders(input: {
     bookingId: string;
@@ -203,14 +206,7 @@ export class AppointmentReminderQueueService {
   }
 
   private getReminderOffsets(): number[] {
-    const raw =
-      this.configService.get<string>('APPOINTMENT_REMINDER_OFFSETS_MINUTES') ??
-      '1440,60';
-
-    return raw
-      .split(',')
-      .map((value) => Number(value.trim()))
-      .filter((value) => Number.isFinite(value) && value > 0);
+    return [...APPLICATION_DEFAULTS.appointments.reminderOffsetsMinutes];
   }
 
   private getReminderType(offsetMinutes: number): string {

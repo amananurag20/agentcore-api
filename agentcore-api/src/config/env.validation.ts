@@ -1,10 +1,7 @@
 import { plainToInstance, Transform } from 'class-transformer';
 import {
-  Equals,
   IsBoolean,
-  IsIn,
   IsInt,
-  IsNumber,
   IsOptional,
   IsString,
   IsUrl,
@@ -13,17 +10,18 @@ import {
   MinLength,
   validateSync,
 } from 'class-validator';
+import { APPLICATION_DEFAULTS } from './application-defaults';
 
 class EnvironmentVariables {
   @IsString()
   @IsOptional()
   NODE_ENV?: string;
 
-  @Transform(({ value }) => Number(value ?? 5000))
+  @Transform(({ value }) => Number(value ?? APPLICATION_DEFAULTS.server.port))
   @IsInt()
   @Min(1)
   @Max(65535)
-  PORT = 5000;
+  PORT = APPLICATION_DEFAULTS.server.port;
 
   @IsString()
   @MinLength(1)
@@ -35,28 +33,38 @@ class EnvironmentVariables {
 
   @IsString()
   @MinLength(2)
-  JWT_ACCESS_EXPIRES_IN: string;
+  @IsOptional()
+  JWT_ACCESS_EXPIRES_IN = APPLICATION_DEFAULTS.auth.accessTokenExpiresIn;
 
-  @Transform(({ value }) => Number(value ?? 30))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.auth.refreshTokenExpiresDays),
+  )
   @IsInt()
   @Min(1)
   @Max(365)
   @IsOptional()
-  REFRESH_TOKEN_EXPIRES_DAYS = 30;
+  REFRESH_TOKEN_EXPIRES_DAYS =
+    APPLICATION_DEFAULTS.auth.refreshTokenExpiresDays;
 
-  @Transform(({ value }) => Number(value ?? 72))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.auth.inviteTokenExpiresHours),
+  )
   @IsInt()
   @Min(1)
   @Max(720)
   @IsOptional()
-  AUTH_INVITE_TOKEN_EXPIRES_HOURS = 72;
+  AUTH_INVITE_TOKEN_EXPIRES_HOURS =
+    APPLICATION_DEFAULTS.auth.inviteTokenExpiresHours;
 
-  @Transform(({ value }) => Number(value ?? 30))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.auth.passwordResetTokenExpiresMinutes),
+  )
   @IsInt()
   @Min(5)
   @Max(1440)
   @IsOptional()
-  AUTH_PASSWORD_RESET_TOKEN_EXPIRES_MINUTES = 30;
+  AUTH_PASSWORD_RESET_TOKEN_EXPIRES_MINUTES =
+    APPLICATION_DEFAULTS.auth.passwordResetTokenExpiresMinutes;
 
   @IsString()
   @MinLength(32)
@@ -70,47 +78,60 @@ class EnvironmentVariables {
   @IsOptional()
   CORS_ORIGINS?: string;
 
-  @Transform(({ value }) => Number(value ?? 15000))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.ai.providerTimeoutMs),
+  )
   @IsInt()
   @Min(1000)
   @Max(120000)
   @IsOptional()
-  AI_PROVIDER_TIMEOUT_MS = 15000;
+  AI_PROVIDER_TIMEOUT_MS = APPLICATION_DEFAULTS.ai.providerTimeoutMs;
 
-  @Transform(({ value }) => Number(value ?? 2))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.ai.providerMaxRetries),
+  )
   @IsInt()
   @Min(0)
   @Max(5)
   @IsOptional()
-  AI_PROVIDER_MAX_RETRIES = 2;
+  AI_PROVIDER_MAX_RETRIES = APPLICATION_DEFAULTS.ai.providerMaxRetries;
 
-  @Transform(({ value }) => Number(value ?? 1024))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.ai.providerMaxOutputTokens),
+  )
   @IsInt()
   @Min(128)
   @Max(8192)
   @IsOptional()
-  AI_PROVIDER_MAX_OUTPUT_TOKENS = 1024;
+  AI_PROVIDER_MAX_OUTPUT_TOKENS =
+    APPLICATION_DEFAULTS.ai.providerMaxOutputTokens;
 
-  @Transform(({ value }) => Number(value ?? 12000))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.ai.chatMaxInputTokens),
+  )
   @IsInt()
   @Min(1000)
   @Max(200000)
   @IsOptional()
-  AI_CHAT_MAX_INPUT_TOKENS = 12000;
+  AI_CHAT_MAX_INPUT_TOKENS = APPLICATION_DEFAULTS.ai.chatMaxInputTokens;
 
-  @Transform(({ value }) => Number(value ?? 6000))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.ai.ragContextMaxTokens),
+  )
   @IsInt()
   @Min(500)
   @Max(100000)
   @IsOptional()
-  AI_RAG_CONTEXT_MAX_TOKENS = 6000;
+  AI_RAG_CONTEXT_MAX_TOKENS = APPLICATION_DEFAULTS.ai.ragContextMaxTokens;
 
-  @Transform(({ value }) => Number(value ?? 2000))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.ai.chatHistoryMaxTokens),
+  )
   @IsInt()
   @Min(100)
   @Max(50000)
   @IsOptional()
-  AI_CHAT_HISTORY_MAX_TOKENS = 2000;
+  AI_CHAT_HISTORY_MAX_TOKENS = APPLICATION_DEFAULTS.ai.chatHistoryMaxTokens;
 
   @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean()
@@ -121,19 +142,24 @@ class EnvironmentVariables {
   @IsOptional()
   AI_PROVIDER_ALLOWED_HOSTS?: string;
 
-  @Transform(({ value }) => Number(value ?? 10))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.ai.providerTestRateLimit),
+  )
   @IsInt()
   @Min(1)
   @Max(100)
   @IsOptional()
-  AI_PROVIDER_TEST_RATE_LIMIT = 10;
+  AI_PROVIDER_TEST_RATE_LIMIT = APPLICATION_DEFAULTS.ai.providerTestRateLimit;
 
-  @Transform(({ value }) => Number(value ?? 60))
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.ai.providerTestRateWindowSeconds),
+  )
   @IsInt()
   @Min(1)
   @Max(3600)
   @IsOptional()
-  AI_PROVIDER_TEST_RATE_WINDOW_SECONDS = 60;
+  AI_PROVIDER_TEST_RATE_WINDOW_SECONDS =
+    APPLICATION_DEFAULTS.ai.providerTestRateWindowSeconds;
 
   @IsString()
   @IsOptional()
@@ -292,13 +318,6 @@ class EnvironmentVariables {
   @IsOptional()
   KNOWLEDGE_EMBEDDING_BATCH_SIZE = 32;
 
-  @Transform(({ value }) => Number(value ?? 4))
-  @IsInt()
-  @Min(1)
-  @Max(32)
-  @IsOptional()
-  KNOWLEDGE_EMBEDDING_CONCURRENCY = 4;
-
   @Transform(({ value }) => Number(value ?? 720))
   @IsInt()
   @Min(1)
@@ -375,10 +394,6 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
-  APPOINTMENT_REMINDER_OFFSETS_MINUTES?: string;
-
-  @IsString()
-  @IsOptional()
   APPOINTMENT_OPERATIONS_ALERT_WEBHOOK_URL?: string;
 
   @IsString()
@@ -387,7 +402,29 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
-  RESEND_API_KEY?: string;
+  SMTP_HOST?: string;
+
+  @Transform(({ value }) =>
+    Number(value ?? APPLICATION_DEFAULTS.email.smtpPort),
+  )
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  @IsOptional()
+  SMTP_PORT = APPLICATION_DEFAULTS.email.smtpPort;
+
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  @IsOptional()
+  SMTP_SECURE = APPLICATION_DEFAULTS.email.smtpSecure;
+
+  @IsString()
+  @IsOptional()
+  SMTP_USER?: string;
+
+  @IsString()
+  @IsOptional()
+  SMTP_PASSWORD?: string;
 
   @IsString()
   @IsOptional()
@@ -580,18 +617,6 @@ class EnvironmentVariables {
   @IsOptional()
   APPOINTMENT_CALENDAR_SYNC_PROCESSING_TIMEOUT_MS = 300000;
 
-  @IsString()
-  @IsOptional()
-  DEFAULT_EMBEDDING_MODEL?: string;
-
-  @Transform(({ value }) => Number(value ?? 1536))
-  @Equals(1536)
-  @IsInt()
-  @Min(1)
-  @Max(4096)
-  @IsOptional()
-  DEFAULT_EMBEDDING_DIMENSIONS = 1536;
-
   @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean()
   @IsOptional()
@@ -601,49 +626,6 @@ class EnvironmentVariables {
   @IsOptional()
   CUSTOMER_CHAT_PROCESSING_FAILURE_MESSAGE?: string;
 
-  @Transform(({ value }) => Number(value ?? 25000000))
-  @IsInt()
-  @Min(1000)
-  @Max(50000000)
-  @IsOptional()
-  KNOWLEDGE_MAX_EXTRACTED_CHARACTERS = 25000000;
-
-  @IsIn(['disabled', 'fallback', 'always'])
-  @IsOptional()
-  KNOWLEDGE_OCR_MODE: 'disabled' | 'fallback' | 'always' = 'fallback';
-
-  @IsString()
-  @IsOptional()
-  KNOWLEDGE_OCR_ENDPOINT?: string;
-
-  @IsString()
-  @IsOptional()
-  KNOWLEDGE_OCR_API_KEY?: string;
-
-  @IsString()
-  @IsOptional()
-  KNOWLEDGE_OCR_PRIMARY_PROVIDER?: string;
-
-  @IsString()
-  @IsOptional()
-  KNOWLEDGE_OCR_PRIMARY_ENDPOINT?: string;
-
-  @IsString()
-  @IsOptional()
-  KNOWLEDGE_OCR_PRIMARY_API_KEY?: string;
-
-  @IsString()
-  @IsOptional()
-  KNOWLEDGE_OCR_FALLBACK_PROVIDER?: string;
-
-  @IsString()
-  @IsOptional()
-  KNOWLEDGE_OCR_FALLBACK_ENDPOINT?: string;
-
-  @IsString()
-  @IsOptional()
-  KNOWLEDGE_OCR_FALLBACK_API_KEY?: string;
-
   @IsString()
   @IsOptional()
   KNOWLEDGE_OCR_ALLOWED_HOSTS?: string;
@@ -652,83 +634,6 @@ class EnvironmentVariables {
   @IsBoolean()
   @IsOptional()
   KNOWLEDGE_OCR_ALLOW_PRIVATE_NETWORKS = false;
-
-  @Transform(({ value }) => Number(value ?? 60000))
-  @IsInt()
-  @Min(1000)
-  @Max(300000)
-  @IsOptional()
-  KNOWLEDGE_OCR_TIMEOUT_MS = 60000;
-
-  @Transform(({ value }) => Number(value ?? 2))
-  @IsInt()
-  @Min(0)
-  @Max(5)
-  @IsOptional()
-  KNOWLEDGE_OCR_MAX_RETRIES = 2;
-
-  @Transform(({ value }) => Number(value ?? 0.75))
-  @IsNumber()
-  @Min(0)
-  @Max(1)
-  @IsOptional()
-  KNOWLEDGE_OCR_MIN_CONFIDENCE = 0.75;
-
-  @Transform(({ value }) => Number(value ?? 4))
-  @IsInt()
-  @Min(1)
-  @Max(32)
-  @IsOptional()
-  KNOWLEDGE_OCR_PAGE_CONCURRENCY = 4;
-
-  @Transform(({ value }) => Number(value ?? 1800))
-  @IsInt()
-  @Min(800)
-  @Max(4000)
-  @IsOptional()
-  KNOWLEDGE_OCR_RENDER_WIDTH = 1800;
-
-  @Transform(({ value }) => Number(value ?? 5000))
-  @IsInt()
-  @Min(1)
-  @Max(20000)
-  @IsOptional()
-  KNOWLEDGE_PDF_MAX_PAGES = 5000;
-
-  @Transform(({ value }) => Number(value ?? 104857600))
-  @IsInt()
-  @Min(1048576)
-  @Max(2147483648)
-  @IsOptional()
-  KNOWLEDGE_PDF_MAX_BYTES = 104857600;
-
-  @Transform(({ value }) => Number(value ?? 500))
-  @IsInt()
-  @Min(1)
-  @Max(20000)
-  @IsOptional()
-  KNOWLEDGE_OCR_MAX_PAGES_PER_DOCUMENT = 500;
-
-  @Transform(({ value }) => Number(value ?? 0.25))
-  @IsNumber()
-  @Min(0)
-  @Max(1)
-  @IsOptional()
-  KNOWLEDGE_OCR_MAX_EMPTY_PAGE_RATIO = 0.25;
-
-  @Transform(({ value }) => Number(value ?? 40))
-  @IsInt()
-  @Min(0)
-  @Max(1000)
-  @IsOptional()
-  KNOWLEDGE_PDF_NATIVE_TEXT_MIN_CHARACTERS_PER_PAGE = 40;
-
-  @Transform(({ value }) => Number(value ?? 0.5))
-  @IsNumber()
-  @Min(0)
-  @Max(1)
-  @IsOptional()
-  KNOWLEDGE_PDF_NATIVE_TEXT_MIN_ALPHANUMERIC_RATIO = 0.5;
 
   @Transform(({ value }) => Number(value ?? 90))
   @IsInt()
@@ -759,14 +664,6 @@ class EnvironmentVariables {
   @Max(120000)
   @IsOptional()
   MALWARE_SCAN_TIMEOUT_MS = 15000;
-
-  @IsString()
-  @IsOptional()
-  DEFAULT_CHAT_MODEL?: string;
-
-  @IsString()
-  @IsOptional()
-  AI_TRANSCRIPTION_MODEL = 'whisper-1';
 
   @Transform(({ value }) => Number(value ?? 60))
   @IsInt()
@@ -837,13 +734,6 @@ class EnvironmentVariables {
   @IsBoolean()
   @IsOptional()
   RATE_LIMIT_FAIL_CLOSED?: boolean;
-
-  @Transform(({ value }) =>
-    value === undefined ? undefined : value === 'true' || value === true,
-  )
-  @IsBoolean()
-  @IsOptional()
-  ALLOW_UNRESTRICTED_WIDGET_ORIGINS?: boolean;
 
   @Transform(({ value }) => Number(value ?? 24))
   @IsInt()

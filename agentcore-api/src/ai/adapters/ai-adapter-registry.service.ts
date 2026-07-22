@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AIProviderConfig, Prisma } from '@prisma/client';
+import { APPLICATION_DEFAULTS } from '../../config/application-defaults';
 import { AnthropicAdapter } from './anthropic.adapter';
 import {
   AIAdapterKind,
@@ -107,11 +108,14 @@ export class AIAdapterRegistryService {
   private resolveOptions(): AIProviderAdapterOptions {
     return {
       maxOutputTokens:
-        this.configService.get<number>('AI_PROVIDER_MAX_OUTPUT_TOKENS') ?? 1024,
+        this.configService.get<number>('AI_PROVIDER_MAX_OUTPUT_TOKENS') ??
+        APPLICATION_DEFAULTS.ai.providerMaxOutputTokens,
       maxRetries:
-        this.configService.get<number>('AI_PROVIDER_MAX_RETRIES') ?? 2,
+        this.configService.get<number>('AI_PROVIDER_MAX_RETRIES') ??
+        APPLICATION_DEFAULTS.ai.providerMaxRetries,
       timeoutMs:
-        this.configService.get<number>('AI_PROVIDER_TIMEOUT_MS') ?? 15_000,
+        this.configService.get<number>('AI_PROVIDER_TIMEOUT_MS') ??
+        APPLICATION_DEFAULTS.ai.providerTimeoutMs,
     };
   }
 

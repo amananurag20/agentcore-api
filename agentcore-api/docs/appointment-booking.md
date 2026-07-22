@@ -116,7 +116,7 @@ webhook as soon as a reminder or calendar record enters dead letter.
 Before production traffic, apply all Prisma migrations, run the API and worker as
 separately supervised processes, configure Redis and provider credentials, set
 `APPOINTMENT_PUBLIC_URL`, and alert on dead-letter audit events plus queue/worker
-health. Live Google, Microsoft, Resend, Twilio, and Meta verification requires
+health. Live Google, Microsoft, SMTP, Twilio, and Meta verification requires
 credentials for the target environment.
 
 Run both processes in production:
@@ -126,7 +126,7 @@ npm run start:prod
 npm run start:worker
 ```
 
-Email uses Resend, SMS uses Twilio, and WhatsApp uses the organization's active
+Email uses Nodemailer with SMTP, SMS uses Twilio, and WhatsApp uses the organization's active
 Meta/Twilio configuration. See `.env.example` and
 `docs/production-integrations-checklist.md` for required settings.
 

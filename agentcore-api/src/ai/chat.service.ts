@@ -1,5 +1,6 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { APPLICATION_DEFAULTS } from '../config/application-defaults';
 import { AIProviderConfig, AIProviderType } from '@prisma/client';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -82,16 +83,19 @@ export class ChatService {
     @Optional()
     private readonly endpointPolicy?: ProviderEndpointPolicyService,
   ) {
-    this.defaultModel =
-      this.configService.get<string>('DEFAULT_CHAT_MODEL') ?? 'gpt-4.1-mini';
+    this.defaultModel = APPLICATION_DEFAULTS.ai.chatModel;
     this.maxOutputTokens =
-      this.configService.get<number>('AI_PROVIDER_MAX_OUTPUT_TOKENS') ?? 1024;
+      this.configService.get<number>('AI_PROVIDER_MAX_OUTPUT_TOKENS') ??
+      APPLICATION_DEFAULTS.ai.providerMaxOutputTokens;
     this.maxInputTokens =
-      this.configService.get<number>('AI_CHAT_MAX_INPUT_TOKENS') ?? 12_000;
+      this.configService.get<number>('AI_CHAT_MAX_INPUT_TOKENS') ??
+      APPLICATION_DEFAULTS.ai.chatMaxInputTokens;
     this.maxContextTokens =
-      this.configService.get<number>('AI_RAG_CONTEXT_MAX_TOKENS') ?? 6_000;
+      this.configService.get<number>('AI_RAG_CONTEXT_MAX_TOKENS') ??
+      APPLICATION_DEFAULTS.ai.ragContextMaxTokens;
     this.maxHistoryTokens =
-      this.configService.get<number>('AI_CHAT_HISTORY_MAX_TOKENS') ?? 2_000;
+      this.configService.get<number>('AI_CHAT_HISTORY_MAX_TOKENS') ??
+      APPLICATION_DEFAULTS.ai.chatHistoryMaxTokens;
   }
 
   async answerWithContext(input: {
@@ -479,9 +483,7 @@ export class ChatService {
     const adapter = this.adapterRegistry.getAdapter(providerConfig);
     if (!adapter.createTranscription) return null;
     const model =
-      providerConfig.sttModel ??
-      this.configService.get<string>('AI_TRANSCRIPTION_MODEL') ??
-      'whisper-1';
+      providerConfig.sttModel ?? APPLICATION_DEFAULTS.ai.transcriptionModel;
     const startedAt = Date.now();
     try {
       await this.authorizeProviderCall(providerConfig);

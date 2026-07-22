@@ -15,6 +15,7 @@ import {
 import { GoogleAuth } from 'google-auth-library';
 import { recognize as recognizeWithTesseract } from 'tesseract.js';
 import { CryptoService } from '../crypto/crypto.service';
+import { APPLICATION_DEFAULTS } from '../config/application-defaults';
 import { PrismaService } from '../prisma/prisma.service';
 import { OcrEndpointPolicyService } from './ocr-endpoint-policy.service';
 
@@ -76,51 +77,26 @@ export class KnowledgeOcrService {
     @Optional() private readonly cryptoService?: CryptoService,
     @Optional() private readonly endpointPolicy?: OcrEndpointPolicyService,
   ) {
-    const mode =
-      this.configService.get<KnowledgeOcrMode>('KNOWLEDGE_OCR_MODE') ??
-      'fallback';
-    const primary = this.readEndpointConfig('PRIMARY', true);
-    const fallback = this.readEndpointConfig('FALLBACK', false);
-    const timeoutMs =
-      this.configService.get<number>('KNOWLEDGE_OCR_TIMEOUT_MS') ?? 60_000;
-    const maxRetries =
-      this.configService.get<number>('KNOWLEDGE_OCR_MAX_RETRIES') ?? 2;
-    const minimumConfidence =
-      this.configService.get<number>('KNOWLEDGE_OCR_MIN_CONFIDENCE') ?? 0.75;
     const defaults = {
-      mode,
-      primary,
-      fallback,
-      minimumConfidence,
-      timeoutMs,
-      maxRetries,
+      mode: APPLICATION_DEFAULTS.knowledge.ocrMode,
+      primary: null,
+      fallback: null,
+      minimumConfidence: APPLICATION_DEFAULTS.knowledge.ocrMinConfidence,
+      timeoutMs: APPLICATION_DEFAULTS.knowledge.ocrTimeoutMs,
+      maxRetries: APPLICATION_DEFAULTS.knowledge.ocrMaxRetries,
       nativeTextMinimumCharacters:
-        this.configService.get<number>(
-          'KNOWLEDGE_PDF_NATIVE_TEXT_MIN_CHARACTERS_PER_PAGE',
-        ) ?? 40,
+        APPLICATION_DEFAULTS.knowledge.nativeTextMinCharactersPerPage,
       nativeTextMinimumRatio:
-        this.configService.get<number>(
-          'KNOWLEDGE_PDF_NATIVE_TEXT_MIN_ALPHANUMERIC_RATIO',
-        ) ?? 0.5,
-      ocrPageConcurrency:
-        this.configService.get<number>('KNOWLEDGE_OCR_PAGE_CONCURRENCY') ?? 4,
-      ocrRenderWidth:
-        this.configService.get<number>('KNOWLEDGE_OCR_RENDER_WIDTH') ?? 1_800,
-      maxPdfPages:
-        this.configService.get<number>('KNOWLEDGE_PDF_MAX_PAGES') ?? 5_000,
-      maxPdfBytes:
-        this.configService.get<number>('KNOWLEDGE_PDF_MAX_BYTES') ??
-        100 * 1024 * 1024,
+        APPLICATION_DEFAULTS.knowledge.nativeTextMinAlphanumericRatio,
+      ocrPageConcurrency: APPLICATION_DEFAULTS.knowledge.ocrPageConcurrency,
+      ocrRenderWidth: APPLICATION_DEFAULTS.knowledge.ocrRenderWidth,
+      maxPdfPages: APPLICATION_DEFAULTS.knowledge.maxPdfPages,
+      maxPdfBytes: APPLICATION_DEFAULTS.knowledge.maxPdfBytes,
       maxOcrPagesPerDocument:
-        this.configService.get<number>(
-          'KNOWLEDGE_OCR_MAX_PAGES_PER_DOCUMENT',
-        ) ?? 500,
-      maxEmptyOcrPageRatio:
-        this.configService.get<number>('KNOWLEDGE_OCR_MAX_EMPTY_PAGE_RATIO') ??
-        0.25,
+        APPLICATION_DEFAULTS.knowledge.maxOcrPagesPerDocument,
+      maxEmptyOcrPageRatio: APPLICATION_DEFAULTS.knowledge.maxEmptyOcrPageRatio,
       maxExtractedCharacters:
-        this.configService.get<number>('KNOWLEDGE_MAX_EXTRACTED_CHARACTERS') ??
-        25_000_000,
+        APPLICATION_DEFAULTS.knowledge.maxExtractedCharacters,
     };
     this.deploymentDefaults = {
       ...defaults,
@@ -400,7 +376,7 @@ export class KnowledgeOcrService {
     const region =
       typeof provider.settings.region === 'string'
         ? provider.settings.region
-        : (this.configService.get<string>('S3_REGION') ?? 'us-east-1');
+        : APPLICATION_DEFAULTS.knowledge.awsRegion;
     const client = new TextractClient({ region, credentials });
     const features = Array.isArray(provider.settings.features)
       ? provider.settings.features.filter(
@@ -650,30 +626,6 @@ export class KnowledgeOcrService {
         lastAccessedAt: new Date(),
       },
     });
-  }
-
-  private readEndpointConfig(
-    slot: 'PRIMARY' | 'FALLBACK',
-    allowLegacy: boolean,
-  ): OcrEndpointConfig | null {
-    const endpoint =
-      this.configService.get<string>(`KNOWLEDGE_OCR_${slot}_ENDPOINT`) ||
-      (allowLegacy
-        ? this.configService.get<string>('KNOWLEDGE_OCR_ENDPOINT')
-        : undefined);
-    if (!endpoint) return null;
-    return {
-      endpoint,
-      apiKey:
-        this.configService.get<string>(`KNOWLEDGE_OCR_${slot}_API_KEY`) ||
-        (allowLegacy
-          ? this.configService.get<string>('KNOWLEDGE_OCR_API_KEY')
-          : undefined),
-      provider:
-        this.configService.get<string>(`KNOWLEDGE_OCR_${slot}_PROVIDER`) ??
-        (slot === 'PRIMARY' ? 'local' : 'managed'),
-      settings: {},
-    };
   }
 
   private toEndpointConfig(

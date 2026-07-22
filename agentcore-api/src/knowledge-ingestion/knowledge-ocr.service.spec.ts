@@ -14,7 +14,11 @@ describe('KnowledgeOcrService', () => {
     const updateCache = jest.fn().mockResolvedValue({});
     const prisma = {
       knowledgeExtractionConfig: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findUnique: jest.fn().mockResolvedValue(
+          extractionConfig({
+            primaryEndpoint: 'http://ocr.local/process',
+          }),
+        ),
       },
       knowledgeOcrPageCache: {
         findUnique: jest.fn().mockResolvedValue({
@@ -30,10 +34,7 @@ describe('KnowledgeOcrService', () => {
       },
     } as unknown as PrismaService;
     global.fetch = jest.fn();
-    const service = new KnowledgeOcrService(
-      config({ KNOWLEDGE_OCR_PRIMARY_ENDPOINT: 'http://ocr.local/process' }),
-      prisma,
-    );
+    const service = new KnowledgeOcrService(config({}), prisma);
 
     const result = await service.recognizePage({
       organizationId: 'org-1',
@@ -64,7 +65,12 @@ describe('KnowledgeOcrService', () => {
     });
     const prisma = {
       knowledgeExtractionConfig: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findUnique: jest.fn().mockResolvedValue(
+          extractionConfig({
+            primaryEndpoint: 'http://ocr.local/process',
+            fallbackEndpoint: 'https://ocr-gateway.local/process',
+          }),
+        ),
       },
       knowledgeOcrPageCache: {
         findUnique: jest.fn().mockResolvedValue(null),
@@ -88,14 +94,7 @@ describe('KnowledgeOcrService', () => {
           provider: 'aws-textract',
         }),
       );
-    const service = new KnowledgeOcrService(
-      config({
-        KNOWLEDGE_OCR_PRIMARY_ENDPOINT: 'http://ocr.local/process',
-        KNOWLEDGE_OCR_FALLBACK_ENDPOINT: 'https://ocr-gateway.local/process',
-        KNOWLEDGE_OCR_MIN_CONFIDENCE: 0.75,
-      }),
-      prisma,
-    );
+    const service = new KnowledgeOcrService(config({}), prisma);
 
     const result = await service.recognizePage({
       organizationId: 'org-1',
@@ -125,7 +124,12 @@ describe('KnowledgeOcrService', () => {
   it('uses fallback when the primary provider omits confidence', async () => {
     const prisma = {
       knowledgeExtractionConfig: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findUnique: jest.fn().mockResolvedValue(
+          extractionConfig({
+            primaryEndpoint: 'http://ocr.local/process',
+            fallbackEndpoint: 'https://ocr-gateway.local/process',
+          }),
+        ),
       },
       knowledgeOcrPageCache: {
         findUnique: jest.fn().mockResolvedValue(null),
@@ -139,15 +143,10 @@ describe('KnowledgeOcrService', () => {
       .mockResolvedValueOnce(
         response({ text: 'verified fallback text', confidence: 0.95 }),
       );
-    const service = new KnowledgeOcrService(
-      config({
-        KNOWLEDGE_OCR_PRIMARY_ENDPOINT: 'http://ocr.local/process',
-        KNOWLEDGE_OCR_FALLBACK_ENDPOINT: 'https://ocr-gateway.local/process',
-      }),
-      prisma,
-    );
+    const service = new KnowledgeOcrService(config({}), prisma);
 
     const result = await service.recognizePage({
+      organizationId: 'org-1',
       image: Buffer.from('page image'),
       pageNumber: 4,
     });
@@ -159,7 +158,13 @@ describe('KnowledgeOcrService', () => {
   it('uses managed fallback when the primary provider is unavailable', async () => {
     const prisma = {
       knowledgeExtractionConfig: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findUnique: jest.fn().mockResolvedValue(
+          extractionConfig({
+            primaryEndpoint: 'http://ocr.local/process',
+            fallbackEndpoint: 'https://ocr-gateway.local/process',
+            maxRetries: 0,
+          }),
+        ),
       },
       knowledgeOcrPageCache: {
         findUnique: jest.fn().mockResolvedValue(null),
@@ -177,22 +182,37 @@ describe('KnowledgeOcrService', () => {
           provider: 'managed-ocr',
         }),
       );
-    const service = new KnowledgeOcrService(
-      config({
-        KNOWLEDGE_OCR_PRIMARY_ENDPOINT: 'http://ocr.local/process',
-        KNOWLEDGE_OCR_FALLBACK_ENDPOINT: 'https://ocr-gateway.local/process',
-        KNOWLEDGE_OCR_MAX_RETRIES: 0,
-      }),
-      prisma,
-    );
+    const service = new KnowledgeOcrService(config({}), prisma);
 
     const result = await service.recognizePage({
+      organizationId: 'org-1',
       image: Buffer.from('page image'),
       pageNumber: 2,
     });
 
     expect(result.text).toBe('Recovered by managed OCR');
     expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not use legacy OCR provider credentials from the environment', async () => {
+    const prisma = {
+      knowledgeExtractionConfig: {
+        findUnique: jest.fn().mockResolvedValue(null),
+      },
+    } as unknown as PrismaService;
+    const service = new KnowledgeOcrService(
+      config({
+        KNOWLEDGE_OCR_PRIMARY_ENDPOINT: 'https://legacy.example.com/ocr',
+        KNOWLEDGE_OCR_PRIMARY_API_KEY: 'legacy-secret',
+      }),
+      prisma,
+    );
+
+    const policy = await service.resolveRuntimePolicy('org-1');
+
+    expect(policy.primary).toBeNull();
+    expect(policy.fallback).toBeNull();
+    expect(service.isConfigured(policy)).toBe(false);
   });
 
   it('resolves an isolated database policy and decrypts only its provider key', async () => {
@@ -266,6 +286,45 @@ describe('KnowledgeOcrService', () => {
     return {
       get: jest.fn((key: string) => ({ ...defaults, ...values })[key]),
     } as unknown as ConfigService;
+  }
+
+  function extractionConfig(input: {
+    primaryEndpoint: string;
+    fallbackEndpoint?: string;
+    maxRetries?: number;
+  }) {
+    const now = new Date();
+    const provider = (id: string, endpoint: string) => ({
+      id,
+      organizationId: 'org-1',
+      name: id,
+      provider: 'custom',
+      status: 'active',
+      endpoint,
+      apiKeyEncrypted: null,
+      settings: {},
+      createdAt: now,
+      updatedAt: now,
+    });
+    return {
+      ocrMode: 'fallback',
+      ocrMinConfidence: 0.75,
+      ocrTimeoutMs: 60_000,
+      ocrMaxRetries: input.maxRetries ?? 2,
+      nativeTextMinCharacters: 40,
+      nativeTextMinAlphanumericRatio: 0.5,
+      ocrPageConcurrency: 4,
+      ocrRenderWidth: 1_800,
+      maxPdfPages: 5_000,
+      maxExtractedCharacters: 25_000_000,
+      settings: {},
+      primaryOcrProviderId: 'primary',
+      fallbackOcrProviderId: input.fallbackEndpoint ? 'fallback' : null,
+      primaryOcrProvider: provider('primary', input.primaryEndpoint),
+      fallbackOcrProvider: input.fallbackEndpoint
+        ? provider('fallback', input.fallbackEndpoint)
+        : null,
+    };
   }
 
   function response(body: Record<string, unknown>): Response {

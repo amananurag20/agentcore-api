@@ -1,6 +1,13 @@
+import { createTransport } from 'nodemailer';
 import { AppointmentReminderDeliveryService } from './appointment-reminder-delivery.service';
 
+jest.mock('nodemailer', () => ({ createTransport: jest.fn() }));
+
 describe('AppointmentReminderDeliveryService templates', () => {
+  beforeEach(() => {
+    jest.mocked(createTransport).mockReset();
+  });
+
   it('merges service templates over organization defaults and renders variables', async () => {
     const prisma = {
       appointmentBookingPolicy: {
@@ -57,13 +64,7 @@ describe('AppointmentReminderDeliveryService templates', () => {
       },
     };
     const service = new AppointmentReminderDeliveryService(
-      {
-        get: jest.fn((key: string) =>
-          key === 'RESEND_API_KEY' || key === 'APPOINTMENT_EMAIL_FROM'
-            ? 'configured'
-            : undefined,
-        ),
-      } as never,
+      { get: jest.fn() } as never,
       {} as never,
       prisma as never,
     );
@@ -84,5 +85,60 @@ describe('AppointmentReminderDeliveryService templates', () => {
     } finally {
       global.fetch = originalFetch;
     }
+  });
+
+  it('sends appointment email through the configured SMTP transport', async () => {
+    const sendMail = jest
+      .fn()
+      .mockResolvedValue({ messageId: 'smtp-message-1' });
+    jest.mocked(createTransport).mockReturnValue({ sendMail } as never);
+    const config = {
+      SMTP_HOST: 'smtp.example.com',
+      SMTP_PORT: 587,
+      SMTP_SECURE: false,
+      SMTP_USER: 'appointments@example.com',
+      SMTP_PASSWORD: 'secret',
+      APPOINTMENT_EMAIL_FROM: 'Appointments <appointments@example.com>',
+      APPOINTMENT_PROVIDER_TIMEOUT_MS: 12_000,
+    };
+    const service = new AppointmentReminderDeliveryService(
+      { get: jest.fn((key: keyof typeof config) => config[key]) } as never,
+      {} as never,
+      {
+        appointmentReminderSuppression: {
+          findMany: jest.fn().mockResolvedValue([]),
+        },
+      } as never,
+    );
+
+    await expect(
+      service.deliverTransactional({
+        organizationId: 'org-1',
+        email: 'customer@example.com',
+        subject: 'Appointment confirmed',
+        message: 'Your appointment is confirmed.',
+      }),
+    ).resolves.toEqual([
+      {
+        channel: 'email',
+        provider: 'smtp',
+        providerMessageId: 'smtp-message-1',
+      },
+    ]);
+    expect(createTransport).toHaveBeenCalledWith({
+      host: 'smtp.example.com',
+      port: 587,
+      secure: false,
+      auth: { user: 'appointments@example.com', pass: 'secret' },
+      connectionTimeout: 12_000,
+      greetingTimeout: 12_000,
+      socketTimeout: 12_000,
+    });
+    expect(sendMail).toHaveBeenCalledWith({
+      from: 'Appointments <appointments@example.com>',
+      to: 'customer@example.com',
+      subject: 'Appointment confirmed',
+      text: 'Your appointment is confirmed.',
+    });
   });
 });

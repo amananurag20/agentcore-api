@@ -44,6 +44,14 @@ We need production/staging access for:
 
 ## Core Infrastructure Env
 
+Environment variables are reserved for secrets, infrastructure addresses,
+public deployment URLs, network policy, and global integration switches.
+Stable auth and AI/knowledge behavior defaults live in
+`src/config/application-defaults.ts`; other bounded operational defaults remain
+validated in `src/config/env.validation.ts`.
+Workspace settings configured in the frontend live in Postgres; they must not
+also be configured through environment variables.
+
 Required for all modules:
 
 | Env key                    | Needed for         | Notes                                                                                    |
@@ -51,20 +59,18 @@ Required for all modules:
 | `PORT`                     | API runtime        | Default `5000`.                                                                          |
 | `DATABASE_URL`             | Postgres/Prisma    | Must support pgvector extension for RAG.                                                 |
 | `JWT_ACCESS_SECRET`        | Auth               | Strong random secret, at least 32 chars.                                                 |
-| `JWT_ACCESS_EXPIRES_IN`    | Auth               | Example `15m`.                                                                           |
 | `AI_CONFIG_ENCRYPTION_KEY` | Secret encryption  | Used to encrypt provider API keys/tokens in DB. Strong random secret, at least 32 chars. |
 | `REDIS_URL`                | Queues/rate limits | Required for BullMQ workers and distributed rate limiting.                               |
-| `QUEUE_PREFIX`             | Queues             | Namespace for queue keys, default `agentcore`.                                           |
 
-## AI/RAG Env
+## Workspace AI/RAG Configuration
 
-| Env key                        | Needed for                       | Notes                                                          |
-| ------------------------------ | -------------------------------- | -------------------------------------------------------------- |
-| `DEFAULT_EMBEDDING_MODEL`      | Knowledge embeddings             | Current default `text-embedding-3-small`.                      |
-| `DEFAULT_EMBEDDING_DIMENSIONS` | pgvector column/query dimensions | Current default `1536`. Must match embedding model dimensions. |
-| `DEFAULT_CHAT_MODEL`           | RAG answer generation            | Current default `gpt-4.1-mini`.                                |
+Provider API keys, base URLs, chat/embedding/STT/TTS models and provider-specific
+settings are stored through the AI provider APIs and encrypted using
+`AI_CONFIG_ENCRYPTION_KEY`. The fixed pgvector index dimension and fallback
+model names are application constants, not deployment configuration.
 
-Provider API keys are stored through AI provider config APIs, encrypted using `AI_CONFIG_ENCRYPTION_KEY`.
+`AI_PROVIDER_ALLOWED_HOSTS` and `AI_PROVIDER_ALLOW_PRIVATE_NETWORKS` remain
+environment variables because they are deployment-wide SSRF/network policy.
 
 ## Storage Env
 
@@ -77,10 +83,12 @@ Provider API keys are stored through AI provider config APIs, encrypted using `A
 | `S3_FORCE_PATH_STYLE`     | R2/MinIO/custom S3    | Often `true` for MinIO, usually `false` for AWS S3. |
 | `S3_ACCESS_KEY_ID`        | Object storage        | IAM/access key.                                     |
 | `S3_SECRET_ACCESS_KEY`    | Object storage        | Secret key.                                         |
-| `S3_UPLOAD_PREFIX`        | Object storage paths  | Current default `knowledge`.                        |
-| `MAX_UPLOAD_FILE_SIZE_MB` | Upload validation     | Current default `25`.                               |
 
-## Customer Chat Env
+## Customer Chat Advanced Overrides
+
+These bounded defaults are intentionally absent from `.env.example`. Override
+them only for a measured operational need; they are not normal deployment
+requirements.
 
 | Env key                                                | Needed for                         | Notes                   |
 | ------------------------------------------------------ | ---------------------------------- | ----------------------- |
@@ -103,24 +111,24 @@ Internal assistant-message metadata includes `effectiveClearance`,
 `clearanceFilteredCount`, and `clearanceBlockedAll` for diagnosing an empty
 public retrieval result without leaking those details to the visitor.
 
-## Appointment Booking Env
+## Appointment Booking Configuration
+
+Reminder offsets and booking policy are stored per workspace/service in
+Postgres. Worker retry/concurrency/rate-limit values are application defaults.
+Only provider credentials, verified sender identities, OAuth callback URLs and
+public deployment URLs remain environment variables.
 
 | Env key                                        | Needed for                        | Notes                                                                           |
 | ---------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------- |
-| `APPOINTMENT_REMINDER_OFFSETS_MINUTES`         | Reminder scheduling               | Example `1440,60` means 24 hours and 1 hour before.                             |
-| `APPOINTMENT_REMINDER_QUEUE_CONCURRENCY`       | Reminder worker throughput        | Current default `5`.                                                            |
-| `APPOINTMENT_REMINDER_RECOVERY_INTERVAL_MS`    | Durable outbox recovery           | Re-publishes pending/failed reminder records. Default `60000`.                  |
-| `APPOINTMENT_REMINDER_MAX_ATTEMPTS`            | Delivery retry ceiling            | Default `10`.                                                                   |
-| `APPOINTMENT_REMINDER_CHANNELS`                | Enabled channels                  | Comma-separated `email,sms,whatsapp`.                                           |
-| `RESEND_API_KEY`                               | Email reminders                   | Resend API credential.                                                          |
+| `SMTP_HOST`                                    | Email reminders                   | SMTP server hostname.                                                           |
+| `SMTP_PORT`                                    | Email reminders                   | Usually `587` for STARTTLS or `465` for implicit TLS.                            |
+| `SMTP_SECURE`                                  | Email reminders                   | `true` for implicit TLS (normally port `465`); otherwise `false`.                |
+| `SMTP_USER`                                    | Email reminders                   | SMTP login; may be omitted with a trusted internal relay.                        |
+| `SMTP_PASSWORD`                                | Email reminders                   | SMTP password or provider-generated SMTP credential.                             |
 | `APPOINTMENT_EMAIL_FROM`                       | Email reminders                   | Verified sender address.                                                        |
 | `TWILIO_ACCOUNT_SID`                           | SMS reminders/Twilio integrations | Twilio account SID.                                                             |
 | `TWILIO_AUTH_TOKEN`                            | SMS reminders                     | Twilio auth token.                                                              |
 | `TWILIO_SMS_FROM`                              | SMS reminders                     | E.164 sender number.                                                            |
-| `APPOINTMENT_WHATSAPP_TEMPLATE_NAME`           | Meta WhatsApp reminders           | Approved template with customer, service, date/time, and staff body parameters. |
-| `PUBLIC_APPOINTMENT_RATE_LIMIT_WINDOW_SECONDS` | Public appointment APIs           | Default `60`.                                                                   |
-| `PUBLIC_APPOINTMENT_MAX_READS_PER_WINDOW`      | Public services/availability      | Per-IP default `120`.                                                           |
-| `PUBLIC_APPOINTMENT_MAX_WRITES_PER_WINDOW`     | Public booking/self-service       | Per-IP default `10`.                                                            |
 | `GOOGLE_CALENDAR_CLIENT_ID`                    | Google Calendar OAuth             | OAuth web client ID.                                                            |
 | `GOOGLE_CALENDAR_CLIENT_SECRET`                | Google Calendar OAuth             | OAuth client secret.                                                            |
 | `GOOGLE_CALENDAR_REDIRECT_URI`                 | Google Calendar OAuth             | Must exactly match the provider callback registration.                          |
@@ -128,13 +136,10 @@ public retrieval result without leaking those details to the visitor.
 | `MICROSOFT_CALENDAR_CLIENT_SECRET`             | Microsoft Outlook OAuth           | Microsoft Entra client secret.                                                  |
 | `MICROSOFT_CALENDAR_REDIRECT_URI`              | Microsoft Outlook OAuth           | Must exactly match the provider callback registration.                          |
 | `APPOINTMENT_CALENDAR_OAUTH_SUCCESS_URL`       | Calendar OAuth UI return          | Frontend appointment URL after authorization.                                   |
-| `APPOINTMENT_CALENDAR_FAIL_OPEN`               | External conflict policy          | Default `false`; keep false to avoid unverified double bookings.                |
-| `APPOINTMENT_CALENDAR_SYNC_CONCURRENCY`        | Calendar worker throughput        | Current default `5`.                                                            |
-| `APPOINTMENT_CALENDAR_RECOVERY_INTERVAL_MS`    | Durable calendar sync recovery    | Re-publishes pending/failed sync records. Default `60000`.                      |
 
 Provider configuration notes:
 
-- Email uses Resend; SMS uses Twilio; WhatsApp uses the organization's encrypted Meta/Twilio configuration.
+- Email uses Nodemailer with the deployment SMTP service; SMS uses Twilio; WhatsApp uses the organization's encrypted Meta/Twilio configuration.
 - If a channel is enabled without usable customer contact details or credentials, the durable reminder record is marked `skipped` rather than falsely marked sent.
 - Run `npm run start:worker` alongside the API whenever reminders or calendar sync are enabled.
 

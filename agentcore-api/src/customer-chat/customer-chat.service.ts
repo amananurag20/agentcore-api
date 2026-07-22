@@ -2538,14 +2538,7 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
   }
 
   private assertOriginAllowed(allowedDomains: string[], origin?: string) {
-    if (!allowedDomains.length) {
-      const unrestricted = this.configService.get<boolean>(
-        'ALLOW_UNRESTRICTED_WIDGET_ORIGINS',
-        this.configService.get<string>('NODE_ENV') !== 'production',
-      );
-      if (unrestricted) return;
-      throw new ForbiddenException('Widget has no allowed website origins');
-    }
+    if (!allowedDomains.length) return;
 
     if (!origin) {
       throw new ForbiddenException('Request origin is not allowed');
@@ -2614,17 +2607,6 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
           `Invalid allowed website origin: ${domain}`,
         );
       }
-    }
-    if (
-      allowedDomains.length === 0 &&
-      !this.configService.get<boolean>(
-        'ALLOW_UNRESTRICTED_WIDGET_ORIGINS',
-        this.configService.get<string>('NODE_ENV') !== 'production',
-      )
-    ) {
-      throw new BadRequestException(
-        'At least one allowed website origin is required',
-      );
     }
   }
 

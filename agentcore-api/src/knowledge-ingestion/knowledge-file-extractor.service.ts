@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PDFParse } from 'pdf-parse';
 import * as mammoth from 'mammoth';
 import * as ExcelJS from 'exceljs';
+import { APPLICATION_DEFAULTS } from '../config/application-defaults';
 import {
   KnowledgeExtractionRuntimePolicy,
   KnowledgeOcrPageResult,
@@ -37,29 +38,19 @@ export class KnowledgeFileExtractorService {
   private readonly ocrRenderWidth: number;
 
   constructor(
-    @Optional() private readonly configService?: ConfigService,
+    @Optional() _configService?: ConfigService,
     @Optional() private readonly ocrService?: KnowledgeOcrService,
   ) {
-    this.maxCharacters =
-      this.configService?.get<number>('KNOWLEDGE_MAX_EXTRACTED_CHARACTERS') ??
-      25_000_000;
-    this.maxPdfPages =
-      this.configService?.get<number>('KNOWLEDGE_PDF_MAX_PAGES') ?? 5_000;
-    this.maxPdfBytes =
-      this.configService?.get<number>('KNOWLEDGE_PDF_MAX_BYTES') ??
-      100 * 1024 * 1024;
+    void _configService;
+    this.maxCharacters = APPLICATION_DEFAULTS.knowledge.maxExtractedCharacters;
+    this.maxPdfPages = APPLICATION_DEFAULTS.knowledge.maxPdfPages;
+    this.maxPdfBytes = APPLICATION_DEFAULTS.knowledge.maxPdfBytes;
     this.nativeTextMinimumCharacters =
-      this.configService?.get<number>(
-        'KNOWLEDGE_PDF_NATIVE_TEXT_MIN_CHARACTERS_PER_PAGE',
-      ) ?? 40;
+      APPLICATION_DEFAULTS.knowledge.nativeTextMinCharactersPerPage;
     this.nativeTextMinimumRatio =
-      this.configService?.get<number>(
-        'KNOWLEDGE_PDF_NATIVE_TEXT_MIN_ALPHANUMERIC_RATIO',
-      ) ?? 0.5;
-    this.ocrPageConcurrency =
-      this.configService?.get<number>('KNOWLEDGE_OCR_PAGE_CONCURRENCY') ?? 4;
-    this.ocrRenderWidth =
-      this.configService?.get<number>('KNOWLEDGE_OCR_RENDER_WIDTH') ?? 1_800;
+      APPLICATION_DEFAULTS.knowledge.nativeTextMinAlphanumericRatio;
+    this.ocrPageConcurrency = APPLICATION_DEFAULTS.knowledge.ocrPageConcurrency;
+    this.ocrRenderWidth = APPLICATION_DEFAULTS.knowledge.ocrRenderWidth;
   }
 
   async extract(input: {
@@ -413,9 +404,9 @@ export class KnowledgeFileExtractorService {
       mode: 'disabled',
       primary: null,
       fallback: null,
-      minimumConfidence: 0.75,
-      timeoutMs: 60_000,
-      maxRetries: 2,
+      minimumConfidence: APPLICATION_DEFAULTS.knowledge.ocrMinConfidence,
+      timeoutMs: APPLICATION_DEFAULTS.knowledge.ocrTimeoutMs,
+      maxRetries: APPLICATION_DEFAULTS.knowledge.ocrMaxRetries,
       nativeTextMinimumCharacters: this.nativeTextMinimumCharacters,
       nativeTextMinimumRatio: this.nativeTextMinimumRatio,
       ocrPageConcurrency: this.ocrPageConcurrency,
@@ -423,12 +414,8 @@ export class KnowledgeFileExtractorService {
       maxPdfPages: this.maxPdfPages,
       maxPdfBytes: this.maxPdfBytes,
       maxOcrPagesPerDocument:
-        this.configService?.get<number>(
-          'KNOWLEDGE_OCR_MAX_PAGES_PER_DOCUMENT',
-        ) ?? 500,
-      maxEmptyOcrPageRatio:
-        this.configService?.get<number>('KNOWLEDGE_OCR_MAX_EMPTY_PAGE_RATIO') ??
-        0.25,
+        APPLICATION_DEFAULTS.knowledge.maxOcrPagesPerDocument,
+      maxEmptyOcrPageRatio: APPLICATION_DEFAULTS.knowledge.maxEmptyOcrPageRatio,
       maxExtractedCharacters: this.maxCharacters,
       pipelineSignature: 'disabled',
     };

@@ -3,17 +3,18 @@
 ## Production requirements
 
 - Set `NODE_ENV=production` and `ALLOW_LOCAL_EMBEDDINGS=false`.
-- Configure an active organization AI provider with an embedding model matching `DEFAULT_EMBEDDING_DIMENSIONS`.
+- Configure an active organization AI provider with a 1536-dimension embedding model matching the fixed knowledge vector index.
 - Run the API and `npm run start:worker` as separately monitored processes.
 - Configure Redis persistence and a unique `QUEUE_PREFIX` per environment.
-- Set `MALWARE_SCAN_REQUIRED=true` and configure `CLAMAV_HOST` and `CLAMAV_PORT`.
-- Configure a primary page OCR endpoint for scanned PDFs. In production, use
-  `KNOWLEDGE_OCR_MODE=fallback` so selectable PDF text is extracted without OCR.
+- Configure `CLAMAV_HOST`; malware scanning is fail-closed by default.
+- Configure the primary OCR provider and hybrid fallback mode in
+  **Knowledge → Processing** for each workspace.
 - Set `KNOWLEDGE_OCR_ALLOWED_HOSTS` to the exact OCR adapter hostnames or
   `host:port` values reachable by the API. Production provider creation and
   invocation fail closed when this allowlist is empty or does not match.
-- Optionally configure a managed fallback endpoint. It is called only when the
-  primary OCR result is empty or below `KNOWLEDGE_OCR_MIN_CONFIDENCE`.
+- Optionally configure a managed fallback provider in the same workspace. It is
+  called only when the primary OCR result is empty or below the workspace's
+  configured minimum confidence.
 - Configure `KNOWLEDGE_ALERT_WEBHOOK_URL` for ingestion failures.
 - Enable S3 bucket versioning, default encryption, lifecycle policies, and access logging.
 
@@ -41,9 +42,9 @@ Changing the selected embedding provider schedules ready sources for
 re-indexing. A selected OCR or embedding provider cannot be deactivated or
 deleted until the workspace policy selects another provider.
 
-The environment values below are deployment defaults for workspaces that have
-not saved a database policy. They also keep local/bootstrap deployments usable
-before the first provider is registered in the console.
+Workspaces without a saved policy receive versioned application defaults, but
+no OCR provider credentials. OCR provider records and credentials come only
+from Postgres after they are configured in the console.
 
 PDF ingestion is page-aware:
 
@@ -94,20 +95,13 @@ production.
 
 Relevant configuration:
 
-| Setting | Purpose |
+| Setting | Owner |
 | --- | --- |
-| `KNOWLEDGE_OCR_MODE` | `disabled`, `fallback` (recommended), or `always`. |
-| `KNOWLEDGE_OCR_PRIMARY_*` | Local/default OCR provider name, endpoint, and optional bearer key. |
-| `KNOWLEDGE_OCR_FALLBACK_*` | Optional paid/managed fallback provider. |
-| `KNOWLEDGE_OCR_ALLOWED_HOSTS` | Comma-separated SSRF allowlist for OCR adapter hosts. |
-| `KNOWLEDGE_OCR_MIN_CONFIDENCE` | Primary confidence below which fallback is used. |
-| `KNOWLEDGE_OCR_PAGE_CONCURRENCY` | Maximum OCR requests in flight per ingestion job. |
-| `KNOWLEDGE_OCR_RENDER_WIDTH` | Rendered page width; higher values improve OCR but use more CPU/network. |
-| `KNOWLEDGE_PDF_MAX_PAGES` | Hard page-count resource limit. |
-| `KNOWLEDGE_OCR_CACHE_RETENTION_DAYS` | Removes cache entries not reused within the retention window. |
-
-`KNOWLEDGE_OCR_ENDPOINT` and `KNOWLEDGE_OCR_API_KEY` remain supported as legacy
-aliases for the primary endpoint.
+| OCR mode, primary/fallback provider, confidence, concurrency, retry and document limits | Workspace policy in Postgres. |
+| OCR provider endpoint, API key and provider-specific settings | Encrypted workspace provider record in Postgres. |
+| `KNOWLEDGE_OCR_ALLOWED_HOSTS` | Deployment-wide SSRF allowlist in the environment. |
+| `KNOWLEDGE_OCR_ALLOW_PRIVATE_NETWORKS` | Deployment-wide private-network policy in the environment. |
+| Cache retention and fixed resource defaults | Versioned application constants. |
 
 ## Backup
 
@@ -147,17 +141,9 @@ Large knowledge files use two paths:
 
 Every queued attempt is persisted in `knowledge_ingestion_runs`. The run stores its BullMQ job ID, stage, percentage, item counts, attempt count, cancellation request, terminal error, and timestamps. A source cannot have two uncancelled active runs. Workers check cancellation between extraction and embedding batches, and exhausted jobs are marked `dead_letter` for operations review.
 
-Recommended production settings:
-
-```env
-MAX_UPLOAD_FILE_SIZE_MB=25
-KNOWLEDGE_DIRECT_UPLOAD_MAX_MB=2048
-KNOWLEDGE_INGESTION_QUEUE_CONCURRENCY=2
-KNOWLEDGE_EMBEDDING_BATCH_SIZE=32
-KNOWLEDGE_EMBEDDING_CONCURRENCY=4
-KNOWLEDGE_OCR_PAGE_CONCURRENCY=4
-KNOWLEDGE_PDF_MAX_PAGES=5000
-```
+Upload, batching, worker-concurrency and document-limit defaults are versioned
+in application code. Workspace-adjustable extraction limits are saved through
+the Processing screen rather than copied into deployment environment files.
 
 Run API and worker deployments independently. Scale workers from BullMQ waiting count and oldest-job age, not API traffic. Start with 2 ingestion jobs per worker pod and at least 2 GiB memory per pod; tune from representative PDFs because PDF render memory depends on image density and page dimensions. Keep OCR page concurrency and embedding concurrency below provider account limits.
 

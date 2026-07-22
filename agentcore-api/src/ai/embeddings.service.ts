@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { AIProviderConfig, AIProviderType } from '@prisma/client';
 import { createHash } from 'crypto';
+import { APPLICATION_DEFAULTS } from '../config/application-defaults';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AIUsageService } from '../ai-usage/ai-usage.service';
@@ -36,11 +37,8 @@ export class EmbeddingsService {
     @Optional()
     private readonly endpointPolicy?: ProviderEndpointPolicyService,
   ) {
-    this.defaultDimensions =
-      this.configService.get<number>('DEFAULT_EMBEDDING_DIMENSIONS') ?? 1536;
-    this.defaultModel =
-      this.configService.get<string>('DEFAULT_EMBEDDING_MODEL') ??
-      'text-embedding-3-small';
+    this.defaultDimensions = APPLICATION_DEFAULTS.ai.embeddingDimensions;
+    this.defaultModel = APPLICATION_DEFAULTS.ai.embeddingModel;
     this.allowLocalFallback =
       this.configService.get<boolean>('ALLOW_LOCAL_EMBEDDINGS') ??
       this.configService.get<string>('NODE_ENV') !== 'production';
@@ -91,7 +89,7 @@ export class EmbeddingsService {
     }
     const concurrency = Math.max(
       1,
-      this.configService.get<number>('KNOWLEDGE_EMBEDDING_CONCURRENCY') ?? 4,
+      APPLICATION_DEFAULTS.knowledge.embeddingConcurrency,
     );
     const results: EmbeddingResult[] = [];
     for (let offset = 0; offset < input.texts.length; offset += concurrency) {

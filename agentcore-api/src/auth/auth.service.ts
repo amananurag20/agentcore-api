@@ -11,6 +11,7 @@ import { Prisma } from '@prisma/client';
 import { compare, hash as hashPassword } from 'bcryptjs';
 import { createHash, randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.service';
+import { APPLICATION_DEFAULTS } from '../config/application-defaults';
 import {
   AuthenticatedUser,
   UserRole,
@@ -534,7 +535,10 @@ export class AuthService {
   }
 
   private getAccessTokenExpiresIn(): string {
-    return this.configService.get<string>('JWT_ACCESS_EXPIRES_IN', '15m');
+    return this.configService.get<string>(
+      'JWT_ACCESS_EXPIRES_IN',
+      APPLICATION_DEFAULTS.auth.accessTokenExpiresIn,
+    );
   }
 
   private async issueAccessToken(user: SafeUser): Promise<string> {
@@ -667,13 +671,15 @@ export class AuthService {
 
   private getRefreshTokenExpiresAt(): Date {
     return this.addDays(
-      this.configService.get<number>('REFRESH_TOKEN_EXPIRES_DAYS') ?? 30,
+      this.configService.get<number>('REFRESH_TOKEN_EXPIRES_DAYS') ??
+        APPLICATION_DEFAULTS.auth.refreshTokenExpiresDays,
     );
   }
 
   private getInviteExpiresAt(): Date {
     return this.addHours(
-      this.configService.get<number>('AUTH_INVITE_TOKEN_EXPIRES_HOURS') ?? 72,
+      this.configService.get<number>('AUTH_INVITE_TOKEN_EXPIRES_HOURS') ??
+        APPLICATION_DEFAULTS.auth.inviteTokenExpiresHours,
     );
   }
 
@@ -681,7 +687,7 @@ export class AuthService {
     return this.addMinutes(
       this.configService.get<number>(
         'AUTH_PASSWORD_RESET_TOKEN_EXPIRES_MINUTES',
-      ) ?? 30,
+      ) ?? APPLICATION_DEFAULTS.auth.passwordResetTokenExpiresMinutes,
     );
   }
 

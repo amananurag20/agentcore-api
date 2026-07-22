@@ -49,7 +49,7 @@ describe('AppointmentReminderService', () => {
       ) => {
         await onDelivered({
           channel: 'email',
-          provider: 'resend',
+          provider: 'smtp',
           providerMessageId: 'email-1',
         });
         throw new Error('SMS provider unavailable');

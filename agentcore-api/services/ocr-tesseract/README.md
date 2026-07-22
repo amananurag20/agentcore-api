@@ -14,14 +14,16 @@ docker run --rm -p 8080:8080 \
   agentcore-ocr-tesseract
 ```
 
-AgentCore configuration:
+In AgentCore, add this service from **Knowledge → Processing → OCR providers**:
 
-```dotenv
-KNOWLEDGE_OCR_MODE=fallback
-KNOWLEDGE_OCR_PRIMARY_PROVIDER=local-tesseract
-KNOWLEDGE_OCR_PRIMARY_ENDPOINT=http://ocr-tesseract:8080/v1/ocr
-KNOWLEDGE_OCR_PRIMARY_API_KEY=replace-me
-```
+- service: Local Tesseract
+- endpoint: `http://ocr-tesseract:8080/v1/ocr`
+- API key: the value of `OCR_API_KEY`
+- settings language: `eng`
+
+The deployment must separately allow the adapter host with
+`KNOWLEDGE_OCR_ALLOWED_HOSTS=ocr-tesseract:8080` and enable private-network
+access when the service is reached over an internal container network.
 
 Use one Uvicorn worker per container and scale containers horizontally. CPU and
 memory limits should be enforced by the container platform. Install additional

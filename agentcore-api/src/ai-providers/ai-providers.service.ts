@@ -12,6 +12,7 @@ import { AuditService } from '../audit/audit.service';
 import { AIUsageService } from '../ai-usage/ai-usage.service';
 import { resolveEmbeddingDimensions } from '../ai/embedding-model-dimensions';
 import { AuthenticatedUser } from '../common/auth/authenticated-request';
+import { APPLICATION_DEFAULTS } from '../config/application-defaults';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { KnowledgeIngestionQueueService } from '../knowledge-ingestion/knowledge-ingestion-queue.service';
@@ -137,9 +138,10 @@ export class AIProvidersService {
     const startedAt = Date.now();
     await this.rateLimit.consume(
       `ai-provider-test:${config.organizationId}:${currentUser.sub}:${id}`,
-      this.configService.get<number>('AI_PROVIDER_TEST_RATE_LIMIT') ?? 10,
+      this.configService.get<number>('AI_PROVIDER_TEST_RATE_LIMIT') ??
+        APPLICATION_DEFAULTS.ai.providerTestRateLimit,
       this.configService.get<number>('AI_PROVIDER_TEST_RATE_WINDOW_SECONDS') ??
-        60,
+        APPLICATION_DEFAULTS.ai.providerTestRateWindowSeconds,
       'Too many AI provider tests. Please wait before trying again.',
     );
 
@@ -418,8 +420,7 @@ export class AIProvidersService {
   ): void {
     if (!model) return;
 
-    const storageDimensions =
-      this.configService.get<number>('DEFAULT_EMBEDDING_DIMENSIONS') ?? 1536;
+    const storageDimensions = APPLICATION_DEFAULTS.ai.embeddingDimensions;
     const modelDimensions = resolveEmbeddingDimensions(model, settings);
     if (modelDimensions === null) {
       throw new BadRequestException(
@@ -667,8 +668,7 @@ export class AIProvidersService {
       model: config.embeddingModel,
       text: 'AgentCore embedding dimension verification',
     });
-    const expected =
-      this.configService.get<number>('DEFAULT_EMBEDDING_DIMENSIONS') ?? 1536;
+    const expected = APPLICATION_DEFAULTS.ai.embeddingDimensions;
     if (
       result.vector.length !== expected ||
       result.vector.some((value) => !Number.isFinite(value))

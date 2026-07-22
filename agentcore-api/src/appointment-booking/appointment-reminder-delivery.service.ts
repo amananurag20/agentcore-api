@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createTransport, type Transporter } from 'nodemailer';
+import type SMTPTransport from 'nodemailer/lib/smtp-transport';
 import {
   AppointmentBooking,
   AppointmentService,
@@ -8,6 +10,7 @@ import {
   WhatsAppAssistantConfig,
 } from '@prisma/client';
 import { CryptoService } from '../crypto/crypto.service';
+import { APPLICATION_DEFAULTS } from '../config/application-defaults';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -24,6 +27,8 @@ export type ReminderDeliveryResult = {
 
 @Injectable()
 export class AppointmentReminderDeliveryService {
+  private emailTransporter?: Transporter<SMTPTransport.SentMessageInfo>;
+
   constructor(
     private readonly configService: ConfigService,
     private readonly cryptoService: CryptoService,
@@ -169,34 +174,54 @@ export class AppointmentReminderDeliveryService {
     subject: string,
     message: string,
   ): Promise<ReminderDeliveryResult | null> {
-    const apiKey = this.configService.get<string>('RESEND_API_KEY');
     const from = this.configService.get<string>('APPOINTMENT_EMAIL_FROM');
-    if (!apiKey || !from) return null;
+    const transporter = this.getEmailTransporter();
+    if (!from || !transporter) return null;
 
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from,
-        to: [to],
-        subject,
-        text: message,
-      }),
-      signal: this.providerTimeoutSignal(),
+    const result = await transporter.sendMail({
+      from,
+      to,
+      subject,
+      text: message,
     });
-    const body = (await response.json().catch(() => ({}))) as {
-      id?: string;
-      message?: string;
+    return {
+      channel: 'email',
+      provider: 'smtp',
+      providerMessageId: result.messageId || undefined,
     };
-    if (!response.ok) {
+  }
+
+  private getEmailTransporter(): Transporter<SMTPTransport.SentMessageInfo> | null {
+    if (this.emailTransporter) return this.emailTransporter;
+    const host = this.configService.get<string>('SMTP_HOST');
+    if (!host) return null;
+
+    const user = this.configService.get<string>('SMTP_USER');
+    const password = this.configService.get<string>('SMTP_PASSWORD');
+    if (Boolean(user) !== Boolean(password)) {
       throw new Error(
-        body.message ?? `Email provider returned ${response.status}`,
+        'SMTP_USER and SMTP_PASSWORD must be configured together',
       );
     }
-    return { channel: 'email', provider: 'resend', providerMessageId: body.id };
+
+    const timeoutMs = this.configService.get<number>(
+      'APPOINTMENT_PROVIDER_TIMEOUT_MS',
+      10_000,
+    );
+    this.emailTransporter = createTransport({
+      host,
+      port:
+        this.configService.get<number>('SMTP_PORT') ??
+        APPLICATION_DEFAULTS.email.smtpPort,
+      secure:
+        this.configService.get<boolean>('SMTP_SECURE') ??
+        APPLICATION_DEFAULTS.email.smtpSecure,
+      auth: user && password ? { user, pass: password } : undefined,
+      connectionTimeout: timeoutMs,
+      greetingTimeout: timeoutMs,
+      socketTimeout: timeoutMs,
+    });
+    return this.emailTransporter;
   }
 
   private async sendSms(

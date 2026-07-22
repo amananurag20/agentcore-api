@@ -23,7 +23,7 @@ function createService(
     {
       get: jest.fn((key: string) => {
         if (key in config) return config[key];
-        return key === 'DEFAULT_CHAT_MODEL' ? 'default-model' : undefined;
+        return undefined;
       }),
     } as never,
     { decrypt: jest.fn().mockReturnValue('api-key') } as never,

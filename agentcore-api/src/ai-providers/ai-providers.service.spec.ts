@@ -102,11 +102,7 @@ describe('AIProvidersService', () => {
       summarize: jest.fn().mockResolvedValue({}),
       summarizeMany: jest.fn(),
     };
-    const config = {
-      get: jest.fn((key: string) =>
-        key === 'DEFAULT_EMBEDDING_DIMENSIONS' ? 1536 : undefined,
-      ),
-    };
+    const config = { get: jest.fn() };
     const crypto = { decrypt: jest.fn().mockReturnValue('api-key') };
     const queue = { isEnabled: jest.fn().mockReturnValue(true) };
     const prisma = {
