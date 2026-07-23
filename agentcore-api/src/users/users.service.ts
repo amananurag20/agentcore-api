@@ -202,7 +202,7 @@ export class UsersService {
             });
             await tx.userCustomRole.deleteMany({ where: { userId: id } });
           }
-          return tx.user.update({
+          const user = await tx.user.update({
             where: { id },
             data: {
               email: input.email ? this.normalizeEmail(input.email) : undefined,
@@ -211,6 +211,23 @@ export class UsersService {
             },
             include: userInclude,
           });
+
+          await tx.appointmentStaff.updateMany({
+            where: { userId: id },
+            data:
+              nextOrgId && nextOrgId !== existing.orgId
+                ? {
+                    userId: null,
+                    status: 'inactive',
+                    name: user.name,
+                    email: user.email,
+                  }
+                : {
+                    name: user.name,
+                    email: user.email,
+                  },
+          });
+          return user;
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
@@ -256,11 +273,18 @@ export class UsersService {
         if (status === 'inactive' && target.roles.includes('org_admin')) {
           await this.assertAnotherActiveOrgAdmin(tx, target.orgId, target.id);
         }
-        return tx.user.update({
+        const user = await tx.user.update({
           where: { id },
           data: { isActive: status === 'active' },
           include: userInclude,
         });
+        if (status === 'inactive') {
+          await tx.appointmentStaff.updateMany({
+            where: { userId: id },
+            data: { status: 'inactive' },
+          });
+        }
+        return user;
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
@@ -317,7 +341,7 @@ export class UsersService {
           await tx.userCustomRole.deleteMany({ where: { userId: id } });
         }
 
-        return tx.user.update({
+        const user = await tx.user.update({
           where: { id },
           data: {
             roles: this.toDbRoles(roles),
@@ -349,6 +373,13 @@ export class UsersService {
           },
           include: userInclude,
         });
+        if (!this.hasAppointmentBookingAccess(user)) {
+          await tx.appointmentStaff.updateMany({
+            where: { userId: id },
+            data: { status: 'inactive' },
+          });
+        }
+        return user;
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
@@ -438,6 +469,27 @@ export class UsersService {
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };
+  }
+
+  private hasAppointmentBookingAccess(user: DbUser): boolean {
+    if (
+      user.roles.includes(DbUserRole.super_admin) ||
+      user.roles.includes(DbUserRole.org_admin)
+    ) {
+      return true;
+    }
+    return (
+      user.productAccess.some(
+        (access) =>
+          access.productKey === 'appointment_booking' && access.canUse,
+      ) ||
+      user.customRoleAssignments.some(({ customRole }) =>
+        customRole.productAccess.some(
+          (access) =>
+            access.productKey === 'appointment_booking' && access.canUse,
+        ),
+      )
+    );
   }
 
   private toDbRoles(roles: UserRole[]): DbUserRole[] {

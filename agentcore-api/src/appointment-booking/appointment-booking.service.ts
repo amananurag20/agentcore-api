@@ -14,7 +14,9 @@ import {
   AppointmentService,
   AppointmentStaff,
   AppointmentResource,
+  ProductKey,
   Prisma,
+  UserRole,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
@@ -74,6 +76,15 @@ type StaffWithServices = Prisma.AppointmentStaffGetPayload<{
     resources: {
       include: {
         resource: true;
+      };
+    };
+    user: {
+      select: {
+        id: true;
+        name: true;
+        email: true;
+        isActive: true;
+        roles: true;
       };
     };
   };
@@ -1330,6 +1341,37 @@ export class AppointmentBookingService {
     return staff.map((item) => this.toStaffResponse(item));
   }
 
+  async listEligibleStaffUsers(
+    currentUser: AuthenticatedUser,
+    organizationId?: string,
+  ) {
+    const resolvedOrganizationId = this.resolveOrganizationId(
+      currentUser,
+      organizationId,
+    );
+    await this.assertAppointmentBookingEnabled(resolvedOrganizationId);
+
+    const users = await this.prisma.user.findMany({
+      where: this.appointmentEligibleUserWhere(resolvedOrganizationId),
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        roles: true,
+        appointmentStaffProfile: {
+          select: { id: true, status: true },
+        },
+      },
+      orderBy: [{ name: 'asc' }, { email: 'asc' }],
+    });
+
+    return users.map(({ appointmentStaffProfile, ...user }) => ({
+      ...user,
+      appointmentStaffId: appointmentStaffProfile?.id ?? null,
+      appointmentStaffStatus: appointmentStaffProfile?.status ?? null,
+    }));
+  }
+
   async createStaff(
     currentUser: AuthenticatedUser,
     input: CreateAppointmentStaffDto,
@@ -1339,7 +1381,10 @@ export class AppointmentBookingService {
       input.organizationId,
     );
     await this.assertAppointmentBookingEnabled(organizationId);
-    await this.assertUserBelongsToOrganization(organizationId, input.userId);
+    const linkedUser = await this.findEligibleAppointmentUser(
+      organizationId,
+      input.userId,
+    );
     await this.assertServicesBelongToOrganization(
       organizationId,
       input.serviceIds,
@@ -1350,29 +1395,39 @@ export class AppointmentBookingService {
     );
     this.timezoneService.assertValid(input.timezone ?? 'UTC');
 
-    const staff = await this.prisma.appointmentStaff.create({
-      data: {
-        organizationId,
-        userId: input.userId,
-        name: input.name,
-        email: input.email,
-        phone: input.phone,
-        timezone: input.timezone ?? 'UTC',
-        status: input.status ?? 'active',
-        metadata: this.toJsonObject(input.metadata),
-        services: {
-          create: (input.serviceIds ?? []).map((serviceId) => ({
-            serviceId,
-          })),
+    let staff: StaffWithServices;
+    try {
+      staff = await this.prisma.appointmentStaff.create({
+        data: {
+          organizationId,
+          userId: linkedUser.id,
+          name: linkedUser.name,
+          email: linkedUser.email,
+          phone: input.phone,
+          timezone: input.timezone ?? 'UTC',
+          status: input.status ?? 'active',
+          metadata: this.toJsonObject(input.metadata),
+          services: {
+            create: [...new Set(input.serviceIds ?? [])].map((serviceId) => ({
+              serviceId,
+            })),
+          },
+          resources: {
+            create: [...new Set(input.resourceIds ?? [])].map((resourceId) => ({
+              resourceId,
+            })),
+          },
         },
-        resources: {
-          create: (input.resourceIds ?? []).map((resourceId) => ({
-            resourceId,
-          })),
-        },
-      },
-      include: this.staffInclude(),
-    });
+        include: this.staffInclude(),
+      });
+    } catch (error) {
+      if (this.isAppointmentStaffUserConflict(error)) {
+        throw new ConflictException(
+          'This workspace user already has an appointment staff profile',
+        );
+      }
+      throw error;
+    }
 
     await this.auditService.record({
       actor: currentUser,
@@ -1380,7 +1435,7 @@ export class AppointmentBookingService {
       action: 'appointment.staff_created',
       entityType: 'appointment_staff',
       entityId: staff.id,
-      metadata: { name: staff.name },
+      metadata: { name: staff.name, userId: linkedUser.id },
     });
 
     return this.toStaffResponse(staff);
@@ -1392,10 +1447,24 @@ export class AppointmentBookingService {
     input: UpdateAppointmentStaffDto,
   ) {
     const existing = await this.findStaffForActor(currentUser, id);
-    await this.assertUserBelongsToOrganization(
-      existing.organizationId,
-      input.userId,
-    );
+    if (input.userId === null && existing.userId) {
+      throw new BadRequestException(
+        'A linked team member cannot be unlinked; deactivate the profile instead',
+      );
+    }
+    const targetUserId = input.userId ?? existing.userId;
+    const linkedUser = targetUserId
+      ? targetUserId === existing.userId && input.status === 'inactive'
+        ? await this.findExistingAppointmentUser(
+            existing.organizationId,
+            targetUserId,
+          )
+        : await this.findEligibleAppointmentUser(
+            existing.organizationId,
+            targetUserId,
+            existing.id,
+          )
+      : null;
     await this.assertServicesBelongToOrganization(
       existing.organizationId,
       input.serviceIds,
@@ -1408,46 +1477,58 @@ export class AppointmentBookingService {
       this.timezoneService.assertValid(input.timezone);
     }
 
-    const staff = await this.prisma.$transaction(async (tx) => {
-      if (input.serviceIds) {
-        await tx.appointmentStaffService.deleteMany({
-          where: { staffId: existing.id },
-        });
-      }
-      if (input.resourceIds) {
-        await tx.appointmentStaffResource.deleteMany({
-          where: { staffId: existing.id },
-        });
-      }
+    let staff: StaffWithServices;
+    try {
+      staff = await this.prisma.$transaction(async (tx) => {
+        if (input.serviceIds) {
+          await tx.appointmentStaffService.deleteMany({
+            where: { staffId: existing.id },
+          });
+        }
+        if (input.resourceIds) {
+          await tx.appointmentStaffResource.deleteMany({
+            where: { staffId: existing.id },
+          });
+        }
 
-      return tx.appointmentStaff.update({
-        where: { id: existing.id },
-        data: {
-          userId: input.userId,
-          name: input.name,
-          email: input.email,
-          phone: input.phone,
-          timezone: input.timezone,
-          status: input.status,
-          metadata: input.metadata
-            ? this.toJsonObject(input.metadata)
-            : undefined,
-          services: input.serviceIds
-            ? {
-                create: input.serviceIds.map((serviceId) => ({
-                  serviceId,
-                })),
-              }
-            : undefined,
-          resources: input.resourceIds
-            ? {
-                create: input.resourceIds.map((resourceId) => ({ resourceId })),
-              }
-            : undefined,
-        },
-        include: this.staffInclude(),
+        return tx.appointmentStaff.update({
+          where: { id: existing.id },
+          data: {
+            userId: input.userId === undefined ? undefined : input.userId,
+            name: linkedUser?.name ?? input.name,
+            email: linkedUser?.email ?? input.email,
+            phone: input.phone,
+            timezone: input.timezone,
+            status: input.status,
+            metadata: input.metadata
+              ? this.toJsonObject(input.metadata)
+              : undefined,
+            services: input.serviceIds
+              ? {
+                  create: [...new Set(input.serviceIds)].map((serviceId) => ({
+                    serviceId,
+                  })),
+                }
+              : undefined,
+            resources: input.resourceIds
+              ? {
+                  create: [...new Set(input.resourceIds)].map((resourceId) => ({
+                    resourceId,
+                  })),
+                }
+              : undefined,
+          },
+          include: this.staffInclude(),
+        });
       });
-    });
+    } catch (error) {
+      if (this.isAppointmentStaffUserConflict(error)) {
+        throw new ConflictException(
+          'This workspace user already has an appointment staff profile',
+        );
+      }
+      throw error;
+    }
 
     await this.auditService.record({
       actor: currentUser,
@@ -3741,26 +3822,111 @@ export class AppointmentBookingService {
     return booking;
   }
 
-  private async assertUserBelongsToOrganization(
+  private appointmentEligibleUserWhere(
     organizationId: string,
-    userId?: string | null,
-  ) {
-    if (!userId) {
-      return;
-    }
+  ): Prisma.UserWhereInput {
+    return {
+      orgId: organizationId,
+      isActive: true,
+      OR: [
+        { roles: { hasSome: [UserRole.super_admin, UserRole.org_admin] } },
+        {
+          productAccess: {
+            some: {
+              productKey: ProductKey.appointment_booking,
+              canUse: true,
+            },
+          },
+        },
+        {
+          customRoleAssignments: {
+            some: {
+              organizationId,
+              customRole: {
+                isActive: true,
+                productAccess: {
+                  some: {
+                    productKey: ProductKey.appointment_booking,
+                    canUse: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      ],
+    };
+  }
 
+  private async findEligibleAppointmentUser(
+    organizationId: string,
+    userId: string,
+    currentStaffId?: string,
+  ) {
     const user = await this.prisma.user.findFirst({
       where: {
+        ...this.appointmentEligibleUserWhere(organizationId),
         id: userId,
-        orgId: organizationId,
-        isActive: true,
       },
-      select: { id: true },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        appointmentStaffProfile: { select: { id: true } },
+      },
     });
 
     if (!user) {
-      throw new ForbiddenException('User does not belong to this organization');
+      throw new ForbiddenException(
+        'User must be active, belong to this workspace, and have Appointment Booking access',
+      );
     }
+    if (
+      user.appointmentStaffProfile &&
+      user.appointmentStaffProfile.id !== currentStaffId
+    ) {
+      throw new ConflictException(
+        'This workspace user already has an appointment staff profile',
+      );
+    }
+    return user;
+  }
+
+  private async findExistingAppointmentUser(
+    organizationId: string,
+    userId: string,
+  ) {
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, orgId: organizationId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        appointmentStaffProfile: { select: { id: true } },
+      },
+    });
+    if (!user) {
+      throw new BadRequestException(
+        'The linked workspace user is no longer available',
+      );
+    }
+    return user;
+  }
+
+  private isAppointmentStaffUserConflict(error: unknown): boolean {
+    if (
+      !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+      error.code !== 'P2002'
+    ) {
+      return false;
+    }
+    const target = error.meta?.target;
+    if (Array.isArray(target)) {
+      return target.some(
+        (item) => typeof item === 'string' && item.includes('user'),
+      );
+    }
+    return typeof target === 'string' && target.includes('user');
   }
 
   private async assertServicesBelongToOrganization(
@@ -3938,6 +4104,15 @@ export class AppointmentBookingService {
       resources: {
         include: { resource: true },
       },
+      user: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          isActive: true,
+          roles: true,
+        },
+      },
     };
   }
 
@@ -3954,8 +4129,9 @@ export class AppointmentBookingService {
       id: staff.id,
       organizationId: staff.organizationId,
       userId: staff.userId,
-      name: staff.name,
-      email: staff.email,
+      user: staff.user,
+      name: staff.user?.name ?? staff.name,
+      email: staff.user?.email ?? staff.email,
       phone: staff.phone,
       timezone: staff.timezone,
       status: staff.status,

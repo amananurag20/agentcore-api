@@ -57,6 +57,7 @@ import {
   AppointmentAvailabilityResponseDto,
   AppointmentBookingListResponseDto,
   AppointmentBookingResponseDto,
+  AppointmentEligibleUserResponseDto,
   AppointmentResourceResponseDto,
   AppointmentServiceResponseDto,
   AppointmentSlotResponseDto,
@@ -310,6 +311,24 @@ export class AppointmentBookingController {
     @Query('organizationId') organizationId?: string,
   ) {
     return this.appointmentBookingService.listStaff(user, organizationId);
+  }
+
+  @Get('staff/eligible-users')
+  @Roles('super_admin', 'org_admin', 'product_admin')
+  @RequireProductAccess('appointment_booking', 'configure')
+  @ApiOperation({
+    summary:
+      'List active workspace users eligible for appointment staff profiles',
+  })
+  @ApiOkResponse({ type: AppointmentEligibleUserResponseDto, isArray: true })
+  listEligibleStaffUsers(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.appointmentBookingService.listEligibleStaffUsers(
+      user,
+      organizationId,
+    );
   }
 
   @Post('staff')

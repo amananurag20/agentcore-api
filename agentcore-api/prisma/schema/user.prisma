@@ -11,7 +11,7 @@ model User {
   productAccess                     UserProductAccess[]
   customRoleAssignments             UserCustomRole[]
   assignedCustomerChatConversations CustomerChatConversation[]
-  appointmentStaffProfiles          AppointmentStaff[]
+  appointmentStaffProfile           AppointmentStaff?
   assignedWhatsAppConversations     WhatsAppConversation[]
   assignedVoiceCalls                VoiceCall[]
   ownedLeads                        Lead[]                     @relation("LeadOwner")

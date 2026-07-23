@@ -36,7 +36,7 @@ model AppointmentStaff {
   id                  String                          @id @default(uuid())
   organizationId      String                          @map("organization_id")
   organization        Organization                    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  userId              String?                         @map("user_id")
+  userId              String?                         @unique @map("user_id")
   user                User?                           @relation(fields: [userId], references: [id], onDelete: SetNull)
   name                String
   email               String?
@@ -56,7 +56,6 @@ model AppointmentStaff {
   updatedAt           DateTime                        @updatedAt @map("updated_at")
 
   @@index([organizationId, status])
-  @@index([userId])
   @@map("appointment_staff")
 }
 

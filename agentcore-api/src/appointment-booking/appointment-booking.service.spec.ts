@@ -166,6 +166,116 @@ describe('AppointmentBookingService service lifecycle', () => {
   });
 });
 
+describe('AppointmentBookingService linked staff profiles', () => {
+  const actor = {
+    sub: 'admin-1',
+    email: 'admin@example.com',
+    orgId: 'org-1',
+    roles: ['org_admin'],
+  } as never;
+  const linkedUser = {
+    id: '7d573824-19ed-4a5e-ab86-bbbc4e7c75fb',
+    name: 'Workspace Name',
+    email: 'workspace@example.com',
+    appointmentStaffProfile: null,
+  };
+
+  function createLinkedStaffService(
+    user: Omit<typeof linkedUser, 'appointmentStaffProfile'> & {
+      appointmentStaffProfile: { id: string } | null;
+    } = linkedUser,
+  ) {
+    const prisma = {
+      organizationProduct: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'entitlement-1' }),
+      },
+      user: { findFirst: jest.fn().mockResolvedValue(user) },
+      appointmentStaff: {
+        create: jest.fn().mockImplementation(({ data }) =>
+          Promise.resolve({
+            id: 'staff-1',
+            ...data,
+            user: {
+              id: linkedUser.id,
+              name: linkedUser.name,
+              email: linkedUser.email,
+              isActive: true,
+              roles: ['user'],
+            },
+            services: [],
+            resources: [],
+            metadata: {},
+          }),
+        ),
+      },
+    };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const service = new AppointmentBookingService(
+      audit as never,
+      {} as never,
+      { get: jest.fn() } as never,
+      {} as never,
+      {} as never,
+      prisma as never,
+      { assertValid: jest.fn() } as never,
+    );
+    return { service, prisma, audit };
+  }
+
+  it('derives staff identity from the selected workspace user', async () => {
+    const { service, prisma } = createLinkedStaffService();
+
+    const result = await service.createStaff(actor, {
+      organizationId: 'org-1',
+      userId: linkedUser.id,
+      name: 'Spoofed Name',
+      email: 'spoofed@example.com',
+      phone: '+15551234567',
+    });
+
+    const [createInput] = prisma.appointmentStaff.create.mock.calls[0] as
+      | [
+          {
+            data: {
+              userId: string;
+              name: string;
+              email: string;
+              phone: string;
+            };
+          },
+        ]
+      | [];
+    expect(createInput?.data).toMatchObject({
+      userId: linkedUser.id,
+      name: linkedUser.name,
+      email: linkedUser.email,
+      phone: '+15551234567',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        userId: linkedUser.id,
+        name: linkedUser.name,
+        email: linkedUser.email,
+      }),
+    );
+  });
+
+  it('rejects a user who already owns another staff profile', async () => {
+    const { service, prisma } = createLinkedStaffService({
+      ...linkedUser,
+      appointmentStaffProfile: { id: 'staff-existing' },
+    });
+
+    await expect(
+      service.createStaff(actor, {
+        organizationId: 'org-1',
+        userId: linkedUser.id,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(prisma.appointmentStaff.create).not.toHaveBeenCalled();
+  });
+});
+
 describe('AppointmentBookingService lead linkage', () => {
   const service = Object.create(
     AppointmentBookingService.prototype,

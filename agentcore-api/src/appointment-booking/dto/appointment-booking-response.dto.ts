@@ -69,6 +69,43 @@ export class AppointmentServiceResponseDto {
   metadata: Record<string, unknown>;
 }
 
+export class AppointmentStaffUserResponseDto {
+  @ApiProperty()
+  id: string;
+
+  @ApiProperty()
+  name: string;
+
+  @ApiProperty()
+  email: string;
+
+  @ApiProperty()
+  isActive: boolean;
+
+  @ApiProperty({ type: String, isArray: true })
+  roles: string[];
+}
+
+export class AppointmentEligibleUserResponseDto {
+  @ApiProperty()
+  id: string;
+
+  @ApiProperty()
+  name: string;
+
+  @ApiProperty()
+  email: string;
+
+  @ApiProperty({ type: String, isArray: true })
+  roles: string[];
+
+  @ApiPropertyOptional()
+  appointmentStaffId?: string | null;
+
+  @ApiPropertyOptional()
+  appointmentStaffStatus?: string | null;
+}
+
 export class AppointmentStaffResponseDto {
   @ApiProperty()
   id: string;
@@ -78,6 +115,9 @@ export class AppointmentStaffResponseDto {
 
   @ApiPropertyOptional()
   userId?: string | null;
+
+  @ApiPropertyOptional({ type: AppointmentStaffUserResponseDto })
+  user?: AppointmentStaffUserResponseDto | null;
 
   @ApiProperty()
   name: string;

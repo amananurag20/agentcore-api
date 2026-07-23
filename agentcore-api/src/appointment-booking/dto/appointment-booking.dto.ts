@@ -292,17 +292,30 @@ export class CreateAppointmentStaffDto {
   @IsOptional()
   organizationId?: string;
 
-  @ApiPropertyOptional({ example: 'ecfdf154-2b72-477e-b286-43120fe69ead' })
+  @ApiProperty({
+    example: 'ecfdf154-2b72-477e-b286-43120fe69ead',
+    description:
+      'Active workspace user who will receive this scheduling profile',
+  })
   @IsUUID()
-  @IsOptional()
-  userId?: string;
+  userId: string;
 
-  @ApiProperty({ example: 'Dr. Ada Lovelace', minLength: 2 })
+  @ApiPropertyOptional({
+    example: 'Dr. Ada Lovelace',
+    deprecated: true,
+    description: 'Ignored for linked profiles; the workspace user name is used',
+  })
   @IsString()
   @MinLength(2)
-  name: string;
+  @IsOptional()
+  name?: string;
 
-  @ApiPropertyOptional({ example: 'ada@example.com' })
+  @ApiPropertyOptional({
+    example: 'ada@example.com',
+    deprecated: true,
+    description:
+      'Ignored for linked profiles; the workspace user email is used',
+  })
   @IsEmail()
   @IsOptional()
   email?: string;
