@@ -22,7 +22,7 @@ import {
 } from '../knowledge/knowledge.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
-import { LeadsService } from '../leads/leads.service';
+import { type CapturedLeadResult, LeadsService } from '../leads/leads.service';
 import {
   AssignCustomerChatConversationDto,
   CustomerChatConversationAssignmentDto,
@@ -309,12 +309,11 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
           throw this.conversationConflict();
         }
         if (conversation.leadId) {
-          await transaction.lead.updateMany({
-            where: {
-              id: conversation.leadId,
-              organizationId: conversation.organizationId,
-            },
-            data: { lastActivityAt: now },
+          await this.leadsService.recordAgentResponse(transaction, {
+            leadId: conversation.leadId,
+            organizationId: conversation.organizationId,
+            actorUserId: currentUser.sub,
+            at: now,
           });
         }
         const message = await transaction.customerChatMessage.create({
@@ -757,6 +756,10 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
 
     const visitorToken = this.createVisitorToken();
     const now = new Date();
+    const scoringPolicy = this.leadsService.readScoringPolicy(config.settings);
+    const operationsPolicy = this.leadsService.readOperationsPolicy(
+      config.settings,
+    );
     const capture = this.leadsService.prepareCapture(
       config.leadFields,
       input.leadCapture,
@@ -770,6 +773,8 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
               widgetConfigId: config.id,
               visitorId: input.visitorId,
               metadata: input.metadata,
+              scoringPolicy,
+              operationsPolicy,
             })
           : null;
         const conversation = await transaction.customerChatConversation.create({
@@ -1032,73 +1037,113 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
   ) {
     this.throwIfAborted(callbacks.signal);
     const now = new Date();
-    const { visitorMessage, canAutoReply, duplicate } =
-      await this.prisma.$transaction(async (transaction) => {
-        const current = await transaction.customerChatConversation.findUnique({
-          where: { id: conversation.id },
-          select: { status: true, assignedAgentId: true },
-        });
-        if (!current) {
-          throw new NotFoundException('Customer chat conversation not found');
-        }
-        if (input.clientMessageId) {
-          const existing = await transaction.customerChatMessage.findUnique({
-            where: {
-              conversationId_clientMessageId: {
-                conversationId: conversation.id,
-                clientMessageId: input.clientMessageId,
-              },
+    const scoringPolicy = this.leadsService.readScoringPolicy(
+      conversation.widgetConfig?.settings,
+    );
+    const operationsPolicy = this.leadsService.readOperationsPolicy(
+      conversation.widgetConfig?.settings,
+    );
+    const {
+      visitorMessage,
+      canAutoReply,
+      duplicate,
+      conversationalLeadResult,
+      scoredLeadId,
+    } = await this.prisma.$transaction(async (transaction) => {
+      const current = await transaction.customerChatConversation.findUnique({
+        where: { id: conversation.id },
+        select: { status: true, assignedAgentId: true, leadId: true },
+      });
+      if (!current) {
+        throw new NotFoundException('Customer chat conversation not found');
+      }
+      if (input.clientMessageId) {
+        const existing = await transaction.customerChatMessage.findUnique({
+          where: {
+            conversationId_clientMessageId: {
+              conversationId: conversation.id,
+              clientMessageId: input.clientMessageId,
             },
-            include: { citations: { include: { chunk: true } } },
-          });
-          if (existing) {
-            return {
-              visitorMessage: existing,
-              canAutoReply: false,
-              duplicate: true,
-            };
-          }
-        }
-        const message = await transaction.customerChatMessage.create({
-          data: {
-            organizationId: conversation.organizationId,
-            conversationId: conversation.id,
-            clientMessageId: input.clientMessageId,
-            role: 'visitor',
-            content: input.content,
           },
           include: { citations: { include: { chunk: true } } },
         });
-        await transaction.customerChatConversation.update({
-          where: { id: conversation.id },
-          data: {
-            lastMessageAt: now,
-            version: { increment: 1 },
-            expiresAt: this.addDays(
-              now,
-              this.configService.get<number>(
-                'CUSTOMER_CHAT_RETENTION_DAYS',
-                90,
-              ),
-            ),
-          },
-        });
-        if (conversation.leadId) {
-          await transaction.lead.updateMany({
-            where: {
-              id: conversation.leadId,
-              organizationId: conversation.organizationId,
-            },
-            data: { lastActivityAt: now },
-          });
+        if (existing) {
+          return {
+            visitorMessage: existing,
+            canAutoReply: false,
+            duplicate: true,
+            conversationalLeadResult: null,
+            scoredLeadId: current.leadId ?? conversation.leadId,
+          };
         }
-        return {
-          visitorMessage: message,
-          canAutoReply:
-            current.status === 'open' && current.assignedAgentId === null,
-          duplicate: false,
-        };
+      }
+      const message = await transaction.customerChatMessage.create({
+        data: {
+          organizationId: conversation.organizationId,
+          conversationId: conversation.id,
+          clientMessageId: input.clientMessageId,
+          role: 'visitor',
+          content: input.content,
+        },
+        include: { citations: { include: { chunk: true } } },
       });
+      let leadId = current.leadId ?? conversation.leadId;
+      let conversationalLeadResult: CapturedLeadResult | null = null;
+      if (!leadId && conversation.widgetConfig?.id) {
+        const conversationalCapture =
+          this.leadsService.prepareConversationalCapture(input.content);
+        if (conversationalCapture) {
+          conversationalLeadResult = await this.leadsService.captureLead(
+            transaction,
+            conversationalCapture,
+            {
+              organizationId: conversation.organizationId,
+              widgetConfigId: conversation.widgetConfig.id,
+              visitorId: conversation.visitorId ?? undefined,
+              metadata: {
+                ...this.toRecord(conversation.metadata),
+                source: 'conversational_capture',
+                conversationId: conversation.id,
+              },
+              scoringPolicy,
+              operationsPolicy,
+            },
+          );
+          leadId = conversationalLeadResult.lead.id;
+        }
+      }
+      await transaction.customerChatConversation.update({
+        where: { id: conversation.id },
+        data: {
+          leadId,
+          visitorEmail: conversationalLeadResult?.lead.email ?? undefined,
+          lastMessageAt: now,
+          version: { increment: 1 },
+          expiresAt: this.addDays(
+            now,
+            this.configService.get<number>('CUSTOMER_CHAT_RETENTION_DAYS', 90),
+          ),
+        },
+      });
+      if (leadId) {
+        await this.leadsService.recordConversationActivity(transaction, {
+          leadId,
+          organizationId: conversation.organizationId,
+          content: input.content,
+          activityAt: now,
+          policy: scoringPolicy,
+          operationsPolicy,
+        });
+      }
+      return {
+        visitorMessage: message,
+        canAutoReply:
+          current.status === 'open' && current.assignedAgentId === null,
+        duplicate: false,
+        conversationalLeadResult,
+        scoredLeadId: leadId,
+      };
+    });
 
     if (duplicate) {
       const updatedConversation = await this.loadConversation(conversation.id);
@@ -1114,6 +1159,46 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
         ),
         assistantMessage: null,
       };
+    }
+
+    if (conversationalLeadResult) {
+      await this.auditService.record({
+        actor: currentUser,
+        organizationId: conversation.organizationId,
+        action: `lead.${conversationalLeadResult.action}`,
+        entityType: 'lead',
+        entityId: conversationalLeadResult.lead.id,
+        metadata: {
+          source: 'conversational_capture',
+          conversationId: conversation.id,
+          mergedLeadIds: conversationalLeadResult.mergedLeadIds,
+        },
+      });
+    }
+
+    if (scoredLeadId && scoringPolicy.aiEnabled) {
+      try {
+        const qualification = await this.chatService.extractLeadQualification({
+          organizationId: conversation.organizationId,
+          message: input.content,
+          signal: callbacks.signal,
+        });
+        if (qualification) {
+          await this.leadsService.recordAiQualification({
+            leadId: scoredLeadId,
+            organizationId: conversation.organizationId,
+            qualification,
+            activityAt: now,
+            policy: scoringPolicy,
+            operationsPolicy,
+          });
+        }
+      } catch (error) {
+        if (callbacks.signal?.aborted) throw error;
+        this.logger.warn(
+          `Could not apply AI lead qualification for conversation ${conversation.id}: ${this.toErrorMessage(error)}`,
+        );
+      }
     }
 
     try {
@@ -2263,14 +2348,38 @@ export class CustomerChatService implements OnModuleInit, OnModuleDestroy {
     input: Record<string, unknown> | undefined,
     existing: Record<string, unknown> = {},
   ): Record<string, unknown> {
-    const settings = { ...existing, ...(input ?? {}) };
+    const existingLeadScoring = this.toRecord(
+      existing.leadScoring as Prisma.JsonValue,
+    );
+    const incomingLeadScoring = this.toRecord(
+      input?.leadScoring as Prisma.JsonValue,
+    );
+    const existingLeadOperations = this.toRecord(
+      existing.leadOperations as Prisma.JsonValue,
+    );
+    const incomingLeadOperations = this.toRecord(
+      input?.leadOperations as Prisma.JsonValue,
+    );
+    const settings = {
+      ...existing,
+      ...(input ?? {}),
+      leadScoring: { ...existingLeadScoring, ...incomingLeadScoring },
+      leadOperations: { ...existingLeadOperations, ...incomingLeadOperations },
+    };
     const policy = this.readWidgetMemoryPolicy(settings, true);
+    const leadScoring = this.leadsService.readScoringPolicy(settings, true);
+    const leadOperations = this.leadsService.readOperationsPolicy(
+      settings,
+      true,
+    );
     return {
       ...settings,
       memoryEnabled: policy.enabled,
       recentMessageLimit: policy.recentMessageLimit,
       lowConfidenceAction: policy.lowConfidenceAction,
       maxClarificationAttempts: policy.maxClarificationAttempts,
+      leadScoring,
+      leadOperations,
     };
   }
 

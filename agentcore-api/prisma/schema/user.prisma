@@ -14,6 +14,7 @@ model User {
   appointmentStaffProfiles          AppointmentStaff[]
   assignedWhatsAppConversations     WhatsAppConversation[]
   assignedVoiceCalls                VoiceCall[]
+  ownedLeads                        Lead[]                     @relation("LeadOwner")
   voiceAgentPresence                VoiceAgentPresence?
   authSessions                      AuthSession[]
   authOneTimeTokens                 AuthOneTimeToken[]

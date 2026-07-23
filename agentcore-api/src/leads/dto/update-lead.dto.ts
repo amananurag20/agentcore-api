@@ -4,9 +4,13 @@ import {
   IsArray,
   IsEmail,
   IsEnum,
+  IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
+  Min,
+  MinLength,
   ValidateIf,
 } from 'class-validator';
 import { LeadStatusDto } from './list-leads.dto';
@@ -47,4 +51,28 @@ export class UpdateLeadDto {
   @MaxLength(40, { each: true })
   @IsOptional()
   tags?: string[];
+
+  @ValidateIf((_object, value) => value !== null && value !== undefined)
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  @IsOptional()
+  scoreOverride?: number | null;
+
+  @ValidateIf((_object, value) => value !== null && value !== undefined)
+  @IsInt()
+  @Min(-100)
+  @Max(100)
+  @IsOptional()
+  manualScoreAdjustment?: number | null;
+
+  @ValidateIf(
+    (object: UpdateLeadDto) =>
+      object.scoreOverride !== undefined ||
+      object.manualScoreAdjustment !== undefined,
+  )
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  scoreChangeReason?: string;
 }

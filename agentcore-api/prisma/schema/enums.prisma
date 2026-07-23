@@ -123,6 +123,34 @@ enum LeadStatus {
   archived
 }
 
+enum LeadPriority {
+  low
+  medium
+  high
+  hot
+}
+
+enum LeadConsentStatus {
+  unknown
+  granted
+  denied
+  withdrawn
+}
+
+enum LeadAlertType {
+  hot_lead
+  sla_breach
+  assignment
+}
+
+enum LeadWebhookDeliveryStatus {
+  pending
+  processing
+  delivered
+  retrying
+  dead
+}
+
 enum LeadCaptureFieldType {
   text
   email

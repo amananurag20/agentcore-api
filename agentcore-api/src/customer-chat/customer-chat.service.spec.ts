@@ -476,7 +476,19 @@ describe('CustomerChatService automatic reply recovery', () => {
           restrictedCandidateCount: 0,
         }),
       } as never,
-      {} as never,
+      {
+        prepareConversationalCapture: jest.fn().mockReturnValue(null),
+        readScoringPolicy: jest.fn().mockReturnValue({
+          enabled: true,
+          aiEnabled: false,
+        }),
+        readOperationsPolicy: jest.fn().mockReturnValue({
+          autoAssign: 'none',
+          firstResponseMinutes: 30,
+          alertPriority: 'hot',
+          retentionDays: 0,
+        }),
+      } as never,
       prisma as never,
       {} as never,
       realtime as never,
@@ -604,7 +616,19 @@ describe('CustomerChatService automatic reply recovery', () => {
         get: jest.fn((_key: string, fallback: unknown) => fallback),
       } as never,
       knowledge as never,
-      {} as never,
+      {
+        prepareConversationalCapture: jest.fn().mockReturnValue(null),
+        readScoringPolicy: jest.fn().mockReturnValue({
+          enabled: true,
+          aiEnabled: false,
+        }),
+        readOperationsPolicy: jest.fn().mockReturnValue({
+          autoAssign: 'none',
+          firstResponseMinutes: 30,
+          alertPriority: 'hot',
+          retentionDays: 0,
+        }),
+      } as never,
       prisma as never,
       {} as never,
       { publish: jest.fn().mockResolvedValue(undefined) } as never,
@@ -749,7 +773,19 @@ describe('CustomerChatService automatic reply recovery', () => {
         get: jest.fn((_key: string, fallback: unknown) => fallback),
       } as never,
       knowledge as never,
-      {} as never,
+      {
+        prepareConversationalCapture: jest.fn().mockReturnValue(null),
+        readScoringPolicy: jest.fn().mockReturnValue({
+          enabled: true,
+          aiEnabled: false,
+        }),
+        readOperationsPolicy: jest.fn().mockReturnValue({
+          autoAssign: 'none',
+          firstResponseMinutes: 30,
+          alertPriority: 'hot',
+          retentionDays: 0,
+        }),
+      } as never,
       prisma as never,
       {} as never,
       { publish: jest.fn().mockResolvedValue(undefined) } as never,

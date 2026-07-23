@@ -1,30 +1,126 @@
 model Lead {
-  id              String                       @id @default(uuid())
-  organizationId  String                       @map("organization_id")
-  organization    Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  widgetConfigId  String?                      @map("widget_config_id")
-  widgetConfig    CustomerChatWidgetConfig?    @relation(fields: [widgetConfigId], references: [id], onDelete: SetNull)
-  status          LeadStatus                   @default(new)
-  name            String?
-  email           String?
-  normalizedEmail String?                      @map("normalized_email")
-  phone           String?
-  normalizedPhone String?                      @map("normalized_phone")
-  visitorId       String?                      @map("visitor_id")
-  fieldValues     Json                         @default("{}") @map("field_values")
-  metadata        Json                         @default("{}")
-  tags            String[]                     @default([])
-  notes           String?
-  lastActivityAt  DateTime                     @default(now()) @map("last_activity_at")
-  conversations   CustomerChatConversation[]
-  appointments    AppointmentBooking[]
-  createdAt       DateTime                     @default(now()) @map("created_at")
-  updatedAt       DateTime                     @updatedAt @map("updated_at")
+  id                 String                     @id @default(uuid())
+  organizationId     String                     @map("organization_id")
+  organization       Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  widgetConfigId     String?                    @map("widget_config_id")
+  widgetConfig       CustomerChatWidgetConfig?  @relation(fields: [widgetConfigId], references: [id], onDelete: SetNull)
+  ownerId            String?                    @map("owner_id")
+  owner              User?                      @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  assignedAt         DateTime?                  @map("assigned_at")
+  status             LeadStatus                 @default(new)
+  priority           LeadPriority               @default(low)
+  score              Int                        @default(0)
+  automaticScore     Int                        @default(0) @map("automatic_score")
+  scoreOverride      Int?                       @map("score_override")
+  qualification      Json                       @default("{}")
+  scoreUpdatedAt     DateTime?                  @map("score_updated_at")
+  firstResponseDueAt DateTime?                  @map("first_response_due_at")
+  firstRespondedAt   DateTime?                  @map("first_responded_at")
+  slaBreachedAt      DateTime?                  @map("sla_breached_at")
+  consentStatus      LeadConsentStatus          @default(unknown) @map("consent_status")
+  consentSource      String?                    @map("consent_source")
+  consentedAt        DateTime?                  @map("consented_at")
+  retentionExpiresAt DateTime?                  @map("retention_expires_at")
+  name               String?
+  email              String?
+  normalizedEmail    String?                    @map("normalized_email")
+  phone              String?
+  normalizedPhone    String?                    @map("normalized_phone")
+  visitorId          String?                    @map("visitor_id")
+  fieldValues        Json                       @default("{}") @map("field_values")
+  metadata           Json                       @default("{}")
+  tags               String[]                   @default([])
+  notes              String?
+  lastActivityAt     DateTime                   @default(now()) @map("last_activity_at")
+  conversations      CustomerChatConversation[]
+  appointments       AppointmentBooking[]
+  lifecycleEvents    LeadLifecycleEvent[]
+  alerts             LeadAlert[]
+  webhookDeliveries  LeadWebhookDelivery[]
+  createdAt          DateTime                   @default(now()) @map("created_at")
+  updatedAt          DateTime                   @updatedAt @map("updated_at")
 
   @@unique([organizationId, normalizedEmail])
   @@unique([organizationId, normalizedPhone])
   @@index([organizationId, status, lastActivityAt])
+  @@index([organizationId, priority, score])
+  @@index([organizationId, score, lastActivityAt])
   @@index([organizationId, name])
   @@index([widgetConfigId])
+  @@index([organizationId, ownerId, status])
+  @@index([organizationId, firstResponseDueAt, firstRespondedAt])
+  @@index([retentionExpiresAt])
   @@map("leads")
+}
+
+model LeadLifecycleEvent {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  leadId         String   @map("lead_id")
+  lead           Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  type           String
+  actorUserId    String?  @map("actor_user_id")
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([organizationId, createdAt])
+  @@index([leadId, createdAt])
+  @@map("lead_lifecycle_events")
+}
+
+model LeadAlert {
+  id             String        @id @default(uuid())
+  organizationId String        @map("organization_id")
+  leadId         String        @map("lead_id")
+  lead           Lead          @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  type           LeadAlertType
+  message        String
+  metadata       Json          @default("{}")
+  readAt         DateTime?     @map("read_at")
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  @@index([organizationId, readAt, createdAt])
+  @@index([leadId, type, createdAt])
+  @@map("lead_alerts")
+}
+
+model LeadWebhookEndpoint {
+  id              String                @id @default(uuid())
+  organizationId  String                @map("organization_id")
+  name            String
+  url             String
+  secretEncrypted String                @map("secret_encrypted")
+  enabled         Boolean               @default(true)
+  events          String[]              @default([])
+  deliveries      LeadWebhookDelivery[]
+  createdAt       DateTime              @default(now()) @map("created_at")
+  updatedAt       DateTime              @updatedAt @map("updated_at")
+
+  @@index([organizationId, enabled])
+  @@map("lead_webhook_endpoints")
+}
+
+model LeadWebhookDelivery {
+  id             String                    @id @default(uuid())
+  organizationId String                    @map("organization_id")
+  endpointId     String                    @map("endpoint_id")
+  endpoint       LeadWebhookEndpoint       @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  leadId         String?                   @map("lead_id")
+  lead           Lead?                     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  eventId        String                    @map("event_id")
+  eventType      String                    @map("event_type")
+  payload        Json
+  status         LeadWebhookDeliveryStatus @default(pending)
+  attempts       Int                       @default(0)
+  nextAttemptAt  DateTime                  @default(now()) @map("next_attempt_at")
+  deliveredAt    DateTime?                 @map("delivered_at")
+  responseStatus Int?                      @map("response_status")
+  lastError      String?                   @map("last_error")
+  createdAt      DateTime                  @default(now()) @map("created_at")
+  updatedAt      DateTime                  @updatedAt @map("updated_at")
+
+  @@unique([endpointId, eventId])
+  @@index([status, nextAttemptAt])
+  @@index([organizationId, createdAt])
+  @@map("lead_webhook_deliveries")
 }

@@ -1,13 +1,15 @@
 import { Module } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
+import { CryptoModule } from '../crypto/crypto.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { LeadsController } from './leads.controller';
 import { LeadsService } from './leads.service';
+import { LeadOperationsService } from './lead-operations.service';
 
 @Module({
-  imports: [AuditModule, PrismaModule],
+  imports: [AuditModule, CryptoModule, PrismaModule],
   controllers: [LeadsController],
-  providers: [LeadsService],
-  exports: [LeadsService],
+  providers: [LeadOperationsService, LeadsService],
+  exports: [LeadOperationsService, LeadsService],
 })
 export class LeadsModule {}

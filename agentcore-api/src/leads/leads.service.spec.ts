@@ -3,8 +3,13 @@ import {
   ConflictException,
   ForbiddenException,
 } from '@nestjs/common';
-import { LeadCaptureFieldMapping, LeadCaptureFieldType } from '@prisma/client';
+import {
+  LeadCaptureFieldMapping,
+  LeadCaptureFieldType,
+  LeadPriority,
+} from '@prisma/client';
 import type { AuthenticatedUser } from '../common/auth/authenticated-request';
+import { LeadStatusDto } from './dto/list-leads.dto';
 import { LeadsService } from './leads.service';
 
 describe('LeadsService', () => {
@@ -156,6 +161,154 @@ describe('LeadsService', () => {
     });
   });
 
+  it('captures contact details shared naturally during a conversation', () => {
+    expect(
+      service.prepareConversationalCapture(
+        'Please email me at Ada@example.com or call +91 98765 43210.',
+      ),
+    ).toEqual({
+      email: 'Ada@example.com',
+      normalizedEmail: 'ada@example.com',
+      phone: '+91 98765 43210',
+      normalizedPhone: '+919876543210',
+      fieldValues: {},
+    });
+  });
+
+  it('scores profile, attribution and intent with explainable reasons', () => {
+    const initial = service.calculateScore({
+      name: 'Ada Lovelace',
+      email: 'ada@example.com',
+      phone: '+919876543210',
+      fieldValues: { company_size: '51-200' },
+      metadata: {
+        pageUrl: 'https://example.com/pricing',
+        utmCampaign: 'summer',
+      },
+      qualification: {
+        signals: ['demo_interest', 'urgent_timeline'],
+      },
+    });
+
+    expect(initial.score).toBe(83);
+    expect(initial.priority).toBe(LeadPriority.hot);
+    expect(initial.qualification).toEqual(
+      expect.objectContaining({
+        signals: ['demo_interest', 'urgent_timeline'],
+        scoreVersion: 'hybrid_v2',
+      }),
+    );
+  });
+
+  it('keeps a manual score override while retaining the automatic score', () => {
+    const scored = service.calculateScore({
+      email: 'ada@example.com',
+      scoreOverride: 92,
+    });
+
+    expect(scored.automaticScore).toBe(15);
+    expect(scored.score).toBe(92);
+    expect(scored.priority).toBe(LeadPriority.hot);
+  });
+
+  it('applies a relative manual adjustment without locking automatic scoring', () => {
+    const scored = service.calculateScore({
+      email: 'ada@example.com',
+      qualification: { manualScoreAdjustment: 10 },
+    });
+
+    expect(scored.automaticScore).toBe(15);
+    expect(scored.score).toBe(25);
+    expect(scored.qualification).toEqual(
+      expect.objectContaining({ manualScoreAdjustment: 10 }),
+    );
+  });
+
+  it('decays old intent evidence using the configured half-life', () => {
+    const policy = service.readScoringPolicy({
+      leadScoring: { signalDecayDays: 30 },
+    });
+    const scored = service.calculateScore({
+      qualification: {
+        signals: ['demo_interest'],
+        signalEvidence: [
+          {
+            signal: 'demo_interest',
+            source: 'rules',
+            confidence: 1,
+            firstSeenAt: '2026-05-24T00:00:00.000Z',
+            lastSeenAt: '2026-05-24T00:00:00.000Z',
+          },
+        ],
+      },
+      policy,
+      evaluatedAt: new Date('2026-07-23T00:00:00.000Z'),
+    });
+
+    expect(scored.automaticScore).toBe(5);
+  });
+
+  it('uses per-widget priority thresholds', () => {
+    const policy = service.readScoringPolicy({
+      leadScoring: {
+        thresholds: { medium: 10, high: 20, hot: 30 },
+      },
+    });
+    const scored = service.calculateScore({
+      email: 'ada@example.com',
+      policy,
+    });
+
+    expect(scored.priority).toBe(LeadPriority.medium);
+  });
+
+  it('raises a lead score when high-intent conversation signals appear', async () => {
+    const transaction = {
+      lead: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'lead-a',
+          organizationId: 'org-a',
+          status: 'new',
+          name: null,
+          email: 'ada@example.com',
+          phone: null,
+          fieldValues: {},
+          metadata: {},
+          qualification: {},
+          scoreOverride: null,
+        }),
+        update: jest.fn().mockResolvedValue({ id: 'lead-a' }),
+      },
+    };
+
+    await service.recordConversationActivity(transaction as never, {
+      leadId: 'lead-a',
+      organizationId: 'org-a',
+      content:
+        'I need pricing and want to book a demo tomorrow. Budget is ₹100000.',
+      activityAt: new Date('2026-07-23T10:00:00Z'),
+    });
+
+    expect(transaction.lead.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'lead-a' },
+        data: expect.objectContaining({
+          score: 87,
+          priority: LeadPriority.hot,
+          qualification: expect.objectContaining({
+            signals: expect.arrayContaining([
+              'pricing_interest',
+              'demo_interest',
+              'booking_intent',
+              'urgent_timeline',
+              'budget_shared',
+            ]),
+          }),
+        }) as object,
+      }),
+    );
+  });
+
   it('updates an existing tenant lead matched by normalized email', async () => {
     const transaction = {
       $executeRaw: jest.fn().mockResolvedValue(1),
@@ -293,7 +446,8 @@ describe('LeadsService', () => {
 
   it('prevents organization users from listing another tenant leads', async () => {
     const user = {
-      id: 'user-a',
+      sub: 'user-a',
+      email: 'agent@example.com',
       orgId: 'org-a',
       roles: ['org_admin'],
     } as AuthenticatedUser;
@@ -357,7 +511,7 @@ describe('LeadsService', () => {
           roles: ['org_admin'],
         },
         'lead-a',
-        { status: 'new' },
+        { status: LeadStatusDto.new },
       ),
     ).rejects.toThrow(
       new BadRequestException(
